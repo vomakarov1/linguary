@@ -2721,3 +2721,64 @@ async def test_single_pass_fragment_findings_merges_candidates_deterministically
     assert "Everlost [place] -> Вечноземье" in client.requests[1].input_text
 
 
+async def test_part_divider_a2_simple_subtitle_without_candidates_stays_read_as_is() -> None:
+    """On A2, a <=3 word part subtitle without candidates gets GLOSSARY_ONLY only if it has non-core A2 words."""
+    part_one = make_analysis_section(
+        section_id="part-one",
+        title="PART ONE",
+        order=0,
+        texts=("PART ONE", "Afterlights"),
+    )
+    part_two = make_analysis_section(
+        section_id="part-two",
+        title="PART TWO",
+        order=1,
+        texts=("PART TWO", "In the Forest"),
+    )
+    ch1 = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=2,
+        texts=("Story text.",),
+    )
+    document = make_analysis_document((part_one, part_two, ch1))
+
+    empty_reply = analysis_reply(aliases=("b1", "b2"), candidates=[])
+    cand_reply = analysis_reply(
+        aliases=("b1", "b2"),
+        candidates=[
+            {
+                "source_text": "Forest",
+                "type": "place",
+                "suggested_translation": "Лес",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    uow = FakeUnitOfWork(document=document, book=make_book_record())
+    a2_scenario, _ = make_analyze_chapter(
+        uow, FakeLLMClient([empty_reply, empty_reply, cand_reply]), reader_level="a2"
+    )
+
+    res_one = await a2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-one"))
+    assert [i.treatment for i in res_one.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+
+    res_two_no_cand = await a2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-two"))
+    assert [i.treatment for i in res_two_no_cand.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    res_two_with_cand = await a2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-two"))
+    assert [i.treatment for i in res_two_with_cand.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+
+
+

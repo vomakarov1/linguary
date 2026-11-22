@@ -1378,5 +1378,34 @@ def test_validate_narrative_speaker_subject_anchor_must_intersect_quoted_dialogu
     assert len(resolved_facts) == 5
 
 
+def test_validate_narrative_speaker_subject_anchor_handles_straight_quotes_with_typographic_apostrophe():
+    aliases = {'b1': 'id-1'}
+    texts = {'id-1': '"Don’t move!" said Harry.'}
+    visible = {'b1': texts['id-1']}
+    scenes = (QuotedSceneResponse('b1', 'b1', 'Сцена с Гарри.', participants=('Harry',)),)
+
+    bad_anchor = QuotedSourceAnchorResponse('b1', 'said Harry')
+    bad_fact = QuotedContextFactResponse('f-bad', 'speaker', (bad_anchor,), bad_anchor, 'Harry', 'explicit')
+    with pytest.raises(AnalysisMergeError) as exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', context_facts=(bad_fact,), scenes=scenes),
+            aliases, texts, visible, ordered_block_ids=('id-1',),
+        )
+    assert exc.value.violation.rule_code == 'speaker_subject_anchor'
+    assert exc.value.violation.block_ids == ('id-1',)
+
+    good_fact = QuotedContextFactResponse(
+        'f-ok', 'speaker',
+        (QuotedSourceAnchorResponse('b1', 'said Harry'),),
+        QuotedSourceAnchorResponse('b1', '"Don’t move!"'),
+        'Harry', 'explicit',
+    )
+    _, resolved = validate_narrative_response(
+        NarrativeAnalysisResponse('Keep voice.', 'Summary.', context_facts=(good_fact,), scenes=scenes),
+        aliases, texts, visible, ordered_block_ids=('id-1',),
+    )
+    assert len(resolved) == 1
+
+
 
 

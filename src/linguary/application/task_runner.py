@@ -21,6 +21,7 @@ come from `linguary.application.retry_policy`, while app composition can substit
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
@@ -31,6 +32,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskError,
     TaskIdentity,
+    TaskStatus,
     TaskType,
 )
 
@@ -137,8 +139,34 @@ class TaskRunner:
         try:
             await handler(task)
         except Exception as error:  # any use case exception results in a failed task
+            current = await self._reload_task(task)
+            if current is not None and current.id == task.id and current.status is TaskStatus.SUCCEEDED:
+                return current
             return await self._save(task.fail(self._classify_error(error)))
         return await self._save(task.succeed())
+
+    async def _reload_task(self, task: ProcessingTask) -> ProcessingTask | None:
+        """Reads current persisted task state without creating or mutating rows."""
+        queue: object = self._queue
+        while hasattr(queue, "queue") and getattr(queue, "queue") is not None:
+            queue = getattr(queue, "queue")
+        for method_name, arg in (
+            ("get", task.id),
+            ("find_by_identity", task.identity),
+            ("_find", task.identity),
+        ):
+            method = getattr(queue, method_name, None)
+            if callable(method):
+                result = method(arg)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+        store = getattr(queue, "_store", None)
+        if store is not None:
+            find = getattr(store, "_find", None)
+            if callable(find):
+                return await asyncio.to_thread(find, task.identity)
+        return None
 
     async def _save(self, task: ProcessingTask) -> ProcessingTask:
         """Persists the completed state of the task."""

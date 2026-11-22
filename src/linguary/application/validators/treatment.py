@@ -30,11 +30,70 @@ _HINT_STOPWORDS = frozenset(
         "are", "was", "were", "been", "being", "have", "has", "had",
         "does", "did", "will", "would", "shall", "should", "can", "could",
         "may", "might", "must",
-        "one", "ones", "some", "any", "all", "very", "too", "also",
-        "out", "off", "over", "under", "here", "there", "where", "when",
+        "one", "ones", "two", "some", "any", "all", "very", "too", "also",
+        "out", "off", "over", "under", "down", "back", "here", "there", "where", "when",
+        "just", "much", "more", "most", "only", "even", "still", "now", "well",
+        "good", "long", "time", "way", "man", "day", "thing",
+        "take", "took", "make", "made", "get", "got", "go", "went",
+        "come", "came", "give", "gave", "keep", "kept", "put", "set",
+        "say", "said", "look", "see", "saw",
         "something", "someone", "somebody", "anything", "anyone", "oneself",
     }
 )
+
+_IRREGULAR_FORM_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("fling", "flung"),
+    ("creep", "crept"),
+    ("swear", "swore", "sworn"),
+    ("wear", "wore", "worn"),
+    ("bleed", "bled"),
+    ("catch", "caught"),
+    ("tear", "tore", "torn"),
+    ("buy", "bought"),
+    ("die", "died", "dying"),
+    ("mouse", "mice"),
+    ("knife", "knives"),
+    ("bring", "brought"),
+    ("think", "thought"),
+    ("teach", "taught"),
+    ("fight", "fought"),
+    ("seek", "sought"),
+    ("freeze", "froze", "frozen"),
+    ("break", "broke", "broken"),
+    ("choose", "chose", "chosen"),
+    ("speak", "spoke", "spoken"),
+    ("steal", "stole", "stolen"),
+    ("cling", "clung"),
+    ("sting", "stung"),
+    ("swing", "swung"),
+    ("kneel", "knelt"),
+    ("leap", "leapt"),
+    ("sweep", "swept"),
+    ("weep", "wept"),
+    ("flee", "fled"),
+    ("slide", "slid"),
+    ("strike", "struck"),
+    ("shrink", "shrank", "shrunk"),
+    ("sink", "sank", "sunk"),
+    ("spring", "sprang", "sprung"),
+    ("hang", "hung"),
+    ("dig", "dug"),
+    ("spin", "spun"),
+    ("stick", "stuck"),
+    ("wind", "wound"),
+    ("bind", "bound"),
+    ("shoot", "shot"),
+    ("child", "children"),
+    ("foot", "feet"),
+    ("tooth", "teeth"),
+    ("goose", "geese"),
+)
+
+_IRREGULAR_LEMMA: dict[str, str] = {
+    form: group[0]
+    for group in _IRREGULAR_FORM_GROUPS
+    for form in group
+}
 
 
 def treatment_violation(
@@ -105,12 +164,13 @@ def _normalize_match_text(text: str) -> str:
 
 def _word_stems(word: str) -> set[str]:
     stems = {word}
+    if word in _IRREGULAR_LEMMA:
+        stems.add(_IRREGULAR_LEMMA[word])
     if len(word) > 4 and word.endswith(("ies", "ied")):
         stems.add(word[:-3] + "y")
         stems.add(word[:-3])
-    if len(word) > 5 and word.endswith("ily"):
-        stems.add(word[:-3] + "y")
-        stems.add(word[:-3])
+    if len(word) > 4 and word.endswith("ying"):
+        stems.add(word[:-4] + "ie")
     if len(word) > 5 and word.endswith("ing"):
         base = word[:-3]
         stems.add(base)
@@ -129,12 +189,13 @@ def _word_stems(word: str) -> set[str]:
     if len(word) > 5 and word.endswith("est"):
         stems.add(word[:-3])
         stems.add(word[:-2])
-    if len(word) > 4 and word.endswith("ly"):
-        stems.add(word[:-2])
     if len(word) > 3 and word.endswith("s"):
         stems.add(word[:-1])
     if len(word) > 3 and word.endswith(("e", "y")):
         stems.add(word[:-1])
+    for stem in tuple(stems):
+        if stem in _IRREGULAR_LEMMA:
+            stems.add(_IRREGULAR_LEMMA[stem])
     return {stem for stem in stems if len(stem) >= 3}
 
 
@@ -153,10 +214,7 @@ def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...])
         words = _WORD_RE.findall(text)
         text_words.update(words)
         for candidate in candidates:
-            if len(candidate) >= 3:
-                if re.search(rf"(?<!\w){re.escape(candidate)}", text):
-                    return True
-            elif candidate in words:
+            if re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", text):
                 return True
     content_text_words = {
         word for word in text_words if len(word) >= 3 and word not in _HINT_STOPWORDS
@@ -173,12 +231,6 @@ def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...])
     ]
     for hint_word in hint_words:
         if hint_word in content_text_words:
-            return True
-        if len(hint_word) >= 4 and any(
-            text_word.startswith(hint_word)
-            or (len(text_word) >= 4 and hint_word.startswith(text_word))
-            for text_word in content_text_words
-        ):
             return True
         if _word_stems(hint_word) & text_stems:
             return True

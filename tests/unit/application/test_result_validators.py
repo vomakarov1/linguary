@@ -1410,6 +1410,53 @@ def test_mixed_block_accepts_hint_matching_glossary_only_segment_including_infle
     assert len(result_hurry.glossary_hints) == 2
 
 
+def test_mixed_block_hint_matching_handles_irregular_forms_and_rejects_false_positives() -> None:
+    from linguary.application.validators.treatment import _hint_matches_glossary_texts
+
+    # Irregular/suppletive verb and noun forms match.
+    assert _hint_matches_glossary_texts("to fling", ("He flung the door open.",))
+    assert _hint_matches_glossary_texts("to catch", ("She caught the ball.",))
+    assert _hint_matches_glossary_texts("to tear", ("He tore the letter.",))
+    assert _hint_matches_glossary_texts("to die", ("The fire died down.",))
+    assert _hint_matches_glossary_texts("knife", ("Sharp knives lay on the table.",))
+    assert _hint_matches_glossary_texts("mouse", ("Two mice ran away.",))
+
+    # No right-boundary-free substring match or derivational -ly confusion.
+    assert not _hint_matches_glossary_texts("act", ("He actually knew the truth.",))
+    assert not _hint_matches_glossary_texts("hard", ("She could hardly breathe.",))
+
+    # Common high-frequency stopword ("took") in TRANSLATE hint must not match GLOSSARY_ONLY span.
+    unit, block = _segmented(
+        ("He took the money from the drawer.", " She took a breath."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, "Он взял деньги из ящика."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="took the money", translation="взял деньги"),),
+    )
+    message = str(rejection(payload, unit=unit))
+    assert (
+        f"для блока {block.id} ни одна словарная подсказка не относится к сегменту GLOSSARY_ONLY"
+        in message
+    )
+
+    # Mixed block with irregular GLOSSARY_ONLY hint passes validation.
+    unit_fling, block_fling = _segmented(
+        ("Clear sentence.", " He flung the coat aside."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+    )
+    payload_fling = _segmented_response(
+        block_fling,
+        ((1, "Ясное предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="to fling", translation="швырнуть"),),
+    )
+    (result_fling,) = validate(payload_fling, unit=unit_fling)
+    assert result_fling.glossary_hints[0].original == "to fling"
+
+
 def test_footnote_markers_isolated_to_segment_range() -> None:
     """A `[^N]` marker is kept only in the segment whose span contains that reference."""
     left = "See note.1"

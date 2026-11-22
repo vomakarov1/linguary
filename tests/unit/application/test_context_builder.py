@@ -3828,5 +3828,32 @@ def test_p5_t3_note_budget_split_a2_calibration_antispoiler_and_summary() -> Non
     assert ped_a2.count("Present Simple + for + длительность") == 1
 
 
+def test_non_staged_a2_summary_prompts_align_with_validate_a2_summary_rules() -> None:
+    from linguary.application.context_builder import (
+        _FRAGMENT_SUMMARY_A2,
+        _WHOLE_CHAPTER_SUMMARY_A2,
+    )
+
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    for text in (
+        _WHOLE_CHAPTER_SUMMARY_A2.format(source_language="en"),
+        _FRAGMENT_SUMMARY_A2.format(source_language="en"),
+        whole,
+        fragment,
+    ):
+        assert "точка с запятой «;»" in text
+        assert "are lost" in text
+        assert "At the end, a quote from [Author]'s book explains..." in text
+
+
 
 

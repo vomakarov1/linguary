@@ -131,6 +131,10 @@ _NON_CORE_OVERRIDE: frozenset[str] = frozenset({
     "screamed",
     "sob",
     "sobbed",
+    "presently",
+    "deadly",
+    "shortly",
+    "willing",
 })
 
 _SUFFIX_FALSE_POSITIVES: frozenset[str] = frozenset({
@@ -224,16 +228,16 @@ caught children chose chosen came crept
 dealt dug drank drawn dreamt drew driven drove drunk
 eaten
 fallen fed fell felt feet flew flown forgot forgotten forgave forgiven fought found froze frozen
-gave geese gone got gotten grew grown
+gave geese given gone got gotten grew grown
 heard held hid hidden hung
 kept knew known knives
 laid lain learnt leaves led lent lit lives loaves lost
 made meant men met mice
 paid people
-ran rang ridden risen rose rung
+ran rang ridden risen rode rose rung
 said sang sank sat saw seen sent shaken shelves shone shook shot shown
 shrank shrunk slept slid smelt sold spelt spoke spoken spent spilt spun spoilt
-stood stole stolen struck stuck stung swam swept swore sworn swum swung
+stood stole stolen struck stuck stung sung sunk swam swept swore sworn swum swung
 taken taught teeth thieves thought threw thrown told took tore torn
 understood
 went woke woken women won wore worn wrote written wives wolves
@@ -286,7 +290,7 @@ complain complete confirm confuse connect consider contact contain continue
 control cook copy correct cost cough count cover crack crash crawl create cross
 cry cure cut cycle
 damage dance dare date deal decide decorate decrease defend delay deliver depend
-describe deserve design destroy develop die dig direct disagree disappear
+describe design destroy develop die dig direct disagree disappear
 disappoint discover discuss dislike dive divide drag draw dream dress drink drive
 drop drown dry
 earn eat edit email employ empty encourage end enjoy enter entertain escape
@@ -310,11 +314,11 @@ offer open operate order organize organise owe own
 pack paint park pass paste pat pause pay peel perform permit phone photograph
 pick picnic place plan plant play please plug point polish pop pour practice
 practise praise pray predict prefer prepare present press pretend prevent print
-produce promise pronounce protect prove provide publish pull pump punch punish
+produce promise pronounce protect prove provide publish pull pump punch
 push put
 question queue quit
 race rain raise reach react read realize realise receive recognize recognise
-recommend record recover reduce refuse regret relax release remain remember
+record reduce refuse regret relax release remain remember
 remind remove rent repair repeat replace reply report request rescue research
 reserve respect respond rest result return review ride ring rise risk rob rock
 roll row rub ruin rule run rush
@@ -322,8 +326,8 @@ sail save say scare score search seat see seem select sell send sense separate
 serve set settle shake share shave shine shoot shop shout show shut sign signal
 sing sink sit skate ski skip sleep slice slide slip slow smell smile smoke snow
 solve sort sound speak spell spend spill spin split spoil spread stand start state
-stay steal step stick stop store study succeed suffer suggest suit supply support
-surf surprise surround switch
+stay steal step stick stop store study succeed suggest suit supply support
+surf surprise switch
 take talk tap taste teach tear telephone tell test text thank think throw tidy tie
 tip tire touch tour trade train translate transport travel treat trick trip trust
 try turn type
@@ -358,14 +362,14 @@ circle circus citizen city class classmate classroom cleaner climate clinic
 clock clothes clothing cloud club coach coast coat code coffee coin cold
 colleague collection college color colour comb comedy comfort comment
 communication community company comparison competition complaint computer concert
-conclusion condition confidence connection contact content contest continent
+condition connection contact content contest continent
 contract control conversation cook cookie cooking copy corner cost cottage
 cotton cough counter country countryside couple course court cousin cover cow
 cream credit crew crime crowd crown cry culture cup cupboard curtain cushion
 customer cut cycle
 dad daddy damage dance dancer danger dark data date daughter day deal death
 decision degree delay delivery dentist department description desert design
-designer desk dessert destination detail development device dialogue diary
+designer desk dessert detail development device dialogue diary
 dictionary diet difference difficulty dinner direction director dirt discount
 discussion disease dish display distance doctor document dog doll dollar donkey
 door dot doubt dozen drama drawer drawing dream dress drink driver drop drug
@@ -374,12 +378,12 @@ eagle ear earth earthquake east edge edition editor education effect effort egg
 elbow election electricity element elephant elevator email emergency emotion
 employee employer employment end enemy energy engine engineer entrance entry
 envelope environment episode equipment error escape essay euro eve evening event
-exam examination example exception exchange excitement excuse exercise exhibition
+exam examination example exchange excitement excuse exercise exhibition
 exit expense experience experiment expert explanation expression extra eye
 face fact factory failure fair fairy fall family fan fantasy farm farmer farming
 fashion fat father fault favor favour fear feather feature fee feeling fellow
 female fence ferry festival fever fiction field fight figure file film final
-finance finger finish fire firefighter fireplace firm fish fisherman fishing fit
+finger finish fire firefighter fireplace firm fish fisherman fishing fit
 fitness flag flash flat flavor flavour flight float flood floor flour flow flower
 flu flute fly focus fog food fool foot football force forehead forest fork form
 format forward fox frame freedom freezer fridge friend friendship frog front frost
@@ -389,7 +393,7 @@ general genius gentleman geography geometry ghost giant gift giraffe girl
 girlfriend glass glasses globe glove glue goal goat god gold golf good goodbye
 goods goose government grade graduate grammar grandad grandchild granddaughter
 grandfather grandma grandmother grandpa grandparent grandson grape graph grass
-grave gravity gray green greengrocer greenhouse greeting grey grill grocery ground
+grave gray green greengrocer greenhouse greeting grey grill grocery ground
 group growth guard guess guest guide guitar gun guy gym
 habit hair haircut hairdresser half hall hallway ham hammer hand handbag
 handkerchief handle handwriting happiness harbor harbour harm hat hate head
@@ -399,7 +403,7 @@ hockey hold hole holiday home homework honey honeymoon honor honour hook hope
 horror horse hospital host hostel hotel hour house housework hug human humor
 humour hunger hunt hunter hurry hurt husband
 ice idea ideal illness image imagination impact importance impression improvement
-inch income increase independence individual info information ingredient injury
+inch income increase individual info information ingredient injury
 ink inn insect inside inspector instruction instructor instrument insurance
 intelligence interest internet interview introduction invention inventor
 invitation iron island item
@@ -412,7 +416,7 @@ laundry law lawyer lead leader leaf leather leave left leg lemon lemonade length
 lesson letter lettuce level library license licence lid life lift light lighter
 lightning limit line link lion lip liquid list liter litre living load local
 location lock log look lorry loss lot love luck luggage lunch lung
-machine magazine magic mail mailbox main make makeup male mall man management
+machine magazine magic mail mailbox main make makeup male mall man
 manager mango map marathon march mark market marriage mask mass master mat match
 mate material math mathematics maths matter maximum mayor meal meaning measure
 meat mechanic medal media medicine medium meeting melon member memory menu mess
@@ -447,7 +451,7 @@ pyjamas pyramid
 quality quarter queen question queue quiet quiz
 rabbit race racing rack radio rail railroad railway rain rainbow raincoat range
 rat rate raw ray reach reader reading reason recipe record recorder recording red
-refrigerator region regret relation relative relaxation release relief religion
+refrigerator region regret relation relative relaxation release religion
 remark reminder remote rent repair repeat reply report reporter request rescue
 research reservation reserve respect response rest restaurant result return
 review ride rider right ring rise risk river road roast robot rock rocket role roll granny
@@ -478,7 +482,7 @@ table tablespoon tablet tag tail tailor tale talent talk tank tap tape target ta
 taste tax taxi tea teacher teaching team tear teaspoon technical technician
 technology teen teenager teeth telephone telescope television temperature temple
 tennis tent term test text textbook theater theatre theme thermometer thief thing
-thinking thirst thought thread threat throat thumb thunder tick ticket tide tie
+thinking thirst thought thread throat thumb thunder tick ticket tide tie
 tiger tile time timetable tin tip tire title toast today toe toilet tomato tomorrow
 ton tone tongue tonight tool tooth toothbrush toothpaste top topic torch total
 touch tour tourist towel tower town toy track trade traffic train trainer
@@ -486,7 +490,7 @@ training tram transport travel traveler traveller tray treasure treat tree trip
 truck true trunk trust truth try tube tulip tummy tuna tune tunnel turkey turn
 turtle tutor tv twin twist type
 umbrella uncle underwear unit university unknown upper upset urban use user
-vacation valley van vanilla variety vase vegetable vehicle version vest vet
+vacation valley van vanilla vase vegetable vehicle version vest vet
 victory video view viewer village violin virus visa vision visit visitor vitamin
 voice volleyball volume volunteer vote vowel
 wait waiter waitress wake walk walker wall wallet want war wardrobe warmth
@@ -504,7 +508,7 @@ _ADJECTIVES: frozenset[str] = _words("""
 able afraid african alive alone aloud amazing american ancient angry annual arab
 arabic asian asleep attractive automatic available average awake awful
 bad bald basic beautiful beige best better big bitter black blank blind blond
-blonde blue boiling boring born bottom brave brief bright brilliant british
+blonde blue boiling bored boring born bottom brave brief bright brilliant british
 broken brown busy
 calm canadian careful careless central certain cheap cheerful chinese clean clear
 clever close closed cloudy cold colorful colourful comfortable common complete
@@ -513,12 +517,12 @@ cultural curious current cute
 daily damaged dangerous dark dead deaf dear deep definite delicious delighted
 different difficult digital direct dirty disabled disappointed dishonest distant
 double downtown dressed dried drunk dry dull dumb dutch
-early eastern easy economic educational electric electrical electronic elementary
-emotional empty energetic english enormous equal european even everyday exact
+early eastern easy economic educational electric electrical electronic
+emotional empty energetic english equal european even everyday exact
 excellent excited exciting expensive experienced extra
 fair false familiar famous fantastic far fashionable fast fat favorite favourite
 female few final financial fine firm first fit fixed flat flying foggy foreign
-formal former fortunate forward free freezing french frequent fresh friendly
+formal former forward free freezing french frequent fresh friendly
 frightened frightening front frozen full fun funny further future
 general gentle german giant glad global golden good grand great green grey gray
 handsome handy happy hard healthy heavy helpful hidden high historic historical
@@ -549,7 +553,7 @@ southern spanish spare special spicy spoken sporting square standard steep stick
 still straight strange strong stuck stupid stylish successful sudden sunny super
 sure surprised surprising sweet
 tall tasty technical teen terrible thick thin thirsty tidy tight tiny tired tiring
-top total true typical
+top total true
 ugly uncomfortable underground unhappy uniform united unknown unpleasant unusual
 upset upstairs useful useless usual
 various vegetarian very warm weak weekly welcome well western wet white whole wide
@@ -565,18 +569,18 @@ _ADVERBS: frozenset[str] = _words("""
 abroad again ago ahead almost alone already also always anymore anyway anywhere
 apart around aside away
 back backward backwards before behind below beside besides best better between
-downstairs early else elsewhere enough especially even eventually ever everywhere
+downstairs early else elsewhere enough especially even ever everywhere
 far fast finally forever forward forwards
-gradually here however
+here however
 indoors inside instead just
-lately later least less literally
-mainly maybe meanwhile more
+lately later least less
+mainly maybe more
 near nearby nearly never next now nowhere
-off often once online only otherwise out outdoors outside over overnight overseas
+off often once online only out outdoors outside over overnight overseas
 partly perhaps pretty probably quite
 rarely rather really right
-seldom since somehow sometimes somewhat somewhere soon south still straight
-then there therefore today together tomorrow tonight too truly twice
+since somehow sometimes somewhere soon south still straight
+then there today together tomorrow tonight too truly twice
 upstairs upward upwards usually
 very
 well west worldwide worse worst
@@ -595,7 +599,7 @@ design designer dessert detective dialogue diamond diet digital director doctor
 document dollar drama dragon
 economic economy effect electric electronic elephant email energy engineer euro
 exam express extra
-factory family fan fantasy fashion festival film final finance firm fitness flag
+factory family fan fantasy fashion festival film final firm fitness flag
 flash focus football format
 galaxy garage gas general genius geography global golf gram group guide guitar gym
 helicopter hero history hobby hockey hospital hostel hotel
@@ -925,6 +929,40 @@ def _canonical_reported_word(norm: str) -> str:
     return norm
 
 
+_TITLE_WORDS: frozenset[str] = frozenset({
+    "mr", "mrs", "ms", "miss", "dr", "prof", "st", "sir", "madam",
+})
+
+
+def _is_title_case_phrase_token(
+    text: str,
+    matches: tuple[re.Match[str], ...],
+    idx: int,
+    known_tokens: frozenset[str],
+) -> bool:
+    """Return True if a mid-sentence capitalized token belongs to an all-Title-Case phrase."""
+    seg_start = idx
+    while seg_start > 0 and not _is_sentence_or_speech_start(text, matches[seg_start].start()):
+        seg_start -= 1
+    if idx <= seg_start:
+        return False
+    prev_match = matches[idx - 1]
+    sep = text[prev_match.end():matches[idx].start()]
+    if not sep or not sep.isspace():
+        return False
+    prev_norm = _normalize_token(prev_match.group(0))
+    if prev_norm in _TITLE_WORDS or _is_known_name(prev_norm, known_tokens):
+        return False
+    seg_end = idx + 1
+    while seg_end < len(matches) and not _is_sentence_or_speech_start(text, matches[seg_end].start()):
+        seg_end += 1
+    for seg_match in matches[seg_start:seg_end]:
+        token = seg_match.group(0)
+        if len(token) > 1 and any(ch.isalpha() for ch in token) and not token[0].isupper():
+            return False
+    return True
+
+
 def non_core_a2_words(
     text: str,
     *,
@@ -933,8 +971,9 @@ def non_core_a2_words(
     """Return unique words in `text` outside the CEFR A1-A2 core, in order of appearance.
 
     Skips numbers, uppercase Roman numerals, single-character letters, tokens from
-    `known_names`, and capitalized tokens not starting a sentence or direct speech.
-    Hyphenated compounds are checked part by part.
+    `known_names`, and capitalized tokens not starting a sentence or direct speech
+    (except ALL CAPS words and Title Case phrases). Hyphenated compounds are checked
+    part by part.
     """
     known_tokens = _known_name_tokens(known_names)
     found: list[str] = []
@@ -948,16 +987,10 @@ def non_core_a2_words(
             continue
         if _is_known_name(norm, known_tokens):
             continue
-        if raw[0].isupper():
-            if not _is_sentence_or_speech_start(text, match.start()):
-                continue
+        if raw[0].isupper() and not (len(raw) > 1 and raw.isupper()):
             if (
-                not raw.isupper()
-                and idx + 1 < len(matches)
-                and matches[idx + 1].group(0)[0].isupper()
-                and not matches[idx + 1].group(0).isupper()
-                and text[match.end():matches[idx + 1].start()] != ""
-                and text[match.end():matches[idx + 1].start()].isspace()
+                not _is_sentence_or_speech_start(text, match.start())
+                and not _is_title_case_phrase_token(text, matches, idx, known_tokens)
             ):
                 continue
 

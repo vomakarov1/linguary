@@ -732,19 +732,22 @@ class SqlAlchemyTaskRepository:
         self._session.flush()
 
     def save(self, task: ProcessingTask) -> None:
-        """Save state with unchanged identity unless the task has been superseded."""
+        """Save state with unchanged identity unless superseded or already succeeded."""
         row = mapping.to_task_row(task, datetime.now(UTC))
+        where_clauses = [
+            ProcessingTaskRow.id == task.id,
+            ProcessingTaskRow.book_id == task.book_id,
+            ProcessingTaskRow.task_type == task.task_type.value,
+            ProcessingTaskRow.scope_id == task.scope_id,
+            ProcessingTaskRow.operation_id == task.operation_id,
+            ProcessingTaskRow.policy_version == task.policy_version,
+            ProcessingTaskRow.status != TaskStatus.SUPERSEDED.value,
+        ]
+        if task.status is not TaskStatus.SUPERSEDED:
+            where_clauses.append(ProcessingTaskRow.status != TaskStatus.SUCCEEDED.value)
         result = self._session.execute(
             update(ProcessingTaskRow)
-            .where(
-                ProcessingTaskRow.id == task.id,
-                ProcessingTaskRow.book_id == task.book_id,
-                ProcessingTaskRow.task_type == task.task_type.value,
-                ProcessingTaskRow.scope_id == task.scope_id,
-                ProcessingTaskRow.operation_id == task.operation_id,
-                ProcessingTaskRow.policy_version == task.policy_version,
-                ProcessingTaskRow.status != TaskStatus.SUPERSEDED.value,
-            )
+            .where(*where_clauses)
             .values(
                 status=row.status,
                 attempts=row.attempts,
@@ -778,6 +781,8 @@ class SqlAlchemyTaskRepository:
                 if task.status is TaskStatus.SUPERSEDED:
                     return
                 raise PersistenceError(f"задача {task.id} вытеснена другой операцией")
+            if stored.status == TaskStatus.SUCCEEDED.value and task.status is not TaskStatus.SUPERSEDED:
+                return
             raise PersistenceError(f"задача {task.id} отсутствует в хранилище")
         self._session.flush()
 

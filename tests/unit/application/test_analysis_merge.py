@@ -3494,6 +3494,80 @@ def test_normalize_a2_it_is_time_and_a2_core_vocab_promotion_and_demotion_guard(
     assert without_known.treatment_plan[0].treatment is BlockTreatment.GLOSSARY_ONLY
 
 
+def test_dialogue_quotes_and_a2_normalization_accept_straight_quotes_with_typographic_apostrophe() -> None:
+    from linguary.application.analysis_merge import _DIALOGUE_QUOTES, normalize_a2_dialogue_response
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse
+
+    assert [m.group(0) for m in _DIALOGUE_QUOTES.finditer('"Don’t move!" said Harry.')] == ['"Don’t move!"']
+    assert [m.group(0) for m in _DIALOGUE_QUOTES.finditer('"I’m ready."')] == ['"I’m ready."']
+
+    blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text='"Don’t move!" said Harry.'),
+        make_analysis_block(section_id=SECTION_ID, order=1, text='"I’m ready, if you come now."'),
+        make_analysis_block(section_id=SECTION_ID, order=2, text='"I’m ready."'),
+    )
+    aliases = {"b1": blocks[0].id, "b2": blocks[1].id, "b3": blocks[2].id}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload,
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+        known_names=("Harry",),
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+
+
+def test_split_instruction_sentences_splits_after_terminal_punctuation_before_closing_quote() -> None:
+    from linguary.application.analysis_merge import _split_instruction_sentences
+
+    assert _split_instruction_sentences("Передавать «Wait.» Обращение на «вы» сохранять.") == (
+        "Передавать «Wait.»",
+        "Обращение на «вы» сохранять.",
+    )
+    assert _split_instruction_sentences("Передавать “Wait!” Сохранять короткий ритм.") == (
+        "Передавать “Wait!”",
+        "Сохранять короткий ритм.",
+    )
+    assert _split_instruction_sentences('Передавать "Wait?" Сохранять короткий ритм.') == (
+        'Передавать "Wait?"',
+        "Сохранять короткий ритм.",
+    )
+    assert _split_instruction_sentences("Передавать «Wait.» без сглаживания.") == (
+        "Передавать «Wait.» без сглаживания.",
+    )
+
+    expected = block_ids(2)
+    merged = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions="Передавать «Wait.» Обращение на «вы» сохранять.",
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:],
+            translation_instructions="Обращение на «вы» сохранять.",
+        ),
+        expected=expected,
+    )
+    assert merged.translation_instructions.splitlines() == [
+        "1. Передавать «Wait.»",
+        "2. Обращение на «вы» сохранять.",
+    ]
+
+
 
 
 

@@ -4655,4 +4655,330 @@ async def test_staged_a2_normalization_passes_known_names_fresh_cached_and_assem
     assert [i.treatment for i in cached_res.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
 
 
+async def test_staged_a2_vocab_known_names_excludes_terms_fictional_concepts_and_translations(stored_book):
+    """A2 known_names includes only PERSON/PLACE/ORGANIZATION source forms + scene participants, excluding TERM, FICTIONAL_CONCEPT, and translations."""
+    import json
+    from linguary.application.use_cases.analyze_chapter import (
+        _a2_vocab_known_names_from_glossary,
+        _a2_vocab_known_names_with_narrative,
+    )
+    from linguary.domain import ConceptType, GlossaryCandidate, TermConcept, TermStatus, TermVariant
+
+    # Unit checks on helpers
+    acc = (
+        GlossaryCandidate(
+            id='c1', analysis_id='a1', source_text='Allie', type=ConceptType.PERSON,
+            suggested_translation='Элли', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c2', analysis_id='a1', source_text='Everlost', type=ConceptType.PLACE,
+            suggested_translation='Вечноземье', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c3', analysis_id='a1', source_text='Afterlights', type=ConceptType.FICTIONAL_CONCEPT,
+            suggested_translation='Послесветы', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c4', analysis_id='a1', source_text='skinjacker', type=ConceptType.TERM,
+            suggested_translation='скинджекер', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+    )
+    concepts = (
+        TermConcept(
+            id='t1', book_id=BOOK_ID, type=ConceptType.ORGANIZATION, canonical_source_text='Gringotts',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t1', 'ru', 'Гринготтс', TermStatus.APPROVED),),
+        ),
+        TermConcept(
+            id='t2', book_id=BOOK_ID, type=ConceptType.TERM, canonical_source_text='deadspot',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t2', 'ru', 'мёртвая точка', TermStatus.APPROVED),),
+        ),
+    )
+    vocab_names = _a2_vocab_known_names_from_glossary(acc, concepts, ())
+    assert vocab_names == ('Allie', 'Everlost', 'Gringotts')
+    assert 'Afterlights' not in vocab_names
+    assert 'skinjacker' not in vocab_names
+    assert 'deadspot' not in vocab_names
+    assert 'Элли' not in vocab_names
+    assert 'Гринготтс' not in vocab_names
+
+    # Staged A2 end-to-end check: skinjacker (TERM) and Afterlights (FICTIONAL_CONCEPT) still lift READ_AS_IS -> GLOSSARY_ONLY,
+    # while Allie (PERSON) stays READ_AS_IS.
+    _, uow, _ = stored_book
+    blocks = (
+        _block(0, 'He is a skinjacker.'),
+        _block(1, 'Afterlights live here.'),
+        _block(2, 'Allie is here.'),
+    )
+    _store(uow, blocks)
+
+    nar_raw = json.loads(narrative(('b1', 'b2', 'b3')).content)
+    nar_raw['scenes'][0]['participants'] = ['Allie']
+    nar_raw['glossary_candidates'] = [
+        dict(
+            source_text='Allie', type='person', suggested_translation='Элли',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+        dict(
+            source_text='Afterlights', type='fictional_concept', suggested_translation='Послесветы',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+        dict(
+            source_text='skinjacker', type='term', suggested_translation='скинджекер',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+    ]
+    ped_reply = pedagogical(
+        ('b1', 'b2', 'b3'),
+        summary='Allie is here.',
+        treatment_plan=[
+            dict(source_block_id='b1', treatment='READ_AS_IS'),
+            dict(source_block_id='b2', treatment='READ_AS_IS'),
+            dict(source_block_id='b3', treatment='READ_AS_IS'),
+        ],
+    )
+    ctx = builder('a2')
+    result = await scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(nar_raw), ped_reply]),
+        context=ctx,
+    )(COMMAND)
+    assert [i.treatment for i in result.analysis.treatment_plan.items] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # Single-pass A2 (_request_analysis) also adds scenes[].participants and excludes TERM/FICTIONAL_CONCEPT.
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        GlossaryCandidateResponse,
+        QuotedContentPlanResponse,
+        QuotedSceneResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.application.ports.llm import LLMResponse
+
+    single_blocks = (
+        _block(0, 'Hagrid is here.'),
+        _block(1, 'He is a skinjacker.'),
+    )
+    _store(uow, single_blocks)
+
+    class SinglePassSceneClient:
+        async def generate(self, request):
+            return LLMResponse(
+                provider='fake',
+                model='fake',
+                payload=ChapterAnalysisResponse(
+                    translation_instructions='Keep tone.',
+                    chapter_summary='Hagrid is here.',
+                    glossary_candidates=(
+                        GlossaryCandidateResponse(
+                            source_text='skinjacker',
+                            type=ConceptType.TERM,
+                            suggested_translation='скинджекер',
+                            confidence=0.95,
+                            model_flagged_review=False,
+                        ),
+                    ),
+                    treatment_plan=(
+                        TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),
+                        TreatmentPlanItemResponse('b2', BlockTreatment.READ_AS_IS),
+                    ),
+                    content_plan=QuotedContentPlanResponse(
+                        scenes=(
+                            QuotedSceneResponse(
+                                start_block_id='b1',
+                                end_block_id='b2',
+                                summary='Хагрид здесь.',
+                                location='Дом',
+                                participants=('Hagrid',),
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+    single = await AnalyzeChapter(
+        unit_of_work=uow,
+        llm_client=SinglePassSceneClient(),
+        language_detector=FakeLanguageDetector(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        glossary_confidence_threshold=.8,
+        context_builder=ctx,
+        staged_analysis=False,
+    )(COMMAND)
+    assert [i.treatment for i in single.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+
+
+async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh_and_v7(stored_book):
+    """cached_frag skips V7 name policy checks under frozen V6 conditions (prompts < 7), while fresh LLM replies and V7 cache still enforce MEANING."""
+    import json
+    from datetime import UTC, datetime
+    from uuid import uuid4
+    from linguary.application.analysis_merge import ChapterFragment
+    from linguary.application.analysis_pass_cache import decode_pass
+    from linguary.application.use_cases.analyze_chapter import (
+        _normalize_fragment_header_for_sha,
+        _pass_model_dependencies,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    _, uow, _ = stored_book
+    blocks = (
+        _block(0, 'The boy called Longbottom walked in.'),
+        _block(1, 'Holmes greeted him warmly.'),
+    )
+    _store(uow, blocks)
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
+    ctx = builder('b2', name_translation_policy=policy)
+
+    conflicting_candidate = dict(
+        source_text='Longbottom',
+        type='person',
+        suggested_translation='Лонгботтом',
+        confidence=0.95,
+        model_flagged_review=False,
+        note='',
+        name_translation_assessment=dict(
+            opaque_name=False,
+            applied_method='sound',
+            eligible_without_review=True,
+            review_reasons=[],
+            rationale='Сохраняем звучание.',
+        ),
+    )
+
+    v6_id = str(uuid4())
+    v6_conditions = BookConditions(
+        id=v6_id,
+        book_id=BOOK_ID,
+        revision=1,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.work.add_conditions(v6_conditions)
+        doc = tx.documents.get(BOOK_ID)
+    sec = doc.sections[0]
+
+    ac_v6 = scenario(
+        uow,
+        FakeLLMClient([narrative(('b1',)), pedagogical(('b1',)), pedagogical(('b1',))]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v6_id,
+    )
+    nar_hash = ctx.narrative_input_sha256(
+        doc,
+        sec,
+        (),
+        (),
+        (),
+        model_dependencies=_pass_model_dependencies(v6_conditions.payload, AnalysisPassKind.NARRATIVE),
+        max_fragment_blocks=ac_v6._narrative_max_fragment_blocks(),
+    )
+    frag0 = ChapterFragment(order=0, blocks=(sec.blocks[0],))
+    frag0_ctx = ctx.for_chapter_narrative_analysis(
+        doc, sec, (), (), (), fragment=frag0, fragment_count=2, findings=None,
+    )
+    frag0_scope_key = f'{sec.blocks[0].id}:{sec.blocks[0].id}'
+    frag0_sha = canonical_sha(
+        dict(
+            schema_version=1,
+            chapter_input_sha256=nar_hash,
+            scope_key=frag0_scope_key,
+            instructions=frag0_ctx.request.instructions,
+            input=_normalize_fragment_header_for_sha(frag0_ctx.request.input_text),
+            contract_version=frag0_ctx.request.contract_version,
+            before_you_read_limit=frag0_ctx.before_you_read_limit,
+            notes=frag0_ctx.language_notes_per_chapter,
+        )
+    )
+    frag0_raw = json.loads(narrative(('b1',)).content)
+    frag0_raw['glossary_candidates'] = [conflicting_candidate]
+    decoded_frag0 = decode_pass({'schema_version': 1, 'response': frag0_raw}, narrative=True)
+    ac_v6._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        frag0_sha,
+        decoded_frag0,
+        v6_id,
+        scope_key=frag0_scope_key,
+    )
+
+    # 1. Under V6, fresh fragment 2 returning conflicting candidate is STILL rejected.
+    bad_fresh_frag2 = json.loads(narrative(('b1',)).content)
+    bad_fresh_frag2['glossary_candidates'] = [
+        {**conflicting_candidate, 'source_text': 'Fairweather', 'suggested_translation': 'Фэрвезер'}
+    ]
+    ac_v6_bad_fresh = scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(bad_fresh_frag2)]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v6_id,
+    )
+    with pytest.raises(ResultValidationError, match='review_reasons'):
+        await ac_v6_bad_fresh(COMMAND)
+
+    # 2. Under V6, cached_frag 1 with legacy SOUND+transparent candidate succeeds when fragment 2 is valid.
+    v6_result = await ac_v6(COMMAND)
+    assert v6_result.analysis.is_complete
+    assert [c.source_text for c in v6_result.analysis.glossary_candidates] == ['Longbottom']
+
+    # 3. Under V7 (prompts == 7), cached_frag 1 with conflicting candidate IS rejected.
+    v7_id = str(uuid4())
+    v7_conditions = BookConditions(
+        id=v7_id,
+        book_id=BOOK_ID,
+        revision=2,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 5, 'validators': 4, 'schemas': 5, 'prompts': 7},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
+        tx.work.add_conditions(v7_conditions)
+    ac_v7 = scenario(
+        uow,
+        FakeLLMClient([]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v7_id,
+    )
+    ac_v7._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        frag0_sha,
+        decoded_frag0,
+        v7_id,
+        scope_key=frag0_scope_key,
+    )
+    with pytest.raises(Exception, match='review_reasons'):
+        await ac_v7(COMMAND)
+
+
+
 

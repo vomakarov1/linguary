@@ -897,22 +897,62 @@ def _split_instruction_sentences(text: str) -> tuple[str, ...]:
             guillemet_depth += 1
             idx += 1
             continue
-        if ch == "»":
-            if guillemet_depth > 0:
-                guillemet_depth -= 1
-            idx += 1
-            continue
         if ch == "“":
             curly_double_depth += 1
             idx += 1
             continue
-        if ch == "”":
+        closed_quote = False
+        if ch == "»":
+            if guillemet_depth > 0:
+                guillemet_depth -= 1
+                closed_quote = True
+        elif ch == "”":
             if curly_double_depth > 0:
                 curly_double_depth -= 1
-            idx += 1
-            continue
-        if ch == '"' and track_straight_double:
+                closed_quote = True
+        elif ch == '"' and track_straight_double:
+            was_in_straight = in_straight_double
             in_straight_double = not in_straight_double
+            closed_quote = was_in_straight
+        if ch in '»”"':
+            if (
+                closed_quote
+                and guillemet_depth == 0
+                and curly_double_depth == 0
+                and not in_straight_double
+            ):
+                prev_idx = idx - 1
+                while prev_idx >= start and stripped[prev_idx] in '»”"':
+                    prev_idx -= 1
+                if prev_idx >= start and stripped[prev_idx] in ".!?…":
+                    is_single_dot = stripped[prev_idx] == "." and (
+                        prev_idx == start or stripped[prev_idx - 1] not in ".!?…"
+                    )
+                    prefix = stripped[start : prev_idx + 1]
+                    if not (
+                        is_single_dot
+                        and (
+                            _INSTRUCTION_ABBREV_BEFORE_DOT_RE.search(prefix) is not None
+                            or _INSTRUCTION_INITIAL_BEFORE_DOT_RE.search(prefix) is not None
+                        )
+                    ):
+                        end = idx + 1
+                        while end < n and stripped[end] in ")]":
+                            end += 1
+                        if end < n and stripped[end].isspace():
+                            next_idx = end
+                            while next_idx < n and stripped[next_idx].isspace():
+                                next_idx += 1
+                            probe = next_idx
+                            while probe < n and stripped[probe] in '«"“([':
+                                probe += 1
+                            if probe < n and (stripped[probe].isupper() or stripped[probe].isdigit()):
+                                sentence = stripped[start:end].strip()
+                                if sentence:
+                                    parts.append(sentence)
+                                start = next_idx
+                                idx = next_idx
+                                continue
             idx += 1
             continue
         if (
@@ -4052,7 +4092,7 @@ _SINGLE_QUOTE_APOSTROPHE = (
     r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
 )
 _DIALOGUE_QUOTES = re.compile(
-    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”‘’]*\"|«[^«»]*»"
+    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”]*\"|«[^«»]*»"
 )
 _SUBORDINATORS = frozenset({
     "if",

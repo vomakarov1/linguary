@@ -704,6 +704,7 @@ def _assemble(tmp_path: Path) -> _Case:
             "McGonagall",
             "Yvonne",
             "Brazil",
+            "Boa Constrictor",
         ),
     )
     modes = {

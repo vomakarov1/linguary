@@ -1102,6 +1102,120 @@ def test_container_wires_sequential_analysis_max_output_tokens_and_filters_unkno
     assert parsed.sequential_analysis is False
 
 
+async def test_sequential_exception_after_record_success_does_not_rollback_succeeded_and_start_recovers_next_section(
+    tmp_path,
+) -> None:
+    """An exception after _record_success_in_tx does not revert SUCCEEDED to FAILED, and repeated start(book_id) enqueues the next section."""
+    from dataclasses import replace as dc_replace
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.runtime.task_queue import SqliteTaskQueue
+    from linguary.domain import TaskIdentity
+
+    engine = create_database_engine(tmp_path / "seq_recovery.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    queue = SqliteTaskQueue.for_engine(engine)
+    try:
+        sections = tuple(
+            make_analysis_section(
+                section_id=f"section-{number}",
+                title=f"Chapter {number}",
+                order=number - 1,
+                texts=(f"Text of chapter {number}.",),
+            )
+            for number in (1, 2, 3)
+        )
+        document = make_analysis_document(sections)
+        with uow.transaction() as tx:
+            tx.books.add(make_book_record())
+            tx.documents.save(document)
+
+        # Direct repository guard: SUCCEEDED cannot be downgraded to FAILED, but CAN become SUPERSEDED.
+        probe = await queue.enqueue(
+            TaskIdentity(book_id=BOOK_ID, task_type=TaskType.EXPORT_BOOK, scope_id="probe")
+        )
+        succeeded_probe = probe.start().succeed()
+        with uow.transaction() as tx:
+            tx.tasks.save(succeeded_probe)
+        with uow.transaction() as tx:
+            tx.tasks.save(
+                probe.start().fail(TaskError(type=ErrorType.TRANSIENT, message="late failure"))
+            )
+        with uow.transaction() as tx:
+            stored_probe = tx.tasks.get(probe.id)
+            assert stored_probe is not None and stored_probe.status is TaskStatus.SUCCEEDED
+            tx.tasks.save(dc_replace(succeeded_probe, status=TaskStatus.SUPERSEDED))
+        with uow.transaction() as tx:
+            stored_probe = tx.tasks.get(probe.id)
+            assert stored_probe is not None and stored_probe.status is TaskStatus.SUPERSEDED
+
+        client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
+        analyze_chapter, _ = make_analyze_chapter(uow, client)
+        sequence = ChapterAnalysisSequence(
+            unit_of_work=uow,
+            queue=queue,
+            analyze_chapter=analyze_chapter,
+            sequential_analysis=True,
+        )
+        runner = TaskRunner(
+            queue=queue,
+            handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
+        )
+
+        first = await sequence.start(BOOK_ID)
+        assert first is not None and first.scope_id == "section-1"
+
+        original_enqueue_all = sequence._enqueue_all
+        fail_once = {"armed": True}
+
+        async def flaky_enqueue_all(book_id: str, **kwargs):
+            if fail_once["armed"] and kwargs.get("finished_task_id") == first.id:
+                fail_once["armed"] = False
+                raise RuntimeError("enqueue failed after commit")
+            return await original_enqueue_all(book_id, **kwargs)
+
+        sequence._enqueue_all = flaky_enqueue_all  # type: ignore[method-assign]
+
+        finished = await runner.run_next()
+        assert finished is not None
+        assert finished.id == first.id
+        assert finished.status is TaskStatus.SUCCEEDED
+        with uow.transaction() as tx:
+            stored_first = tx.tasks.get(first.id)
+            assert stored_first is not None
+            assert stored_first.status is TaskStatus.SUCCEEDED
+            assert [
+                t.scope_id
+                for t in tx.tasks.list_for_book(BOOK_ID)
+                if t.task_type is TaskType.ANALYZE_CHAPTER
+            ] == ["section-1"]
+
+        # Repeated start(book_id) resumes cleanly from section-2 without re-analyzing section-1.
+        resumed = await sequence.start(BOOK_ID)
+        assert resumed is not None and resumed.scope_id == "section-2"
+
+        while await runner.run_next() is not None:
+            pass
+
+        with uow.transaction() as tx:
+            book = tx.books.get(BOOK_ID)
+            assert book is not None and book.status is BookStatus.GLOSSARY_REVIEW
+            analyze_tasks = [
+                t for t in tx.tasks.list_for_book(BOOK_ID) if t.task_type is TaskType.ANALYZE_CHAPTER
+            ]
+            assert [(t.scope_id, t.status) for t in analyze_tasks] == [
+                ("section-1", TaskStatus.SUCCEEDED),
+                ("section-2", TaskStatus.SUCCEEDED),
+                ("section-3", TaskStatus.SUCCEEDED),
+            ]
+        assert client.call_count == 3
+    finally:
+        engine.dispose()
+
+
+
 
 
 

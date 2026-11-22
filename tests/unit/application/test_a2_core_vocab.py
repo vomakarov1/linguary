@@ -107,6 +107,10 @@ REQUIRED_NON_CORE_WORDS = frozenset({
     "screamed",
     "sob",
     "sobbed",
+    "presently",
+    "deadly",
+    "shortly",
+    "willing",
 })
 
 
@@ -171,6 +175,11 @@ def test_every_non_core_override_word_is_rejected() -> None:
         "forgotten",
         "began",
         "begun",
+        "given",
+        "sung",
+        "rode",
+        "sunk",
+        "bored",
         # Explicitly required A1-A2 words, interjections, and internationalisms
         "shoo",
         "sharp",
@@ -220,9 +229,57 @@ def test_core_a2_direct_words(word: str) -> None:
 
 def test_non_core_a2_words_skips_road_and_title_case_proper_names() -> None:
     assert non_core_a2_words("The road looked quiet.") == ()
-    assert non_core_a2_words("Boa Constrictor, Brazil.") == ()
-    assert non_core_a2_words("Mary Hightower wrote a book.") == ()
+    assert non_core_a2_words("Boa Constrictor, Brazil.", known_names=("Boa Constrictor",)) == ()
+    assert non_core_a2_words("Mary Hightower wrote a book.", known_names=("Mary Hightower",)) == ()
     assert non_core_a2_words("Major whoa.") == ("whoa",)
+    assert non_core_a2_words("Major Whoa!") == ("whoa",)
+    assert non_core_a2_words("Wretched Muggle!") == ("wretched", "muggle")
+    assert non_core_a2_words("Good Grief!") == ("grief",)
+    assert non_core_a2_words("STOP, YOU WRETCHED COWARD!") == ("wretched", "coward")
+
+
+@pytest.mark.parametrize(
+    "word",
+    [
+        "literally",
+        "gradually",
+        "meanwhile",
+        "therefore",
+        "otherwise",
+        "eventually",
+        "seldom",
+        "somewhat",
+        "independence",
+        "confidence",
+        "conclusion",
+        "destination",
+        "disability",
+        "elementary",
+        "enormous",
+        "exception",
+        "finance",
+        "fortunate",
+        "gravity",
+        "management",
+        "relief",
+        "threat",
+        "typical",
+        "variety",
+        "deserve",
+        "punish",
+        "recommend",
+        "recover",
+        "suffer",
+        "surround",
+        "presently",
+        "deadly",
+        "shortly",
+        "willing",
+    ],
+)
+def test_removed_b1_b2_and_new_override_words_are_not_core(word: str) -> None:
+    assert word not in A2_CORE_VOCABULARY
+    assert not is_core_a2_word(word)
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
+from linguary.application.a2_core_vocab import non_core_a2_words
 from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
     DEFAULT_MAX_FRAGMENT_CHARS,
@@ -100,6 +101,7 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     DocumentSection,
     GlossaryCandidate,
@@ -123,6 +125,14 @@ type Sleep = Callable[[float], Awaitable[None]]
 
 #: Factory for IDs of persisted analysis records.
 type IdFactory = Callable[[], str]
+
+_UNSET = object()
+
+_A2_VOCAB_NAME_TYPES = frozenset({
+    ConceptType.PERSON,
+    ConceptType.PLACE,
+    ConceptType.ORGANIZATION,
+})
 
 
 class AnalyzeChapterError(ApplicationError):
@@ -333,7 +343,7 @@ class AnalyzeChapter:
                 treatment = BlockTreatment.READ_AS_IS
             elif is_a2 and len(_WORD_TOKEN_RE.findall(remainder)) > 3:
                 treatment = BlockTreatment.TRANSLATE
-            elif has_candidates or is_a2:
+            elif has_candidates or (is_a2 and bool(non_core_a2_words(block.text))):
                 treatment = BlockTreatment.GLOSSARY_ONLY
             else:
                 treatment = BlockTreatment.READ_AS_IS
@@ -419,6 +429,26 @@ class AnalyzeChapter:
             attempts,
             usage,
         )
+
+    def _should_enforce_v7_name_policy(
+        self,
+        command: AnalyzeChapterCommand,
+        *,
+        conditions: object = _UNSET,
+    ) -> bool:
+        """Whether cached narrative validation must enforce V7 name-translation policy checks."""
+        resolved_conditions = conditions
+        if resolved_conditions is _UNSET:
+            with self._unit_of_work.transaction() as tx:
+                work = getattr(tx, 'work', None)
+                resolved_conditions = work.latest_conditions(command.book_id) if work else None
+        if resolved_conditions is not None and isinstance(getattr(resolved_conditions, 'payload', None), Mapping):
+            versions = resolved_conditions.payload.get('versions')
+            if isinstance(versions, Mapping):
+                prompts_version = versions.get('prompts')
+                if isinstance(prompts_version, int) and prompts_version < 7:
+                    return False
+        return True
 
     def _narrative_max_fragment_blocks(self) -> int:
         """Maximum blocks per narrative fragment scaled by output token budget."""
@@ -511,6 +541,11 @@ class AnalyzeChapter:
             narrative, scenes, facts = merge_narrative_fragments(
                 narrative_parts, section_blocks=section.ordered_blocks
             )
+            merged_name_policy = (
+                self._name_translation_policy
+                if self._should_enforce_v7_name_policy(command, conditions=conditions)
+                else None
+            )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -519,7 +554,7 @@ class AnalyzeChapter:
                 target_language=document.target_language,
                 language_detector=self._language_detector,
                 known_names=known_names,
-                name_translation_policy=self._name_translation_policy)
+                name_translation_policy=merged_name_policy)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
@@ -527,13 +562,11 @@ class AnalyzeChapter:
         else:
             if saved.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
-            cached_name_policy = self._name_translation_policy
-            if conditions is not None and isinstance(getattr(conditions, 'payload', None), Mapping):
-                versions = conditions.payload.get('versions')
-                if isinstance(versions, Mapping):
-                    prompts_version = versions.get('prompts')
-                    if isinstance(prompts_version, int) and prompts_version < 7:
-                        cached_name_policy = None
+            cached_name_policy = (
+                self._name_translation_policy
+                if self._should_enforce_v7_name_policy(command, conditions=conditions)
+                else None
+            )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -560,12 +593,11 @@ class AnalyzeChapter:
         usages: list[TokenUsage | None] = [narrative_usage]
         cumulative_words = _cumulative_words_before(document, section)
         prior_chapter_topics = self._load_prior_chapter_topics(command, document, section)
-        pedagogical_known_names = _known_names_with_narrative(
-            _known_names_from_glossary(
+        pedagogical_known_names = _a2_vocab_known_names_with_narrative(
+            _a2_vocab_known_names_from_glossary(
                 accumulated,
                 user_decisions,
-                suggestions,
-                target_language=document.target_language,
+                (*suggestions, *concepts),
             ),
             narrative,
             scenes,
@@ -652,12 +684,11 @@ class AnalyzeChapter:
         resolved_known_names = (
             tuple(known_names)
             if known_names
-            else _known_names_with_narrative(
-                _known_names_from_glossary(
+            else _a2_vocab_known_names_with_narrative(
+                _a2_vocab_known_names_from_glossary(
                     accumulated,
                     user_decisions,
                     concepts,
-                    target_language=document.target_language,
                 ),
                 narrative,
                 scenes,
@@ -795,7 +826,7 @@ class AnalyzeChapter:
         ped_known_names = (
             ()
             if is_narrative
-            else _known_names_with_narrative(known_names, narrative)
+            else _a2_vocab_known_names_with_narrative(known_names, narrative)
         )
         parts, usages = [], []
         attempts = 0
@@ -878,9 +909,14 @@ class AnalyzeChapter:
                 if prior_part_names:
                     fragment_known_names = tuple(dict.fromkeys((*known_names, *prior_part_names)))
 
-            def validate(payload):
+            def validate(payload, *, from_cache: bool = False):
                 if is_narrative:
                     _ensure_candidates_single_script(payload, context)
+                    name_policy = (
+                        self._name_translation_policy
+                        if (not from_cache or self._should_enforce_v7_name_policy(command))
+                        else None
+                    )
                     return validate_narrative_response(payload, context.block_ids_by_alias,
                         {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
                         ordered_block_ids=fragment.block_ids,
@@ -891,7 +927,7 @@ class AnalyzeChapter:
                         target_language=document.target_language,
                         language_detector=self._language_detector,
                         known_names=fragment_known_names,
-                        name_translation_policy=self._name_translation_policy)
+                        name_translation_policy=name_policy)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._is_a2_reader():
@@ -961,7 +997,7 @@ class AnalyzeChapter:
                         context.block_ids_by_alias,
                         known_names=ped_known_names,
                     )
-                resolved = validate(payload)
+                resolved = validate(payload, from_cache=True)
             else:
                 try:
                     payload, resolved, count, usage = await self._request_staged(
@@ -1208,11 +1244,10 @@ class AnalyzeChapter:
                 ordered_block_ids=tuple(block.id for block in blocks),
             ),
         )
-        known_names = _known_names_from_glossary(
+        known_names = _a2_vocab_known_names_from_glossary(
             accumulated,
             user_decisions,
             (*nonbinding_suggestions, *(concepts or ())),
-            target_language=document.target_language,
         )
         payload, attempts, usage = await self._request_analysis(
             context,
@@ -1254,11 +1289,10 @@ class AnalyzeChapter:
         attempts = 0
         usages: list[TokenUsage | None] = []
         queue: list[ChapterFragment] = list(fragments)
-        base_known_names = _known_names_from_glossary(
+        base_known_names = _a2_vocab_known_names_from_glossary(
             accumulated,
             user_decisions,
             (*nonbinding_suggestions, *(concepts or ())),
-            target_language=document.target_language,
         )
         while queue:
             fragment = queue.pop(0)
@@ -1311,11 +1345,10 @@ class AnalyzeChapter:
                     (
                         *base_known_names,
                         *(
-                            name
+                            c.source_text.strip()
                             for part in analysed
                             for c in part.glossary_candidates
-                            for name in (c.source_text.strip(), c.suggested_translation.strip())
-                            if name
+                            if c.type in _A2_VOCAB_NAME_TYPES and c.source_text.strip()
                         ),
                     )
                 )
@@ -1593,18 +1626,28 @@ class AnalyzeChapter:
                         _ensure_candidates_single_script(response.payload, context)
                         self._resolved_content_plan.set(None)
                     else:
+                        payload_scenes = (
+                            *getattr(response.payload, "scenes", ()),
+                            *(
+                                getattr(response.payload.content_plan, "scenes", ())
+                                if response.payload.content_plan is not None
+                                else ()
+                            ),
+                        )
                         response_known_names = tuple(
                             dict.fromkeys(
                                 (
                                     *known_names,
                                     *(
-                                        name
+                                        c.source_text.strip()
                                         for c in response.payload.glossary_candidates
-                                        for name in (
-                                            c.source_text.strip(),
-                                            c.suggested_translation.strip(),
-                                        )
-                                        if name
+                                        if c.type in _A2_VOCAB_NAME_TYPES and c.source_text.strip()
+                                    ),
+                                    *(
+                                        participant.strip()
+                                        for scene in payload_scenes
+                                        for participant in getattr(scene, "participants", ())
+                                        if isinstance(participant, str) and participant.strip()
                                     ),
                                 )
                             )
@@ -2420,6 +2463,52 @@ def _merge_fragment_candidates(
             )
         )
     return tuple(merged)
+
+
+def _a2_vocab_known_names_from_glossary(
+    accumulated: Sequence[GlossaryCandidate],
+    user_decisions: Sequence[TermConcept],
+    suggestions: Sequence[TermConcept],
+) -> tuple[str, ...]:
+    """Collect proper-name source forms (PERSON/PLACE/ORGANIZATION) for A2 vocabulary filtering."""
+    names: list[str] = []
+    for candidate in accumulated:
+        if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+            names.append(candidate.source_text.strip())
+    for concept in (*user_decisions, *suggestions):
+        if concept.type not in _A2_VOCAB_NAME_TYPES:
+            continue
+        if concept.canonical_source_text.strip():
+            names.append(concept.canonical_source_text.strip())
+        for variant in concept.variants:
+            source_text = getattr(variant, "source_text", None)
+            if isinstance(source_text, str) and source_text.strip():
+                names.append(source_text.strip())
+    return tuple(dict.fromkeys(names))
+
+
+def _a2_vocab_known_names_with_narrative(
+    base_names: Sequence[str],
+    narrative: NarrativeAnalysisResponse | None = None,
+    scenes: Sequence[Scene] = (),
+) -> tuple[str, ...]:
+    """Combine prior proper-name source forms with current chapter proper-name candidates and participants."""
+    names: list[str] = [
+        name.strip() for name in base_names if isinstance(name, str) and name.strip()
+    ]
+    if narrative is not None:
+        for candidate in narrative.glossary_candidates:
+            if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+                names.append(candidate.source_text.strip())
+        for scene in narrative.scenes:
+            for participant in scene.participants:
+                if isinstance(participant, str) and participant.strip():
+                    names.append(participant.strip())
+    for scene in scenes:
+        for participant in scene.participants:
+            if isinstance(participant, str) and participant.strip():
+                names.append(participant.strip())
+    return tuple(dict.fromkeys(names))
 
 
 def _known_names_with_narrative(
