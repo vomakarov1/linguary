@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import inspect
 import json
 import math
 import sqlite3
@@ -564,6 +563,41 @@ async def test_ac1_parallel_restart_isolation(tmp_path):
     finally:
         await ready_app.aclose()
 
+    # Restart a failed root inside a FAILED two-root dispatcher while its sibling is already complete.
+    failed_disp_fake = FakeLLMClient([
+        analysis_reply(2),
+        translation_reply(1),
+        LLMTransportError("read timeout", outcome="unknown"),
+    ])
+    failed_disp_app = _split_chapter_app(tmp_path / "failed-disp", failed_disp_fake, concurrency=1)
+    try:
+        store_imported(failed_disp_app, (("The cat sat.", "The dog ran."),))
+        await failed_disp_app.analysis.start("book-1")
+        assert (await drain_tasks(failed_disp_app))[0].status is TaskStatus.SUCCEEDED
+        run = failed_disp_app.start_processing()(StartProcessingCommand("book-1"))
+        dispatcher = (await failed_disp_app.processing.start("book-1"))[0]
+        done = await drain_tasks(failed_disp_app)
+        assert done[-1].id == dispatcher.id and done[-1].status is TaskStatus.FAILED
+        with failed_disp_app.unit_of_work.transaction() as tx:
+            refs = tx.work.get_binding("task", dispatcher.id)["payload_json"]["operation_refs"]
+            roots = [tx.work.get_root(ref["root_id"]) for ref in refs]
+            complete_root = next(r for r in roots if r.status == "complete")
+            stopped_root = next(r for r in roots if r.status == "stopped")
+        succ = restart(failed_disp_app, stopped_root, acknowledge=True)
+        with failed_disp_app.unit_of_work.transaction() as tx:
+            assert tx.tasks.get(dispatcher.id).status is TaskStatus.SUCCEEDED
+            assert tx.work.get_root(stopped_root.id).superseded_by == succ.successor_root_id
+        failed_disp_fake.default = translation_reply(1)
+        fin = await drain_tasks(failed_disp_app)
+        assert any(t.id == succ.task_id and t.status is TaskStatus.SUCCEEDED for t in fin)
+        assert all(t.status is TaskStatus.SUCCEEDED for t in fin), [t.last_error for t in fin]
+        with failed_disp_app.unit_of_work.transaction() as tx:
+            assert tx.work.get_root(complete_root.id).status == "complete"
+            assert tx.work.get_root(succ.successor_root_id).status == "complete"
+            assert tx.books.get("book-1").status is BookStatus.READY_TO_EXPORT
+    finally:
+        await failed_disp_app.aclose()
+
     blocked_app, blocked = await _saved_translation(tmp_path / "translation-stop")
     try:
         stopped = _add_root(blocked_app, blocked, kind="translation", status="stopped", reason="limit")
@@ -666,7 +700,9 @@ async def test_ac2_max_attempts_1_manual_continue(tmp_path):
         with app.unit_of_work.transaction() as tx:
             saved = tx.work.get_attempt(attempt.id)
             stored = tx.work.get_root(root.id)
-        assert saved.state in {"created", "cancelled"}
+            scope = tx.work.get_scope(saved.scope_id)
+        assert saved.state == "cancelled"
+        assert scope.status == "pending"
         assert stored.calls_used == 0
         assert _translation_requests(fake) == []
     finally:
@@ -1188,6 +1224,22 @@ async def test_ac5_ac6_ac7_ac9_validation_and_policy_compat(tmp_path, unit_of_wo
         )
         with app.unit_of_work.transaction() as tx:
             assert tx.work.get_conditions(conditions.id).payload["versions"] == versions
+        # Historical v2-policy accepted blocks remain exportable via ExportBook.
+        from linguary.adapters.db.models import RecoveryRootRow
+        from linguary.application.use_cases.export_book import ExportBookCommand
+
+        with app.unit_of_work.transaction() as tx:
+            tx.books.save(replace(tx.books.get("book-1"), status=BookStatus.READY_TO_EXPORT))
+            complete_roots = [r for r in tx.work.list_roots("book-1", run_id=scenario.run_id) if r.status == "complete"]
+            assert complete_roots
+            anchor_id = complete_roots[0].id
+            for r in tx.work.list_roots("book-1", run_id=scenario.run_id):
+                if r.status != "complete" and r.superseded_by is None:
+                    tx.work._session.get(RecoveryRootRow, r.id).superseded_by = anchor_id
+        exported = app.export_book(
+            ExportBookCommand(book_id="book-1", target_path=str(tmp_path / "historical-v2.epub"))
+        )
+        assert Path(exported.path).is_file()
     finally:
         await app.aclose()
 
@@ -1471,8 +1523,58 @@ async def test_ac10_crash_recovery_and_overview_projection(tmp_path, monkeypatch
         await app.aclose()
 
     import linguary.cli.app as cli_app
-    assert cli_app.drain_tasks is drain_tasks
-    assert "await drain_tasks(application)" in inspect.getsource(cli_app._worker)
+    from linguary.adapters.config.settings import AppSettings, StorageSettings
+    from linguary.composition.container import build_application
+
+    cli_dir = tmp_path / "cli-worker-once"
+    cli_dir.mkdir()
+    cli_cfg = cli_dir / "config.toml"
+    cli_cfg.write_text(
+        f'[storage]\ndata_root = {json.dumps(str(cli_dir / "data"))}\n',
+        encoding="utf-8",
+    )
+    cli_probe = build_application(
+        settings=AppSettings(storage=StorageSettings(data_root=str(cli_dir / "data"))),
+    )
+    try:
+        store_imported(cli_probe)
+        with cli_probe.unit_of_work.transaction() as tx:
+            tx.tasks.add(ProcessingTask(
+                id="task-cli-lock", book_id="book-1", task_type=TaskType.EXPORT_BOOK, scope_id="export",
+            ).start())
+        cli_lock_path = cli_probe.paths.executor_lock
+    finally:
+        await cli_probe.aclose()
+    peer = ExecutorLock(cli_lock_path)
+    assert peer.join() is True
+    peer.share()
+    try:
+        assert await asyncio.to_thread(
+            cli_app.main, ["--config", str(cli_cfg), "worker", "--once"]
+        ) == 0
+    finally:
+        peer.leave()
+    cli_check1 = build_application(
+        settings=AppSettings(storage=StorageSettings(data_root=str(cli_dir / "data"))),
+    )
+    try:
+        with cli_check1.unit_of_work.transaction() as tx:
+            assert tx.tasks.get("task-cli-lock").status is TaskStatus.RUNNING
+    finally:
+        await cli_check1.aclose()
+    assert await asyncio.to_thread(
+        cli_app.main, ["--config", str(cli_cfg), "worker", "--once"]
+    ) == 0
+    cli_check2 = build_application(
+        settings=AppSettings(storage=StorageSettings(data_root=str(cli_dir / "data"))),
+    )
+    try:
+        with cli_check2.unit_of_work.transaction() as tx:
+            rec = tx.tasks.get("task-cli-lock")
+            assert rec.status is TaskStatus.FAILED
+            assert rec.last_error is not None and rec.last_error.detail == "Interrupted"
+    finally:
+        await cli_check2.aclose()
 
     recovery_app = make_app(tmp_path / "recover")
     try:
@@ -1537,6 +1639,7 @@ async def test_ac10_crash_recovery_and_overview_projection(tmp_path, monkeypatch
                 tx, conditions_id=conditions.id, run_id=scenario.run_id, blocks=(first,),
                 status="running",
             )
+            sent_scope = tx.work.claim_scope(sent_scope.id, expected_generation=sent_scope.generation)
             _plant_attempt(tx, sent_root, sent_scope, scenario.run_id, state="sent", ordinal=1)
             unknown_root, unknown_scope = _plant_root(
                 tx, conditions_id=conditions.id, run_id=scenario.run_id, blocks=(first,),
@@ -1562,6 +1665,7 @@ async def test_ac10_crash_recovery_and_overview_projection(tmp_path, monkeypatch
         roots = {item["root_id"]: item for item in overview.recovery["roots"]}
         assert roots[sent_root.id]["in_flight"] is True
         assert roots[sent_root.id]["has_unknown_outcome"] is False
+        assert roots[sent_root.id]["can_retry"] is False
         assert roots[sent_root.id]["reason"] != "unknown"
         assert roots[unknown_root.id]["can_retry"] is False
         assert roots[unknown_root.id]["has_unknown_outcome"] is True
@@ -1614,20 +1718,37 @@ async def test_ac10_crash_recovery_and_overview_projection(tmp_path, monkeypatch
 
     diag_app = make_app(tmp_path / "diag")
     try:
+        from datetime import UTC, datetime
+        import linguary.adapters.db.unit_of_work as uow_module
+        from linguary.domain import LLMCallLog
+
         diagnostics = Diagnostics(diag_app.unit_of_work)
-        calls = {"n": 0}
+        store_imported(diag_app)
+        with diag_app.unit_of_work.transaction() as tx:
+            tx.llm_calls.add(LLMCallLog(
+                id="diag-call-1", book_id="book-1", task_id=None,
+                stage=LLMCallStage.TRANSLATION_UNIT, provider="fake", model="pinned-model",
+                started_at=datetime.now(UTC), duration_ms=10, attempt=1, success=True,
+                diagnostic_meta={"schema_version": 1, "decision": "unknown"},
+            ))
+        lock_budget = {"remaining": 10}
+        orig_exec = Connection.exec_driver_sql
 
-        def finalize(*args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise PersistenceError("база данных занята")
-            return "stored"
+        def fail_locked_begin(self, statement, *args, **kwargs):
+            if "BEGIN IMMEDIATE" in str(statement) and lock_budget["remaining"] > 0:
+                lock_budget["remaining"] -= 1
+                raise OperationalError(str(statement), {}, sqlite3.OperationalError("database is locked"))
+            return orig_exec(self, statement, *args, **kwargs)
 
-        diagnostics._finalize_attempt = finalize
-        with pytest.raises(PersistenceError, match="занята"):
-            diagnostics.finalize_attempt("attempt-1", "rejected")
+        with monkeypatch.context() as mp:
+            mp.setattr(uow_module, "sleep", lambda _seconds: None)
+            mp.setattr(Connection, "exec_driver_sql", fail_locked_begin)
+            with pytest.raises(PersistenceError, match="занята"):
+                diagnostics.finalize_attempt(None, "rejected", call_id="diag-call-1")
         assert diagnostics._failed is False
-        assert diagnostics.finalize_attempt("attempt-1", "rejected") == "stored"
+        meta = diagnostics.finalize_attempt(None, "rejected", call_id="diag-call-1")
+        assert meta["decision"] == "rejected"
+        assert diagnostics._failed is False
     finally:
         await diag_app.aclose()
 
