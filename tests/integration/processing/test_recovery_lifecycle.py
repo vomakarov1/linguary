@@ -129,7 +129,9 @@ async def test_crash_boundaries_do_not_reset_counter_or_repeat_unknown(tmp_path,
         root_id, context = await prepared_root(app, run, task)
         with app.unit_of_work.transaction() as transaction:
             if state in {'sent', 'validated'}:
-                transaction.work.transition_attempt(context.attempt_id, 'sent', expected_state='created')
+                root = transaction.work.get_root(root_id)
+                transaction.work.mark_attempt_sent(
+                    context.attempt_id, expected_root_generation=root.generation)
             if state == 'validated':
                 transaction.work.transition_attempt(context.attempt_id, 'validated', expected_state='sent')
         await app.runner.recover_interrupted()
@@ -138,7 +140,7 @@ async def test_crash_boundaries_do_not_reset_counter_or_repeat_unknown(tmp_path,
             root = transaction.work.get_root(root_id)
             if state == 'created':
                 assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
-                assert root.calls_used == 2
+                assert root.calls_used == 1
                 assert transaction.work.get_attempt(context.attempt_id).state == 'cancelled'
             else:
                 assert completed[0].status == TaskStatus.FAILED

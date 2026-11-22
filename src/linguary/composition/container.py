@@ -390,11 +390,10 @@ def build_application(
             on_logged=on_logged,
             model_name=analysis_model or "not_configured",
         )
-        processing_client = _model_client(
+        processing_logged = _logged_client(
             candidate,
             inner=processing_inner,
             unit_of_work=unit_of_work,
-            limiter=rate_limiter,
             on_logged=on_logged,
             model_name=processing_model or "not_configured",
         )
@@ -419,7 +418,12 @@ def build_application(
             analysis_client = StageRoutedLLMClient(analysis_client, stages)
         if conditions is not None:
             analysis_client = ProvenanceClient(analysis_client, book_conditions, conditions.id)
-            processing_client = ProvenanceClient(processing_client, book_conditions, conditions.id)
+            processing_client = RateLimitedLLMClient(
+                inner=ProvenanceClient(processing_logged, book_conditions, conditions.id),
+                limiter=rate_limiter,
+            )
+        else:
+            processing_client = RateLimitedLLMClient(inner=processing_logged, limiter=rate_limiter)
         processing_seq = _processing_sequence(
             **pronunciation,
             settings=candidate, unit_of_work=unit_of_work,
@@ -604,19 +608,13 @@ def build_application(
     )
 
 
-def _model_client(
+def _logged_client(
     settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork,
-    limiter: LLMRateLimiter,
     on_logged: LoggedObserver | None = None,
     model_name: str | None = None,
-) -> LLMClient:
-    """Model client used by all LLM use cases.
-
-    The rate limiter wraps the logger: the log records the duration of the provider call itself
-    rather than queue waiting time, which is used to estimate remaining processing time.
-    The rate limiter is single per application, so the limit is shared across all workers.
-    """
-    model: LLMClient = LoggingLLMClient(
+) -> LoggingLLMClient:
+    """Log the provider call itself. Callers add the shared rate limiter outside this wrapper."""
+    return LoggingLLMClient(
         inner=inner,
         unit_of_work=unit_of_work,
         provider=settings.llm.provider,
@@ -633,7 +631,26 @@ def _model_client(
             else None
         ),
     )
-    return RateLimitedLLMClient(inner=model, limiter=limiter)
+
+
+def _model_client(
+    settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork,
+    limiter: LLMRateLimiter,
+    on_logged: LoggedObserver | None = None,
+    model_name: str | None = None,
+) -> LLMClient:
+    """Analysis client: the rate limiter wraps the logger.
+
+    The log records the duration of the provider call itself rather than queue waiting time,
+    which is used to estimate remaining processing time. The limiter is single per application.
+    Processing does not use this helper: its provenance gate sits inside the limiter.
+    """
+    return RateLimitedLLMClient(
+        inner=_logged_client(
+            settings, inner=inner, unit_of_work=unit_of_work, on_logged=on_logged, model_name=model_name,
+        ),
+        limiter=limiter,
+    )
 
 
 def _analysis_sequence(
@@ -879,12 +896,14 @@ async def drain_tasks(application: Application) -> tuple[ProcessingTask, ...]:
     """Executes accumulated tasks and returns when the queue is empty.
 
     One-off execution mode: used by CLI and tests where waiting for new tasks is unnecessary.
-    It does not recover interrupted tasks, but registers as an executor: Web UI launched
-    during draining must not mistake its tasks for abandoned ones.
+    Recovery runs only when this executor starts alone, before the lock is shared, matching
+    `run_worker`. A drain beside a live executor must not mark that executor's tasks interrupted.
     """
     lock = ExecutorLock(application.paths.executor_lock)
-    lock.join()
+    alone = lock.join()
     try:
+        if alone:
+            await application.runner.recover_interrupted()
         lock.share()
         return await application.worker_pool.drain()
     finally:

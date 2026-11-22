@@ -17,11 +17,15 @@ from linguary.application.book_conditions import (
 )
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask, TaskStatus
-from linguary.domain.book_conditions import thaw
+from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext, LLMCallStage
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.application.diagnostics import diagnostics_for
+from linguary.application.ports.llm import (
+    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMResponseFormatError,
+    LLMTransportError,
+)
 from linguary.application.recovery import RecoveryError
 from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 
@@ -232,6 +236,25 @@ class ProvenanceClient:
             and root.generation == attempt.context.get('root_generation')
             and scope.generation == context.generation and scope.status == 'claimed')
 
+    def _mark_sent_unknown(self, attempt_id):
+        with self.service.uow.transaction() as transaction:
+            current = transaction.work.get_attempt(attempt_id)
+            if current is not None and current.state == 'sent':
+                transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')
+
+    def _settle_transport(self, attempt_id, error, *, rooted):
+        if rooted and error.outcome == 'known_transient':
+            return
+        if rooted and error.outcome == 'not_sent':
+            with self.service.uow.transaction() as transaction:
+                try:
+                    # Only a still-created row can be cancelled. A charged send stays sent.
+                    transaction.work.cancel_unsent_attempt(attempt_id)
+                except WorkStateError:
+                    return
+            return
+        self._mark_sent_unknown(attempt_id)
+
     async def generate(self, request):
         with self.service.uow.transaction() as transaction:
             conditions = self.service.require(request.book_id, transaction=transaction)
@@ -248,8 +271,10 @@ class ProvenanceClient:
                     transaction, context, attempt, root=root, scope=scope
                 ):
                     raise RecoveryError('interrupted', context.root_id)
-                transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
+                root_generation = root.generation
+                rooted = True
             else:
+                rooted = False
                 context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
                     stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
                     ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
@@ -261,12 +286,20 @@ class ProvenanceClient:
                     context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
                              'route_id': conditions.payload['route']['route_id']})
                 transaction.work.add_attempt(attempt)
+        if rooted:
+            with self.service.uow.transaction() as transaction:
+                transaction.work.mark_attempt_sent(attempt.id, expected_root_generation=root_generation)
         try:
             response = await self.inner.generate(request)
+        except LLMTransportError as error:
+            self._settle_transport(attempt.id, error, rooted=rooted)
+            raise
+        except (LLMResponseFormatError, LLMContextCapacityError, LLMConfigurationError, LLMProviderError):
+            if not rooted:
+                self._mark_sent_unknown(attempt.id)
+            raise
         except BaseException:
-            with self.service.uow.transaction() as transaction:
-                if transaction.work.get_attempt(attempt.id).state == 'sent':
-                    transaction.work.transition_attempt(attempt.id, 'unknown', expected_state='sent')
+            self._mark_sent_unknown(attempt.id)
             raise
         with self.service.uow.transaction() as transaction:
             current_attempt = transaction.work.get_attempt(attempt.id)
