@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from dataclasses import replace
 from decimal import Decimal
@@ -715,6 +716,9 @@ async def test_success_diagnostic_redacts_key_without_changing_payload() -> None
 @pytest.mark.parametrize('kind', ['transport', 'provider', 'format', 'success'])
 @pytest.mark.parametrize('mode', ['custom', 'auto'])
 async def test_proxy_diagnostics_redact_encoded_decoded_credentials(monkeypatch, kind, mode):
+    for key in list(os.environ):
+        if 'proxy' in key.lower():
+            monkeypatch.delenv(key, raising=False)
     secret = 'http://alice:p%40ss@localhost:8123'
     text = f'{secret} http://alice:p@ss@localhost:8123 alice:p%40ss alice:p@ss p%40ss p@ss Basic YWxpY2U6cEBzcw=='
     if mode == 'auto':
