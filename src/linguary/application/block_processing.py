@@ -389,12 +389,23 @@ class TranslationCall:
                 outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
                     violation = violation_of(error, context=physical_context)
+                    was_superseded = False
+                    was_stale_gen = False
+                    existing_reason = None
                     with self._unit_of_work.transaction() as transaction:
                         attempt = _attempt(transaction.work, physical_context.attempt_id)
                         if attempt is not None:
                             ctx_gen = (getattr(attempt, 'context', None) or {}).get('root_generation')
                             if ctx_gen is not None:
                                 attempt_root_generation = ctx_gen
+                        pre_root = transaction.work.get_root(recovery[0])
+                        if pre_root is not None:
+                            was_superseded = getattr(pre_root, 'superseded_by', None) is not None
+                            was_stale_gen = (
+                                attempt_root_generation is not None
+                                and getattr(pre_root, 'generation', None) != attempt_root_generation
+                            )
+                            existing_reason = getattr(pre_root, 'reason', None)
                         outcome = _failure_outcome(
                             error,
                             state=None if attempt is None else attempt.state,
@@ -414,6 +425,10 @@ class TranslationCall:
                                 transaction.work, current_root, recovery[1], unit
                             )
                     if outcome == 'unknown':
+                        if was_superseded:
+                            raise RecoveryError('superseded', recovery[0], original_error=error) from error
+                        if was_stale_gen and existing_reason != 'unknown_outcome':
+                            raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                     if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None

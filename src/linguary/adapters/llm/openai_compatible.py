@@ -459,8 +459,10 @@ def _raise_embedded_gateway_error(
         return
     status = _gateway_status(error)
     synth_doc = document if document.get("error") else {**document, "error": error}
+    retry_after = httpx.Headers(headers).get("Retry-After") if headers is not None else None
+    synth_headers = {"Retry-After": retry_after} if retry_after is not None else None
     _raise_for_status(
-        httpx.Response(status, json=synth_doc, headers=headers),
+        httpx.Response(status, json=synth_doc, headers=synth_headers),
         provider=provider,
         api_key=api_key,
         secrets=secrets,

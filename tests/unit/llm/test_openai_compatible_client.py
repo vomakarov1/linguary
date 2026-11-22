@@ -1705,5 +1705,56 @@ async def test_embedded_gateway_errors_with_choices_retry_after_and_non_ascii_co
         await client.aclose()
 
 
+async def test_embedded_gateway_errors_on_gzip_compressed_200_responses() -> None:
+    """Compressed HTTP 200 responses with embedded errors do not trigger httpx.DecodingError."""
+    import gzip
+
+    rate_limited_body = gzip.compress(json.dumps({"error": {"code": 429, "message": "slow down"}}).encode("utf-8"))
+    client = client_over(
+        lambda req: httpx.Response(
+            200,
+            content=rate_limited_body,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+                "Retry-After": "7",
+            },
+        )
+    )
+    try:
+        with pytest.raises(LLMTransportError) as limited:
+            await client.generate(_translation_request())
+        assert limited.value.outcome == "known_transient"
+        assert limited.value.retry_after_seconds == 7.0
+    finally:
+        await client.aclose()
+
+    overflow_body = gzip.compress(
+        json.dumps(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "error",
+                        "message": {"content": ""},
+                        "error": {"code": 400, "message": "This model's maximum context length is 128000"},
+                    }
+                ]
+            }
+        ).encode("utf-8")
+    )
+    client = client_over(
+        lambda req: httpx.Response(
+            200,
+            content=overflow_body,
+            headers={"Content-Type": "application/json", "Content-Encoding": "gzip"},
+        )
+    )
+    try:
+        with pytest.raises(LLMContextCapacityError):
+            await client.generate(_translation_request())
+    finally:
+        await client.aclose()
+
+
 
 

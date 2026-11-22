@@ -671,7 +671,7 @@ async def test_discarded_result_never_marks_incomplete_chapter_succeeded(tmp_pat
         await app.aclose()
 
 
-@pytest.mark.parametrize("error_kind", ["provider", "capacity", "truncated", "rate_limit"])
+@pytest.mark.parametrize("error_kind", ["provider", "capacity", "truncated", "rate_limit", "read_timeout"])
 async def test_restarted_root_failing_at_concurrency_2_isolates_sibling(tmp_path, error_kind):
     """When root 1 is restarted while in-flight and then fails with a terminal error, sibling root 2 still succeeds."""
     from linguary.application.ports.llm import (
@@ -708,6 +708,8 @@ async def test_restarted_root_failing_at_concurrency_2_isolates_sibling(tmp_path
                         truncated=True,
                         violation=Violation("provider_truncated", "translation_unit", safe_message="truncated"),
                     )
+                if error_kind == "read_timeout":
+                    raise LLMTransportError("read timeout", outcome="unknown")
                 raise LLMTransportError("HTTP 429", outcome="known_transient")
             _queue_translation(self, request)
             return await super().generate(request)
