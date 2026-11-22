@@ -1,4 +1,4 @@
-"""Сегментные исправления и помощь внутри смешанного блока (P6.T3)."""
+"""Segment corrections and assistance inside a mixed block (P6.T3)."""
 
 from __future__ import annotations
 
@@ -188,7 +188,7 @@ def _result(block: DocumentBlock, slots: tuple[str | None, ...], treatments: tup
 
 
 def test_correction_of_segmented_block_returns_segments() -> None:
-    """Многосегментный блок уходит и возвращается как segments, целый блок — как прежде."""
+    """A multi-segment block is sent and returned as segments; a whole block stays as before."""
     whole = _paragraph(0, "A whole sentence stays together.")
     mixed = _paragraph(1, _SOURCE, _spans())
     section = _section(whole, mixed)
@@ -275,7 +275,7 @@ def test_correction_of_segmented_block_returns_segments() -> None:
 
 
 def test_correction_keeps_untouched_segments() -> None:
-    """Возвращённый индекс заменяет слот, пропущенный остаётся, склейка берётся из rebuild."""
+    """A returned index replaces the slot, a skipped one stays, and the join comes from rebuild."""
     block = _paragraph(0, _SOURCE, _spans())
     section = _section(block)
     previous = _result(
@@ -365,7 +365,7 @@ def _candidates_for(second: BlockTreatment, start: int, end: int, quote: str, **
 
 
 def test_assistance_allowed_in_untranslated_segment_of_mixed_block() -> None:
-    """Помощь в непереведённом сегменте разрешена, внутри TRANSLATE — нет."""
+    """Assistance in an untranslated segment is allowed; inside TRANSLATE it is not."""
     kept = _candidates_for(BlockTreatment.READ_AS_IS, len(_FIRST), len(_SOURCE), _SECOND)
     assert kept[0].fragment_assistances[0].anchors[0].quote == _SECOND
 
@@ -522,7 +522,7 @@ def test_assistance_allowed_in_untranslated_segment_of_mixed_block() -> None:
 
 
 def test_foreign_anchor_is_not_judged_by_the_owner_span() -> None:
-    """Якорь блока B не покрыт переводом A, даже если смещение попадает в TRANSLATE-промежуток A."""
+    """Anchor of block B is not covered by translation A, even if the offset falls inside the TRANSLATE-span of A."""
     owner, owner_result = _mixed_block(BlockTreatment.READ_AS_IS)
     other = _paragraph(1, _SOURCE, _spans())
     other_result = _result(
@@ -611,7 +611,7 @@ def _stored(unit_of_work: SqlAlchemyUnitOfWork):
 async def test_lifecycle_mixed_block_processing_correction_recovery(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Смешанный блок проходит обработку, исправление сегмента и восстановление."""
+    """A mixed block goes through processing, segment correction, and recovery."""
     store_processing_book(unit_of_work, chapters=((_SOURCE,),))
     with unit_of_work.transaction() as tx:
         document = tx.documents.get(BOOK_ID)

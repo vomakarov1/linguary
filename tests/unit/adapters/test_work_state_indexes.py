@@ -62,8 +62,8 @@ def test_work_state_tables_define_expected_indexes() -> None:
         }
         for index_name, columns in expected.items():
             assert actual.get(index_name) == columns, (
-                f"Таблица {table_name} должна определять индекс {index_name}{columns}, "
-                f"найдено: {actual}"
+                f"Table {table_name} must define index {index_name}{columns}, "
+                f"found: {actual}"
             )
 
     migration_path = (
@@ -72,7 +72,7 @@ def test_work_state_tables_define_expected_indexes() -> None:
         / "versions"
         / "0014_work_state_indexes.py"
     )
-    assert migration_path.exists(), "Миграция 0014_work_state_indexes.py должна существовать"
+    assert migration_path.exists(), "Migration 0014_work_state_indexes.py must exist"
     spec = importlib.util.spec_from_file_location("migration_0014", migration_path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
@@ -88,7 +88,7 @@ def test_work_state_tables_define_expected_indexes() -> None:
     )
     assert (
         migration_0015_path.exists()
-    ), "Миграция 0015_book_id_cascade_indexes.py должна существовать"
+    ), "Migration 0015_book_id_cascade_indexes.py must exist"
     spec_0015 = importlib.util.spec_from_file_location("migration_0015", migration_0015_path)
     assert spec_0015 is not None and spec_0015.loader is not None
     migration_0015 = importlib.util.module_from_spec(spec_0015)

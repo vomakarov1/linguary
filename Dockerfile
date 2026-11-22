@@ -1,10 +1,10 @@
 FROM python:3.13-slim
 
-# Установка инструмента управления зависимостями uv с фиксированной версией
+# Install the uv dependency manager at a fixed version
 COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
 
-# EPUBCheck запускается через Java. Устанавливаем JRE и официальный архив
-# проверяющего инструмента с проверкой контрольной суммы.
+# EPUBCheck runs through Java. Install the JRE and the official archive
+# of the checking tool, with checksum verification.
 ARG EPUBCHECK_VERSION=5.4.0
 ARG EPUBCHECK_SHA256=33350c61038e71dfb3d45a76aed04bf5481e6d5500cb780f6e98db8bbd15a28c
 RUN apt-get update \
@@ -14,33 +14,33 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Создание системной группы и непривилегированного пользователя для запуска сервиса
+# Create a system group and an unprivileged user to run the service
 RUN groupadd -r linguary && useradd -r -g linguary -d /app -s /sbin/nologin linguary
 
 WORKDIR /app
 
-# Копирование манифестов зависимостей
+# Copy the dependency manifests
 COPY pyproject.toml uv.lock ./
 
-# Установка зависимостей проекта без dev-пакетов и без сохранения кэша
+# Install project dependencies without dev-only packages and without keeping the cache
 RUN uv sync --frozen --no-dev --no-install-project --no-cache
 
-# Копирование дерева исходного кода и миграций alembic
+# Copy the source tree and the alembic migrations
 COPY alembic alembic
 COPY alembic.ini ./
 COPY src src
 COPY README.md ./
 
-# Установка пакета приложения в редактируемом режиме без dev-пакетов
+# Install the application package in editable mode without dev-only packages
 RUN uv sync --frozen --no-dev --no-cache
 
-# Настройки окружения по умолчанию для работы внутри контейнера
+# Default environment settings for running inside the container
 ENV PATH="/app/.venv/bin:$PATH"
 ENV LINGUARY_SERVER_HOST=0.0.0.0
 ENV LINGUARY_SERVER_PORT=8000
 ENV LINGUARY_STORAGE_DATA_ROOT=/data
 
-# Создание каталога данных и назначение прав пользователю linguary
+# Create the data directory and grant it to the linguary user
 RUN mkdir -p /data && chown -R linguary:linguary /app /data
 
 EXPOSE 8000

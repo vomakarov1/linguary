@@ -1,7 +1,7 @@
 [project]
 name = "linguary"
 version = "0.1.0"
-description = "Локальная обработка художественных EPUB через LLM: перевод, словарные подсказки и языковые заметки"
+description = "Local processing of literary EPUB files through an LLM: translation, vocabulary hints, and language notes"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -37,5 +37,5 @@ testpaths = ["tests"]
 addopts = "--strict-markers"
 asyncio_mode = "auto"
 markers = [
-    "slow: медленный тест (реальный LLM, большие EPUB); исключается через -m \"not slow\"",
+    "slow: slow test (a real LLM, large EPUB files); excluded with -m \"not slow\"",
 ]

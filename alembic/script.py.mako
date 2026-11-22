@@ -19,10 +19,10 @@ depends_on: str | Sequence[str] | None = ${repr(depends_on)}
 
 
 def upgrade() -> None:
-    """Применяет миграцию."""
+    """Applies the migration."""
     ${upgrades if upgrades else "pass"}
 
 
 def downgrade() -> None:
-    """Откатывает миграцию."""
+    """Reverts the migration."""
     ${downgrades if downgrades else "pass"}
