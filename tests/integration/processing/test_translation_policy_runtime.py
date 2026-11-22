@@ -162,7 +162,7 @@ async def test_provenance_rejects_revoked_ownership_before_send(tmp_path):
             await ProvenanceClient(inner, app.book_conditions, conditions.id).generate(request)
         inner.generate.assert_not_awaited()
         with app.unit_of_work.transaction() as transaction:
-            assert transaction.work.get_attempt(request.call_context.attempt_id).state == 'created'
+            assert transaction.work.get_attempt(request.call_context.attempt_id).state == 'cancelled'
     finally:
         await app.aclose()
 

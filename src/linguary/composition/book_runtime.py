@@ -267,7 +267,7 @@ class ProvenanceClient:
 
     def _ensure_observation_ready(self, request):
         inner = self.inner
-        if getattr(inner, '_observation_failed', False):
+        if getattr(inner, '_observation_failed', False) is True:
             self._cancel_created_attempt(request)
             raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
         if isinstance(inner, LoggingLLMClient) and request.book_id is not None and request.stage is not None:
