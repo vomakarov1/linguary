@@ -21,7 +21,10 @@
   <h2>Восстановление обработки</h2>
   <p>Покрытие: {{ data.recovery.covered }} из {{ data.recovery.total }}. Обращения: {{ data.recovery.calls_used }} из {{ data.recovery.limit }}.</p>
   {% if data.recovery.reason %}<p role="status">{{ quality_ui.reason_labels.get(data.recovery.reason, 'Обработка остановлена') }}.</p>{% endif %}
-  {% if data.recovery.reason == 'unknown' %}<p>Неизвестный исход нельзя снять повтором или увеличением предела. Сначала нужно подтвердить исход обращения.</p>{% endif %}
+  {% for root in data.recovery.roots|default([]) if root.reason %}
+    <p>{% if root.chapter_title %}{{ root.chapter_title }}: {% endif %}{{ quality_ui.reason_labels.get(root.reason, 'Обработка остановлена') }}.</p>
+  {% endfor %}
+  {% if data.recovery.reason in ('unknown', 'unknown_outcome') %}<p>Неизвестный исход нельзя снять повтором или увеличением предела. Продолжить можно только явным перезапуском незавершённой части.</p>{% endif %}
   <h2>Добровольная вычитка</h2>
   <p role="status">{{ quality_ui.review_labels.get(data.quality_review.state, 'Состояние вычитки неизвестно') }}.</p>
   {% if data.quality_review.reason %}<p>{{ quality_ui.reason_labels.get(data.quality_review.reason, 'Вычитка остановлена') }}.</p>{% endif %}
@@ -84,8 +87,8 @@
     {% endif %}
   </details>
   {% for root in data.recovery.roots|default([]) if root.can_extend %}
-    <details><summary>Явно увеличить предел восстановления</summary>
-      <p>Увеличение не запускает повтор автоматически и не обнуляет использованные обращения. Предел одной области сохраняется.</p>
+    <details><summary>Явно увеличить предел восстановления{% if root.chapter_title %}: {{ root.chapter_title }}{% endif %}</summary>
+      <p>{% if root.chapter_title %}{{ root.chapter_title }}. {% endif %}{% if root.reason %}{{ quality_ui.reason_labels.get(root.reason, 'Обработка остановлена') }}. {% endif %}Увеличение не запускает повтор автоматически и не обнуляет использованные обращения. Предел одной области сохраняется.</p>
       <form method="post" action="/books/{{ quality_book_id }}/recovery/{{ root.root_id }}/limit">
         <input type="hidden" name="expected_generation" value="{{ root.generation }}">
         <label>Дополнительные обращения <input type="number" name="additional_calls" min="1" step="1" required></label>
@@ -95,18 +98,20 @@
     </details>
   {% endfor %}
   {% for root in data.recovery.roots|default([]) if root.can_restart %}
-    <details><summary>Перезапустить незавершённую часть главы</summary>
-      <p>Принятые блоки сохранятся; новый запуск обработает только оставшиеся области.</p>
+    <details><summary>Перезапустить незавершённую часть главы{% if root.chapter_title %}: {{ root.chapter_title }}{% endif %}</summary>
+      <p>{% if root.chapter_title %}{{ root.chapter_title }}. {% endif %}{% if root.reason %}{{ quality_ui.reason_labels.get(root.reason, 'Обработка остановлена') }}. {% endif %}Принятые блоки сохранятся; новый запуск обработает только оставшиеся области.</p>
       <form method="post" action="/books/{{ quality_book_id }}/recovery/{{ root.root_id }}/restart">
         <input type="hidden" name="expected_generation" value="{{ root.generation }}">
+        {% if root.has_unknown_outcome %}
+          <p>Повторный запуск может привести к повторной оплате этого запроса у провайдера.</p>
+          <label><input type="checkbox" name="acknowledge_unknown_outcome" value="true" required> Подтверждаю возможную повторную оплату запроса у провайдера</label>
+        {% endif %}
         <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю перезапуск незавершённой части</label>
         <button type="submit">Перезапустить перевод области</button>
       </form>
     </details>
   {% endfor %}
-  {% if data.recovery.can_retry and data.recovery.reason not in ('unknown', 'limit') %}
-    {% for task in quality_ui.retry_tasks %}<form method="post" action="/tasks/{{ task.id }}/retry"><button type="submit">Повторить: {{ task.label }}</button></form>{% endfor %}
-  {% endif %}
+  {% for task in quality_ui.retry_tasks %}<form method="post" action="/tasks/{{ task.id }}/retry"><button type="submit">Повторить: {{ task.label }}</button></form>{% endfor %}
   {% if quality_ui.forms and quality_ui.forms[0].routes %}
     <form method="get" action="{{ request.url.path }}">
       <label>Охват для оценки

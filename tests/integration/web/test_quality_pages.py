@@ -588,3 +588,106 @@ def test_partial_book_result_and_book_overview_avoid_loading_unaffected_chapter_
         SqlAlchemyBlockResultRepository.list_for_run = orig_list_for_run  # type: ignore[method-assign]
 
 
+def test_detail_page_keeps_retry_button_for_other_chapter_when_one_root_unknown(
+    configured_client, configured_application,
+):
+    """One unknown root must not hide a retryable failure on another chapter."""
+    from lxml import html
+    from linguary.domain import TaskType
+    from web_scenario import SOURCE_TEXT
+    from test_quality_projections import _prepared_book, _save_attempt, _save_failed_task, _save_root
+
+    scenario, conditions = _prepared_book(
+        configured_client, configured_application, chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
+    )
+    with configured_application.unit_of_work.transaction() as tx:
+        # An unknown attempt projects the book-level reason as 'unknown'.
+        unknown_root, unknown_scope = _save_root(
+            tx, scenario, conditions, scenario.block_ids(0), status='stopped', reason=None,
+        )
+        _save_attempt(
+            tx, scenario, conditions, unknown_root, unknown_scope, state='unknown', ordinal=1,
+        )
+        healthy_root, _healthy_scope = _save_root(
+            tx, scenario, conditions, scenario.block_ids(1), status='pending', reason=None,
+        )
+        blocked = _save_failed_task(
+            tx, scenario, conditions, (unknown_root,), section_id=scenario.section(0).id,
+            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+        allowed = _save_failed_task(
+            tx, scenario, conditions, (healthy_root,), section_id=scenario.section(1).id,
+            task_type=TaskType.REGENERATE_BLOCK,
+        )
+    response = configured_client.get(f'/books/{scenario.book_id}', headers=HTML)
+    assert response.status_code == 200
+    tree = html.fromstring(response.text)
+    retry_actions = [form.get('action') for form in tree.xpath('//form[contains(@class, "failure")]')]
+    assert f'/tasks/{allowed.id}/retry' in retry_actions
+    assert f'/tasks/{blocked.id}/retry' not in retry_actions
+    allowed_form = tree.xpath(f'//form[@class="failure" and @action="/tasks/{allowed.id}/retry"]')[0]
+    assert 'Повторить' in allowed_form.text_content()
+
+
+def test_quality_partial_shows_chapter_label_and_billing_warning_checkbox_for_unknown_restart(
+    configured_client, configured_application,
+):
+    """Unknown restart names the chapter and asks to accept a possible second charge."""
+    from lxml import html
+    from linguary.web.labels import QUALITY_OPERATION_ERRORS, QUALITY_REASON_LABELS
+    from test_quality_projections import _prepared_book, _save_attempt, _save_root
+
+    scenario, conditions = _prepared_book(configured_client, configured_application)
+    with configured_application.unit_of_work.transaction() as tx:
+        root, scope = _save_root(
+            tx, scenario, conditions, scenario.block_ids(), status='stopped', reason='unknown_outcome',
+            calls_used=1,
+        )
+        _save_attempt(tx, scenario, conditions, root, scope, state='unknown', ordinal=1)
+    response = configured_client.get(f'/books/{scenario.book_id}', headers=HTML)
+    assert response.status_code == 200
+    tree = html.fromstring(response.text)
+    form = tree.xpath(f'//form[contains(@action, "/recovery/{root.id}/restart")]')[0]
+    details = form.getparent()
+    visible = ' '.join(details.itertext())
+    assert 'Chapter 1' in visible
+    assert 'Исход отправленного запроса неизвестен' in visible
+    assert 'Повторный запуск может привести к повторной оплате этого запроса у провайдера.' in visible
+    checkbox = form.xpath('.//input[@type="checkbox" and @name="acknowledge_unknown_outcome"]')
+    assert len(checkbox) == 1
+    assert checkbox[0].get('value') == 'true'
+    assert checkbox[0].get('checked') is None
+    confirmed = form.xpath('.//input[@type="checkbox" and @name="confirmed"]')
+    assert len(confirmed) == 1 and confirmed[0].get('value') == 'true'
+    assert (
+        'Неизвестный исход нельзя снять повтором или увеличением предела. '
+        'Продолжить можно только явным перезапуском незавершённой части.'
+    ) in response.text
+    assert 'подтвердить исход' not in response.text
+    assert QUALITY_REASON_LABELS == {
+        'limit': 'Достигнут предел обращений',
+        'budget': 'Недостаточно согласованного бюджета',
+        'unknown': 'Исход обращения неизвестен; новые обращения остановлены',
+        'unknown_outcome': 'Исход отправленного запроса неизвестен',
+        'output_truncated': 'Ответ модели оборвался и остался неполным',
+        'scope_limit': 'Достигнут предел обращений для этой области',
+        'context_capacity': 'Запрос не помещается в контекст модели',
+        'provider_refusal': 'Провайдер отказался выполнить запрос',
+        'transient_error': 'Временный сбой провайдера',
+        'configuration_error': 'Провайдер отверг ключ, модель или доступ',
+        'provider_error': 'Провайдер вернул ошибку',
+        'validation_error': 'Результат не прошёл проверку',
+        'interrupted': 'Работа прервана',
+        'unsafe_partition': 'Безопасно продолжить обработку этой области нельзя',
+        'conditions_unavailable': 'Сохранённые условия недоступны',
+        'price_unavailable': 'Нет подтверждённой цены и оценки маршрута',
+        'price_or_route_unavailable': 'Подтверждённый маршрут недоступен',
+        'manifest_changed': 'Материалы изменились',
+        'invalid_response': 'Ответ не прошёл проверку',
+    }
+    assert QUALITY_OPERATION_ERRORS['unknown'] == (
+        'Исход предыдущего обращения неизвестен. Резерв удерживается. '
+        'Ни обычный повтор, ни увеличение предела не снимают этот исход: нужен явный перезапуск незавершённой части.'
+    )
+
+
