@@ -466,6 +466,10 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
         )
         assert [len(r.ordered_block_ids) for r in (ped_req1, ped_req2)] == list(default_ped_sizes)
         assert (*ped_req1.ordered_block_ids, *ped_req2.ordered_block_ids) == tuple(b.id for b in tb)
+        # Adjacent QUOTE blocks stay together inside the same pedagogical fragment and note quota splits evenly.
+        assert all(q.id in ped_req1.ordered_block_ids for q in quote_blocks)
+        assert "не более 7" in ped_req1.input_text
+        assert "не более 7" in ped_req2.input_text
         # Intra-chapter glossary continuity: fragment 1 candidates are passed to fragments 2 and 3.
         assert "Everlost" in nar_req2.input_text and "Междумирье" in nar_req2.input_text
         assert "Mary Hightower" in nar_req3.input_text

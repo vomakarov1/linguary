@@ -867,13 +867,10 @@ _INSTRUCTION_ABBREV_BEFORE_DOT_RE = re.compile(
 )
 _INSTRUCTION_INITIAL_BEFORE_DOT_RE = re.compile(r"(?:^|(?<!\w))[A-ZА-ЯЁ]\.$")
 _FRAGMENT_BOUNDARY_ARTIFACT_RE = re.compile(
-    r"до\s+конца\s+фрагмента"
+    r"до\s+конца\s+(?:(?:этого|текущего|данного)\s+)?фрагмента"
     r"|без\s+подстановки\s+имени\s+из\s+других\s+глав"
-    r"|в\s+этом\s+фрагменте\s+оста[её]тся\s+без\s+имени"
-    r"|в\s+начале\s+фрагмента"
-    r"|в\s+этом\s+фрагменте"
-    r"|в\s+текущем\s+фрагменте"
-    r"|данного\s+фрагмента"
+    r"|в\s+(?:начале|конце)\s+фрагмента"
+    r"|в\s+(?:этом|текущем)\s+фрагменте(?!\s+(?:письма|книги|текста|дневника|цитаты))"
     r"|без\s+придуманного\s+имени",
     re.IGNORECASE,
 )
@@ -2828,11 +2825,19 @@ def _collect_speaker_subject_anchor_issues(
     return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
 
 
+_GENDER_ROLE_NOUN = (
+    r"(?:brother|sister|brothers|sisters|mother|father|mom|mum|dad|parent|parents|"
+    r"husband|wife|son|daughter|sons|daughters|aunt|uncle|grandma|grandpa|"
+    r"boy|girl|boys|girls|man|woman|men|women|kid|kids|child|children|"
+    r"friend|friends|sibling|siblings)"
+)
 _GENDER_PLURAL_SUBJECT_RE = re.compile(
-    r"\b(?:brother|sister|mother|father|parents|friends|boys|girls|children|kids|men|women|siblings)"
-    r"\s+and\s+"
-    r"(?:brother|sister|mother|father|parents|friends|boys|girls|children|kids|men|women|siblings)\b",
+    rf"\b{_GENDER_ROLE_NOUN}\s+and\s+"
+    rf"(?:(?:the|a|an|his|her|their|our|my|your)\s+)?{_GENDER_ROLE_NOUN}\b",
     re.IGNORECASE,
+)
+_GENDER_CONJOINED_NAMES_RE = re.compile(
+    r"^\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+and\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s*$"
 )
 
 
@@ -2861,7 +2866,10 @@ def _collect_gender_plural_subject_issues(
             if resolved_subject is not None
             else fact.subject_anchor.quote
         )
-        if _GENDER_PLURAL_SUBJECT_RE.search(quote) is None:
+        if (
+            _GENDER_PLURAL_SUBJECT_RE.search(quote) is None
+            and _GENDER_CONJOINED_NAMES_RE.match(quote) is None
+        ):
             continue
         block_id = (
             resolved_subject.block_id
@@ -2895,6 +2903,7 @@ def validate_narrative_response(
     language_detector: LanguageDetector | None = None,
     known_names: Iterable[str] = (),
     name_translation_policy: NameTranslationPolicy | None = None,
+    enforce_strict_gender_subject: bool = True,
 ) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Validate complete scene coverage and source-bound narrative facts."""
     issues: list[tuple[str, str, tuple[str, ...]]] = []
@@ -2989,21 +2998,22 @@ def validate_narrative_response(
             )
         )
 
-    gender_plural_details, gender_plural_blocks = _collect_gender_plural_subject_issues(
-        payload.context_facts,
-        resolved_facts,
-        scoped_aliases,
-        scoped_aliases_by_block_id,
-    )
-    if gender_plural_details:
-        issues.append(
-            (
-                "gender_plural_subject",
-                "для kind=gender (male/female) subject_anchor должен указывать на одного персонажа, "
-                f"а не на группу через and ({'; '.join(gender_plural_details)})",
-                tuple(gender_plural_blocks),
-            )
+    if enforce_strict_gender_subject:
+        gender_plural_details, gender_plural_blocks = _collect_gender_plural_subject_issues(
+            payload.context_facts,
+            resolved_facts,
+            scoped_aliases,
+            scoped_aliases_by_block_id,
         )
+        if gender_plural_details:
+            issues.append(
+                (
+                    "gender_plural_subject",
+                    "для kind=gender (male/female) subject_anchor должен указывать на одного персонажа, "
+                    f"а не на группу через and ({'; '.join(gender_plural_details)})",
+                    tuple(gender_plural_blocks),
+                )
+            )
 
     mapped_facts = [
         ContextFact(
@@ -4305,26 +4315,39 @@ _SHORT_B1_PHRASES = (
     ("how", "very", "wrong"),
     ("suppose", "so"),
     ("kept", "what", "from"),
-    ("calm", "down"),
-    ("figure", "out"),
-    ("work", "out"),
-    ("turn", "out"),
-    ("give", "in"),
-    ("end", "up"),
-    ("break", "down"),
-    ("pass", "out"),
-    ("show", "up"),
-    ("hang", "on"),
-    ("hold", "on"),
-    ("make", "up"),
-    ("catch", "up"),
-    ("set", "off"),
-    ("bring", "up"),
-    ("carry", "on"),
-    ("come", "across"),
-    ("put", "up", "with"),
-    ("run", "out", "of"),
 )
+_A2_B1_PHRASAL_VERB_RE = re.compile(
+    r"(?:"
+    r"\b(?:calm|calms|calmed|calming)\s+down\b"
+    r"|\b(?:figure|figures|figured|figuring)\s+out\b"
+    r"|\b(?:work|works|worked|working)\s+out\b"
+    r"|\b(?:turn|turns|turned|turning)\s+out\b"
+    r"|\b(?:give|gives|gave|given|giving)\s+in\b"
+    r"|\b(?:end|ends|ended|ending)\s+up\b"
+    r"|\b(?:break|breaks|broke|broken|breaking)\s+down\b"
+    r"|\b(?:pass|passes|passed|passing)\s+out\b"
+    r"|\b(?:show|shows|showed|shown|showing)\s+up\b"
+    r"|\b(?:hang|hangs|hung|hanging)\s+on\b"
+    r"|\b(?:hold|holds|held|holding)\s+on\b"
+    r"|(?<!-)\b(?:make|makes|made|making)\s+up\b(?!-)"
+    r"|\b(?:catch|catches|caught|catching)\s+up\b"
+    r"|\b(?:set|sets|setting)\s+off\b"
+    r"|\b(?:carry|carries|carried|carrying)\s+on\b"
+    r"|\b(?:put|puts|putting)\s+up\s+with\b"
+    r"|\b(?:run|runs|ran|running)\s+out\s+of\b"
+    r"(?!\s+(?:the|a|an|my|his|her|their|our|your|this|that)\s+"
+    r"(?:house|room|door|building|shop|store|school|street|park|yard|garden|"
+    r"car|bus|train|hall|kitchen|bedroom|office|forest|woods)\b)"
+    r"|\b(?:come|comes|came|coming)\s+across\b"
+    r"(?!\s+(?:the|a|an|this|that)\s+"
+    r"(?:street|road|room|bridge|river|yard|park|hall|field|floor|path)\b)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_b1_phrasal_verb(text: str) -> bool:
+    return _A2_B1_PHRASAL_VERB_RE.search(text) is not None
 _A2_PRESENT_PERFECT_ADVERBS = (
     r"(?:not|never|ever|already|just|still|really|always|often|only|almost|"
     r"finally|barely|hardly|nearly|recently|yet)"
@@ -4489,7 +4512,8 @@ _A2_IT_IS_TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _A2_QUOTED_SUBJECT_INVERSION_RE = re.compile(
-    r"""[”"’]\s*,?\s*was\s+all\s+(?:he|she|they|i|we|you|[a-z]+)\s+(?:said|asked|replied|answered|told|knew|saw|heard)\b""",
+    r"""[”"’']\s*,?\s*was\s+all\s+(?:(?:the|a|an|this|that|my|his|her)\s+)?[a-z]+\s+"""
+    r"""(?:said|asked|replied|answered|told|knew|saw|heard|whispered|muttered|thought)\b""",
     re.IGNORECASE,
 )
 _A2_NONLEXICAL_BACKING_KINDS = frozenset({"grammar", "idiom", "speech_style"})
@@ -5086,7 +5110,7 @@ def _elementary_reply_mode(
         return None
     if any(word in _SHORT_B1_WORDS for word in words) or any(
         _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
-    ):
+    ) or _has_b1_phrasal_verb(text):
         return None
     if len(words) > 8:
         return None
@@ -5301,6 +5325,8 @@ def _read_as_is_stoplist_mode(
         ) or _is_single_b1_reporting_verb_only(words):
             return BlockTreatment.GLOSSARY_ONLY
         return BlockTreatment.TRANSLATE
+    if _has_b1_phrasal_verb(text):
+        return BlockTreatment.GLOSSARY_ONLY
     if dominant_script(text) == "LATIN":
         unknown = non_core_a2_words(text, known_names=known_names)
         if unknown:

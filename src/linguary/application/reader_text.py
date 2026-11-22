@@ -16,7 +16,7 @@ _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 _A2_SUMMARY_HEADING_PREFIX_RE = re.compile(
-    r"^(?:previously\s+in\s+(?:the\s+)?chapter(?:\s+[\w-]+)?|chapter\s+[\w-]+\s+summary|summary)\s*[:—-]\s*",
+    r"^(?:previously\s+in\s+(?:the\s+)?chapter(?:\s+[\w-]+)?|chapter(?:\s+[\w-]+)?\s+summary|summary)\s*[:—–-]\s*",
     re.IGNORECASE,
 )
 A2_SUMMARY_MAX_SENTENCES = 6

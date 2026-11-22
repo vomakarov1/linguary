@@ -4326,7 +4326,7 @@ def test_prior_chapter_topics_bounds_window_and_cap_and_handles_parallel_seed_mo
 
 
 async def test_narrative_and_pedagogical_use_separate_fragment_budgets(stored_book, monkeypatch):
-    """Narrative uses scaled _narrative_max_fragment_blocks() + block_overhead=450; pedagogical keeps _max_fragment_blocks."""
+    """Narrative uses scaled _narrative_max_fragment_blocks() + block_overhead=450; pedagogical uses _pedagogical_max_fragment_blocks() + block_overhead=120."""
     _, uow, _ = stored_book
     blocks = tuple(_block(i, f'Sentence number {i} about Holmes.') for i in range(30))
     _store(uow, blocks)

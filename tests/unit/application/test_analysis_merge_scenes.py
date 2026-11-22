@@ -1410,17 +1410,22 @@ def test_validate_narrative_speaker_subject_anchor_handles_straight_quotes_with_
 def test_validate_narrative_rejects_gender_plural_subject_with_and():
     aliases = {'b1': 'id-1', 'b2': 'id-2'}
     texts = {
-        'id-1': 'The brother and sister ran toward the mother and father.',
+        'id-1': (
+            'The brother and sister ran toward his mother and his father while '
+            'Nick and Allie watched the boy and girl.'
+        ),
         'id-2': 'Her brother waited quietly by the gate.',
     }
     visible = {'b1': texts['id-1'], 'b2': texts['id-2']}
     scenes = (
-        QuotedSceneResponse('b1', 'b2', 'Сцена с детьми.', participants=('brother', 'sister')),
+        QuotedSceneResponse('b1', 'b2', 'Сцена с детьми.', participants=('brother', 'sister', 'Nick', 'Allie')),
     )
 
     for quote, gender_value in (
         ('brother and sister', 'male'),
-        ('mother and father', 'female'),
+        ('his mother and his father', 'female'),
+        ('boy and girl', 'male'),
+        ('Nick and Allie', 'male'),
     ):
         anchor = QuotedSourceAnchorResponse('b1', quote)
         bad_fact = QuotedContextFactResponse('f-plural', 'gender', (anchor,), anchor, gender_value, 'explicit')
@@ -1432,6 +1437,16 @@ def test_validate_narrative_rejects_gender_plural_subject_with_and():
         assert exc.value.violation is not None
         assert exc.value.violation.rule_code == 'gender_plural_subject'
         assert exc.value.violation.block_ids == ('id-1',)
+
+    # Legacy cache validation with enforce_strict_gender_subject=False allows cached V5/V6 facts.
+    cached_anchor = QuotedSourceAnchorResponse('b1', 'brother and sister')
+    cached_fact = QuotedContextFactResponse('f-legacy', 'gender', (cached_anchor,), cached_anchor, 'male', 'explicit')
+    _, legacy_resolved = validate_narrative_response(
+        NarrativeAnalysisResponse('Keep voice.', 'Summary.', context_facts=(cached_fact,), scenes=scenes),
+        aliases, texts, visible, ordered_block_ids=('id-1', 'id-2'),
+        enforce_strict_gender_subject=False,
+    )
+    assert len(legacy_resolved) == 1
 
     # Single-character gender and non-male/female value on plural group are accepted.
     single_anchor = QuotedSourceAnchorResponse('b2', 'brother')

@@ -545,11 +545,8 @@ class AnalyzeChapter:
             narrative, scenes, facts = merge_narrative_fragments(
                 narrative_parts, section_blocks=section.ordered_blocks
             )
-            merged_name_policy = (
-                self._name_translation_policy
-                if self._should_enforce_v7_name_policy(command, conditions=conditions)
-                else None
-            )
+            enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
+            merged_name_policy = self._name_translation_policy if enforce_v7 else None
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -558,7 +555,8 @@ class AnalyzeChapter:
                 target_language=document.target_language,
                 language_detector=self._language_detector,
                 known_names=known_names,
-                name_translation_policy=merged_name_policy)
+                name_translation_policy=merged_name_policy,
+                enforce_strict_gender_subject=enforce_v7)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
@@ -566,11 +564,8 @@ class AnalyzeChapter:
         else:
             if saved.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
-            cached_name_policy = (
-                self._name_translation_policy
-                if self._should_enforce_v7_name_policy(command, conditions=conditions)
-                else None
-            )
+            enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
+            cached_name_policy = self._name_translation_policy if enforce_v7 else None
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -579,7 +574,8 @@ class AnalyzeChapter:
                 target_language=document.target_language,
                 language_detector=self._language_detector,
                 known_names=known_names,
-                name_translation_policy=cached_name_policy)
+                name_translation_policy=cached_name_policy,
+                enforce_strict_gender_subject=enforce_v7)
         return narrative, saved, scenes, facts, attempts, _total_usage(usages), dependencies, expected_conditions_id
 
     async def _analyze_staged(
@@ -918,11 +914,8 @@ class AnalyzeChapter:
             def validate(payload, *, from_cache: bool = False):
                 if is_narrative:
                     _ensure_candidates_single_script(payload, context)
-                    name_policy = (
-                        self._name_translation_policy
-                        if (not from_cache or self._should_enforce_v7_name_policy(command))
-                        else None
-                    )
+                    enforce_v7 = not from_cache or self._should_enforce_v7_name_policy(command)
+                    name_policy = self._name_translation_policy if enforce_v7 else None
                     return validate_narrative_response(payload, context.block_ids_by_alias,
                         {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
                         ordered_block_ids=fragment.block_ids,
@@ -933,7 +926,8 @@ class AnalyzeChapter:
                         target_language=document.target_language,
                         language_detector=self._language_detector,
                         known_names=fragment_known_names,
-                        name_translation_policy=name_policy)
+                        name_translation_policy=name_policy,
+                        enforce_strict_gender_subject=enforce_v7)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._is_a2_reader():

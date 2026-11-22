@@ -571,7 +571,9 @@ def test_validate_a2_summary_rejects_disallowed_heading_prefix_in_monolingual_mo
         "Previously in Chapter: Nick wakes up in Everlost.",
         "Previously in Chapter 1: Nick wakes up in Everlost.",
         "Previously in Chapter Two — Nick wakes up in Everlost.",
+        "Previously in Chapter – Nick wakes up in Everlost.",
         "Previously in the chapter - Nick wakes up in Everlost.",
+        "Chapter summary: Nick wakes up in Everlost.",
         "Chapter 3 Summary: Nick wakes up in Everlost.",
         "Chapter three summary — Nick wakes up in Everlost.",
         "Summary: Nick wakes up in Everlost.",
@@ -593,6 +595,7 @@ def test_validate_a2_summary_rejects_disallowed_heading_prefix_in_monolingual_mo
     # Clean A2 summaries without heading prefixes pass.
     for good_summary in (
         "Nick wakes up in Everlost and meets Allie.",
+        "Previously, Allie and Nick lived in the real world.",
         "Previously in the dark forest, Nick lost his silver coin.",
         "The summary on the old sign helps Nick find the road.",
     ):

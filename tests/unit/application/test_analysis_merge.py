@@ -3672,9 +3672,11 @@ def test_merged_instructions_filters_extended_fragment_boundary_artifacts() -> N
     f0 = (
         "Сохранять тревожный ритм. "
         "В начале фрагмента мальчик ещё не назван. "
+        "В конце фрагмента герои уходят. "
         "В этом фрагменте не раскрывать место действия. "
         "В текущем фрагменте герои держат дистанцию. "
-        "До конца данного фрагмента сохранять интригу."
+        "До конца данного фрагмента сохранять интригу. "
+        "В этом фрагменте письма сохранять высокий стиль."
     )
     f1 = (
         "Передавать речь без придуманного имени. "
@@ -3691,8 +3693,9 @@ def test_merged_instructions_filters_extended_fragment_boundary_artifacts() -> N
     )
     assert merged_multi.translation_instructions.splitlines() == [
         "1. Сохранять тревожный ритм.",
-        "2. Девочка остаётся неназванной до сцены в лесу.",
-        "3. Мальчик остается без имени до знакомства с Элли.",
+        "2. В этом фрагменте письма сохранять высокий стиль.",
+        "3. Девочка остаётся неназванной до сцены в лесу.",
+        "4. Мальчик остается без имени до знакомства с Элли.",
     ]
 
     # Single fragment preserves all instructions intact.
@@ -3716,18 +3719,26 @@ def test_normalize_a2_promotes_b1_phrasal_verbs_and_quoted_subject_inversion() -
 
     point = (RequiredPoint("p1", "Объяснить фразовый глагол."),)
     cases = [
-        # B1 phrasal verbs from A1 words -> TRANSLATE without vocab diff
-        ("“Calm down,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
-        ("Figure out the way.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
-        ("Hold on!", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
-        ("We run out of time.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
-        ("Put up with it.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
-        # B1 phrasal verb with vocabulary difficulty -> GLOSSARY_ONLY
+        # B1 phrasal verbs across inflections (base, past, 3sg, -ing) -> GLOSSARY_ONLY
         ("“Calm down,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
-        # Quoted subject inversion -> TRANSLATE
+        ("He calmed down.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("It turned out fine.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("She figured out the way.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("The car broke down.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("We ran out of water.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("He ends up alone.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("Put up with it.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("She is holding on.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        # Quoted subject inversion (curly, straight double, curly/straight single, NP subject) -> TRANSLATE
         ("“Here,” was all he said.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
         ('"Wait", was all she asked.', BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
         ("‘No,’ was all Nick replied.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("'Here,' was all the boy said.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        # Literal A1 spatial motion and hyphenated noun stay READ_AS_IS
+        ("Run out of the house!", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("Come across the street!", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("Bring up the bag!", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("She has make-up.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
         # Negative controls stay READ_AS_IS
         ("“Here,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
         ("That was all he said.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
@@ -3741,20 +3752,9 @@ def test_normalize_a2_promotes_b1_phrasal_verbs_and_quoted_subject_inversion() -
         TreatmentPlanItemResponse(f"b{idx + 1}", initial)
         for idx, (_, initial, _) in enumerate(cases)
     )
-    difficulties = (
-        QuotedDifficultyResponse(
-            "d-calm-vocab",
-            (QuotedSourceAnchorResponse("b6", "Calm down"),),
-            "b6",
-            "vocabulary",
-            "useful",
-            "lexical_hint",
-            point,
-        ),
-    )
     payload = PedagogicalAnalysisResponse(
         treatment_plan=plan_items,
-        difficulties=difficulties,
+        difficulties=(),
     )
     normalized = normalize_a2_dialogue_response(
         payload,
@@ -3829,7 +3829,46 @@ def test_validate_content_plan_rejects_duplicate_difficulty_anchor_in_same_block
     assert exc.value.violation.rule_code == "duplicate_difficulty_anchor"
     assert exc.value.violation.block_ids == (blocks[0].id,)
 
-    # Distinct anchors in same block AND same quote in different blocks pass validation.
+    # Mixed start=None vs explicit start/end for the same occurrence also collides.
+    mixed_dup_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=plan_items,
+        content_plan=QuotedContentPlanResponse(
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d1",
+                    (QuotedSourceAnchorResponse("b1", "calm down", start=None, end=None),),
+                    "b1",
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Лексическое значение."),),
+                ),
+                QuotedDifficultyResponse(
+                    "d2",
+                    (QuotedSourceAnchorResponse("b1", "calm down", start=18, end=27),),
+                    "b1",
+                    "idiom",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Фразовый глагол."),),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as mixed_exc:
+        validate_content_plan(
+            mixed_dup_payload,
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+            blocks=blocks,
+        )
+    assert mixed_exc.value.violation is not None
+    assert mixed_exc.value.violation.rule_code == "duplicate_difficulty_anchor"
+
+    # Overlapping anchors of different length AND same quote in different blocks pass validation.
     ok_payload = ChapterAnalysisResponse(
         translation_instructions="Keep voice.",
         chapter_summary="Summary.",
@@ -3847,12 +3886,12 @@ def test_validate_content_plan_rejects_duplicate_difficulty_anchor_in_same_block
                 ),
                 QuotedDifficultyResponse(
                     "d2",
-                    (QuotedSourceAnchorResponse("b1", "calm down"),),
+                    (QuotedSourceAnchorResponse("b1", "barely calm down"),),
                     "b1",
-                    "idiom",
+                    "grammar",
                     "useful",
                     "explanation",
-                    (RequiredPoint("p1", "Фразовый глагол."),),
+                    (RequiredPoint("p1", "Оборот целиком."),),
                 ),
                 QuotedDifficultyResponse(
                     "d3",
