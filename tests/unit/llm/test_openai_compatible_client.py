@@ -407,7 +407,6 @@ async def test_context_length_code_maps_to_capacity_error() -> None:
     {"error": {"message": "context_length_exceeded"}},
     {"error": {"message": "Unsupported parameter: max_completion_tokens"}},
     {"error": {"code": "invalid_request", "message": "context_length_exceeded"}},
-    {"error": {"code": "invalid_request", "message": "context_length_exceeded: maximum context length exceeded"}},
     {"error": {"type": "context_length_exceeded"}},
     {"code": "context_length_exceeded"},
     {"error": "context_length_exceeded"},
@@ -1208,6 +1207,254 @@ async def test_openrouter_base_url_includes_provider_require_parameters(
 
     assert len(captured) == 1
     assert _json(captured[0]).get("provider") == expected_provider_routing
+
+
+def _translation_request() -> LLMRequest:
+    return LLMRequest.for_translation(instructions="Переводи", input_text="b1: text")
+
+
+def _failing(failure: Exception) -> Any:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure
+    return handler
+
+
+async def _transport_outcome(handler: Any, outcome: str, **overrides: Any) -> LLMTransportError:
+    client = client_over(handler, **overrides)
+    try:
+        with pytest.raises(LLMTransportError) as caught:
+            await client.generate(_translation_request())
+    finally:
+        await client.aclose()
+    assert caught.value.outcome == outcome
+    return caught.value
+
+
+async def test_transport_outcome_classification_not_sent_known_unknown() -> None:
+    """Connect failures are not_sent unless plain HTTP is proxied; ambiguous sends are unknown."""
+    not_sent = (
+        httpx.ConnectError("соединение закрыто"),
+        httpx.ConnectTimeout("таймаут"),
+        httpx.PoolTimeout("пул"),
+    )
+    for failure in not_sent:
+        await _transport_outcome(_failing(failure), "not_sent")
+        await _transport_outcome(
+            _failing(failure), "not_sent", base_url="http://provider.test/v1", proxy_mode="direct",
+        )
+        await _transport_outcome(
+            _failing(failure), "unknown", base_url="http://provider.test/v1", proxy_mode="auto",
+        )
+    await _transport_outcome(
+        _failing(httpx.ConnectError("прокси")),
+        "unknown",
+        base_url="http://provider.test/v1",
+        proxy_mode="custom",
+        proxy_url="http://127.0.0.1:9",
+    )
+    await _transport_outcome(
+        _failing(httpx.ConnectError("tls")),
+        "not_sent",
+        base_url="https://provider.test/v1",
+        proxy_mode="custom",
+        proxy_url="http://127.0.0.1:9",
+    )
+    for failure in (
+        httpx.ReadTimeout("чтение"),
+        httpx.WriteTimeout("запись"),
+        httpx.RemoteProtocolError("протокол"),
+        httpx.WriteError("обрыв записи"),
+        httpx.ReadError("обрыв чтения"),
+        httpx.CloseError("закрытие"),
+        httpx.DecodingError("декодирование"),
+    ):
+        await _transport_outcome(_failing(failure), "unknown")
+    for status in (429, 500, 503):
+        await _transport_outcome(responding({"error": {"message": "нет"}}, status_code=status), "known_transient")
+    for status in (502, 504, 524, 501):
+        await _transport_outcome(responding({"error": {"message": "нет"}}, status_code=status), "unknown")
+
+
+async def test_length_truncation_preserved_on_null_content_and_dto_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    null_content = await format_error_from(completion(
+        "",
+        choices=[{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}],
+    ))
+    assert null_content.truncated is True
+    assert null_content.violation is not None
+    assert null_content.violation.rule_code == "provider_truncated"
+
+    empty_content = await format_error_from(completion(
+        "",
+        choices=[{"message": {"content": ""}, "finish_reason": "length"}],
+    ))
+    assert empty_content.truncated is True
+    assert empty_content.violation is not None
+    assert empty_content.violation.rule_code == "provider_truncated"
+
+    bad_evidence = translation_payload(content_evidence=[{"difficulty_id": ""}])
+    evidence_error = await format_error_from(completion(
+        as_content(bad_evidence),
+        choices=[{"message": {"content": as_content(bad_evidence)}, "finish_reason": "length"}],
+    ))
+    assert evidence_error.truncated is True
+    assert evidence_error.violation is not None
+    assert evidence_error.violation.rule_code == "provider_truncated"
+
+    analysis = analysis_payload()
+    analysis["content_plan"] = {
+        "version": 2,
+        "profile": "content-plan-v2",
+        "difficulties": [],
+        "before_you_read_evidence": [{"difficulty_id": ""}],
+    }
+    analysis_client = client_over(responding(completion(
+        as_content(analysis),
+        choices=[{"message": {"content": as_content(analysis)}, "finish_reason": "length"}],
+    )))
+    try:
+        with pytest.raises(LLMResponseFormatError) as caught:
+            await analysis_client.generate(LLMRequest.for_chapter_analysis(
+                instructions="Анализ", input_text="Текст", contract_version=2,
+            ))
+    finally:
+        await analysis_client.aclose()
+    assert caught.value.truncated is True
+    assert caught.value.violation is not None
+    assert caught.value.violation.rule_code == "provider_truncated"
+
+    def reject_dto(validated: Any) -> Any:
+        raise ValueError("dto")
+
+    monkeypatch.setattr("linguary.adapters.llm.payloads._to_dto", reject_dto)
+    dto_error = await format_error_from(completion(
+        as_content(translation_payload()),
+        choices=[{"message": {"content": as_content(translation_payload())}, "finish_reason": "length"}],
+    ))
+    assert dto_error.truncated is True
+    assert dto_error.violation is not None
+    assert dto_error.violation.rule_code == "provider_truncated"
+
+
+async def test_message_refusal_and_content_filter_detected_for_translation() -> None:
+    content = as_content(translation_payload())
+    requests = (
+        ("translation_result", _translation_request()),
+        ("chapter_analysis", LLMRequest.for_chapter_analysis(instructions="Анализ", input_text="Текст")),
+    )
+    for stage, request in requests:
+        refusal_client = client_over(responding(completion(
+            content,
+            choices=[{
+                "message": {"role": "assistant", "content": content, "refusal": "I cannot complete this request."},
+                "finish_reason": "length",
+            }],
+        )))
+        try:
+            with pytest.raises(LLMResponseFormatError) as refusal:
+                await refusal_client.generate(request)
+        finally:
+            await refusal_client.aclose()
+        assert refusal.value.truncated is False
+        assert refusal.value.violation is not None
+        assert refusal.value.violation.rule_code == "provider_refusal"
+        assert refusal.value.violation.stage == stage
+
+        filtered_client = client_over(responding(completion(
+            content,
+            choices=[{"message": {"role": "assistant", "content": content}, "finish_reason": "content_filter"}],
+        )))
+        try:
+            with pytest.raises(LLMResponseFormatError) as filtered:
+                await filtered_client.generate(request)
+        finally:
+            await filtered_client.aclose()
+        assert filtered.value.truncated is False
+        assert filtered.value.violation is not None
+        assert filtered.value.violation.rule_code == "provider_content_filter"
+        assert filtered.value.violation.stage == stage
+
+
+async def test_openrouter_200_error_and_coded_context_overflow() -> None:
+    context = CallContext(
+        str(uuid4()), "translation_unit", "scope", ("target",), str(uuid4()), 0, "test-model", "a" * 64,
+        root_id=str(uuid4()), policy_version="translation-context-v2",
+    )
+    request = replace(_translation_request(), call_context=context)
+
+    async def captured(document: dict[str, Any], *, status_code: int = 200) -> Exception:
+        client = client_over(
+            responding(document, status_code=status_code),
+            base_url="https://openrouter.ai/api/v1",
+        )
+        try:
+            with pytest.raises(Exception) as caught:
+                await client.generate(request)
+        finally:
+            await client.aclose()
+        return caught.value
+
+    bad_gateway = await captured({"choices": [], "error": {"code": 502, "message": "bad gateway"}})
+    assert isinstance(bad_gateway, LLMTransportError)
+    assert bad_gateway.outcome == "unknown"
+
+    unavailable = await captured({"error": {"code": 503, "message": "overloaded"}})
+    assert isinstance(unavailable, LLMTransportError)
+    assert unavailable.outcome == "known_transient"
+
+    limited = await captured({"error": {"code": 429, "message": "slow down"}})
+    assert isinstance(limited, LLMTransportError)
+    assert limited.outcome == "known_transient"
+
+    internal = await captured({"error": {"code": 500, "message": "internal"}})
+    assert isinstance(internal, LLMTransportError)
+    assert internal.outcome == "known_transient"
+
+    cloudflare = await captured({"choices": None, "error": {"code": 524, "message": "timeout"}})
+    assert isinstance(cloudflare, LLMTransportError)
+    assert cloudflare.outcome == "unknown"
+
+    gateway_timeout = await captured({"error": {"code": "504", "message": "gateway timeout"}})
+    assert isinstance(gateway_timeout, LLMTransportError)
+    assert gateway_timeout.outcome == "unknown"
+
+    rejected_key = await captured({"error": {"code": 401, "message": f"bad key {API_KEY}"}})
+    assert isinstance(rejected_key, LLMConfigurationError)
+    assert API_KEY not in str(rejected_key)
+
+    coded = await captured(
+        {"error": {"code": "invalid_request", "message": "context_length_exceeded: maximum context length exceeded"}},
+        status_code=400,
+    )
+    assert isinstance(coded, LLMContextCapacityError)
+    assert coded.provider == settings().provider
+    assert coded.model == "test-model"
+    assert coded.call_context == context
+    assert coded.__cause__ is None
+
+    embedded = await captured({
+        "error": {"code": "invalid_request", "message": "This model's maximum context length is 128000 tokens."},
+    })
+    assert isinstance(embedded, LLMContextCapacityError)
+    assert embedded.call_context == context
+    assert embedded.provider == settings().provider
+    assert embedded.model == "test-model"
+
+
+@pytest.mark.parametrize("header", ["inf", "+inf", "Infinity", "nan", "1e309"])
+async def test_retry_after_rejects_infinity(header: str) -> None:
+    client = client_over(lambda request: httpx.Response(
+        429, json={"error": "slow down"}, headers={"Retry-After": header},
+    ))
+    try:
+        with pytest.raises(LLMTransportError) as caught:
+            await client.generate(_translation_request())
+    finally:
+        await client.aclose()
+    assert caught.value.retry_after_seconds is None
+    assert caught.value.outcome == "known_transient"
 
 
 

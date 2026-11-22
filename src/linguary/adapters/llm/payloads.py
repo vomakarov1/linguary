@@ -259,7 +259,7 @@ def parse_payload(
             f"ответ модели ({kind.value}) не соответствует внутреннему контракту: {type(error).__name__}",
             truncated=truncated,
             raw_content=content,
-            violation=Violation('response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
+            violation=Violation('provider_truncated' if truncated else 'response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
         ) from None
     if byr_evidence_items and getattr(result, "content_plan", None) is not None:
         evs = []
@@ -271,7 +271,7 @@ def parse_payload(
                     _format_error(kind, error=error, truncated=truncated),
                     truncated=truncated,
                     raw_content=content,
-                    violation=Violation('response_schema', kind.value, safe_message='Ответ не соответствует формату'),
+                    violation=Violation('provider_truncated' if truncated else 'response_schema', kind.value, safe_message='Ответ не соответствует формату'),
                 ) from None
         result = replace(result, content_plan=replace(result.content_plan, before_you_read_evidence=tuple(evs)))
     if content_evidence_items and isinstance(result, TranslationResultResponse):
@@ -284,7 +284,7 @@ def parse_payload(
                     _format_error(kind, error=error, truncated=truncated),
                     truncated=truncated,
                     raw_content=content,
-                    violation=Violation('response_schema', kind.value, safe_message='Ответ не соответствует формату'),
+                    violation=Violation('provider_truncated' if truncated else 'response_schema', kind.value, safe_message='Ответ не соответствует формату'),
                 ) from None
         result = replace(result, content_evidence=tuple(evs))
     if pronunciation_candidates_version == 1:
