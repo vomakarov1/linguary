@@ -851,9 +851,10 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
 
     # 3. context_facts anti-spoiler: original certainty=='explicit' before first mention fails,
     #    while original certainty=='inferred' (even if promoted to explicit by pronoun resolution!) passes.
-    b1_anchor = QuotedSourceAnchorResponse('b1', 'he shouted')
+    b1_quote_anchor = QuotedSourceAnchorResponse('b1', '‘Stay back!’')
+    b1_remark_anchor = QuotedSourceAnchorResponse('b1', 'he shouted')
     explicit_spoiler_fact = QuotedContextFactResponse(
-        'f-sp-explicit', 'speaker', (b1_anchor,), b1_anchor, 'Harry Potter', 'explicit',
+        'f-sp-explicit', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'explicit',
     )
     with pytest.raises(AnalysisMergeError) as fact_spoiler_exc:
         validate_narrative_response(
@@ -869,7 +870,7 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     assert fact_spoiler_exc.value.violation.block_ids == ('id-1',)
 
     inferred_pronoun_fact = QuotedContextFactResponse(
-        'f-sp-inferred', 'speaker', (b1_anchor,), b1_anchor, 'Harry Potter', 'inferred',
+        'f-sp-inferred', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'inferred',
     )
     _, promoted_facts = validate_narrative_response(
         NarrativeAnalysisResponse(
@@ -1125,6 +1126,257 @@ def test_validate_narrative_allows_short_part_divider_titles_with_real_langid_an
                     is_notes_only=notes_only,
                 )
             assert exc_info.value.violation.rule_code == 'narrative_summary_language'
+
+
+def test_validate_narrative_name_assessment_conflicts_policy_meaning_descriptive_and_7_reasons():
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationMethod,
+        NameTranslationPolicy,
+        NameTranslationReviewReason,
+        NameTranslationStrategy,
+    )
+
+    all_seven = (
+        'ambiguous, wordplay, anagram, uncertain_etymology, '
+        'creative_adaptation, personal_name_substitution, other'
+    )
+    meaning_policy = NameTranslationPolicy(1, NameTranslationStrategy.MEANING)
+    sound_policy = NameTranslationPolicy(1, NameTranslationStrategy.SOUND)
+
+    # 1. Existing conflict message must include all 7 allowed review_reasons.
+    creative_conflict = GlossaryCandidateResponse(
+        source_text='Everlost',
+        type=ConceptType.PLACE,
+        suggested_translation='Эверлост',
+        confidence=0.9,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.CREATIVE, True, (), 'Творческий вариант.', opaque_name=False,
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as existing_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                glossary_candidates=(creative_conflict,),
+                scenes=(scene('b1', 'b3'),),
+            ),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        )
+    assert existing_exc.value.violation.rule_code == 'name_assessment_conflict'
+    assert all_seven in str(existing_exc.value)
+
+    # 2. Under MEANING policy: SOUND + opaque_name=False + eligible_without_review=True is rejected.
+    sound_transparent = GlossaryCandidateResponse(
+        source_text='Everlost',
+        type=ConceptType.PLACE,
+        suggested_translation='Эверлост',
+        confidence=0.9,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.SOUND, True, (), 'Транскрипция прозрачного названия.', opaque_name=False,
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as meaning_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                glossary_candidates=(sound_transparent,),
+                scenes=(scene('b1', 'b3'),),
+            ),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            name_translation_policy=meaning_policy,
+        )
+    assert meaning_exc.value.violation.rule_code == 'name_assessment_conflict'
+    assert all_seven in str(meaning_exc.value)
+
+    # Same candidate is accepted under SOUND policy or when policy is None.
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=(sound_transparent,),
+            scenes=(scene('b1', 'b3'),),
+        ),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        name_translation_policy=sound_policy,
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=(sound_transparent,),
+            scenes=(scene('b1', 'b3'),),
+        ),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+    )
+
+    # Under MEANING policy: SOUND + opaque_name=False + eligible_without_review=False (with reason) is allowed,
+    # and SOUND + opaque_name=True + eligible_without_review=True is allowed.
+    sound_for_review = GlossaryCandidateResponse(
+        source_text='Everlost',
+        type=ConceptType.PLACE,
+        suggested_translation='Эверлост',
+        confidence=0.9,
+        model_flagged_review=True,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.SOUND,
+            False,
+            (NameTranslationReviewReason.AMBIGUOUS,),
+            'Нужно решение пользователя.',
+            opaque_name=False,
+        ),
+    )
+    sound_opaque = GlossaryCandidateResponse(
+        source_text='Holmes',
+        type=ConceptType.PERSON,
+        suggested_translation='Холмс',
+        confidence=0.95,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.SOUND, True, (), 'Непрозрачная фамилия.', opaque_name=True,
+        ),
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=(sound_for_review, sound_opaque),
+            scenes=(scene('b1', 'b3'),),
+        ),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        name_translation_policy=meaning_policy,
+    )
+
+    # 3. Descriptive noun phrase with lowercase article (the/a/an + lowercase) + SOUND + opaque_name=False is rejected.
+    for phrase in ('the freckled boy', 'a dark hallway', 'an old clock'):
+        bad_descriptive = GlossaryCandidateResponse(
+            source_text=phrase,
+            type=ConceptType.PERSON,
+            suggested_translation='веснушчатый мальчик',
+            confidence=0.85,
+            model_flagged_review=True,
+            name_translation_assessment=NameTranslationAssessment(
+                NameTranslationMethod.SOUND,
+                False,
+                (NameTranslationReviewReason.AMBIGUOUS,),
+                'Прозвище.',
+                opaque_name=False,
+            ),
+        )
+        with pytest.raises(AnalysisMergeError) as desc_exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse(
+                    'Keep voice.', 'Summary.',
+                    glossary_candidates=(bad_descriptive,),
+                    scenes=(scene('b1', 'b3'),),
+                ),
+                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            )
+        assert desc_exc.value.violation.rule_code == 'name_assessment_conflict'
+        assert all_seven in str(desc_exc.value)
+
+    # MEANING + opaque_name=False on 'the freckled boy' passes.
+    good_descriptive = GlossaryCandidateResponse(
+        source_text='the freckled boy',
+        type=ConceptType.PERSON,
+        suggested_translation='веснушчатый мальчик',
+        confidence=0.9,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.MEANING, True, (), 'Описательное прозвище.', opaque_name=False,
+        ),
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=(good_descriptive,),
+            scenes=(scene('b1', 'b3'),),
+        ),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        name_translation_policy=meaning_policy,
+    )
+
+
+def test_validate_narrative_speaker_subject_anchor_must_intersect_quoted_dialogue():
+    q_aliases = {'b1': 'id-1', 'b2': 'id-2', 'b3': 'id-3', 'b4': 'id-4'}
+    q_texts = {
+        'id-1': '‘Don’t move!’ Holmes shouted in the dark.',
+        'id-2': '“Wait here,” Watson whispered softly.',
+        'id-3': '«Стой на месте!» — крикнул Lestrade.',
+        'id-4': 'Holmes muttered softly to himself.',
+    }
+    q_visible = {alias: q_texts[bid] for alias, bid in q_aliases.items()}
+    q_order = ('id-1', 'id-2', 'id-3', 'id-4')
+    q_scenes = (
+        QuotedSceneResponse(
+            'b1', 'b4', 'Напряжённая сцена.', participants=('Holmes', 'Watson', 'Lestrade'),
+        ),
+    )
+
+    # Rejects remark-only subject_anchor in blocks with British single, curly double, and guillemet quotes.
+    for alias, expected_bid, bad_subject, speaker in (
+        ('b1', 'id-1', 'Holmes shouted', 'Holmes'),
+        ('b2', 'id-2', 'Watson whispered', 'Watson'),
+        ('b3', 'id-3', 'крикнул Lestrade', 'Lestrade'),
+    ):
+        anchor = QuotedSourceAnchorResponse(alias, bad_subject)
+        bad_fact = QuotedContextFactResponse('f-bad', 'speaker', (anchor,), anchor, speaker, 'explicit')
+        with pytest.raises(AnalysisMergeError) as exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse(
+                    'Keep voice.', 'Summary.',
+                    context_facts=(bad_fact,),
+                    scenes=q_scenes,
+                ),
+                q_aliases, q_texts, q_visible, ordered_block_ids=q_order,
+            )
+        assert exc.value.violation.rule_code == 'speaker_subject_anchor'
+        assert exc.value.violation.block_ids == (expected_bid,)
+
+    # Accepts quoted speech (with or without outer quote chars), non-quoted block, and non-speaker fact on remark.
+    good_facts = (
+        QuotedContextFactResponse(
+            'f-ok-1', 'speaker',
+            (QuotedSourceAnchorResponse('b1', 'Holmes shouted'),),
+            QuotedSourceAnchorResponse('b1', '‘Don’t move!’'),
+            'Holmes', 'explicit',
+        ),
+        QuotedContextFactResponse(
+            'f-ok-2', 'speaker',
+            (QuotedSourceAnchorResponse('b2', 'Watson whispered'),),
+            QuotedSourceAnchorResponse('b2', 'Wait here,'),
+            'Watson', 'explicit',
+        ),
+        QuotedContextFactResponse(
+            'f-ok-3', 'speaker',
+            (QuotedSourceAnchorResponse('b3', 'крикнул Lestrade'),),
+            QuotedSourceAnchorResponse('b3', '«Стой на месте!»'),
+            'Lestrade', 'explicit',
+        ),
+        QuotedContextFactResponse(
+            'f-ok-4', 'speaker',
+            (QuotedSourceAnchorResponse('b4', 'Holmes muttered'),),
+            QuotedSourceAnchorResponse('b4', 'Holmes muttered'),
+            'Holmes', 'explicit',
+        ),
+        QuotedContextFactResponse(
+            'f-ok-gender', 'gender',
+            (QuotedSourceAnchorResponse('b1', 'Holmes shouted'),),
+            QuotedSourceAnchorResponse('b1', 'Holmes'),
+            'male', 'explicit',
+        ),
+    )
+    _, resolved_facts = validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            context_facts=good_facts,
+            scenes=q_scenes,
+        ),
+        q_aliases, q_texts, q_visible, ordered_block_ids=q_order,
+    )
+    assert len(resolved_facts) == 5
+
 
 
 
