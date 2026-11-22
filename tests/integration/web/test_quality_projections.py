@@ -3,10 +3,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 import pytest
-from web_scenario import store_book, start_run, translated_result
+from web_scenario import SOURCE_TEXT, store_book, start_run, translated_result
 from test_quality_api import setup_review, recovery_fixture
-from linguary.domain import BookStatus, LLMCallLog, LLMCallStage
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+from linguary.domain import (
+    BookStatus, ErrorType, LLMCallLog, LLMCallStage, ProcessingTask, TaskError, TaskStatus, TaskType,
+)
 from linguary.domain.quality_review import QualityReview
+from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 
 
 def ready_book(app):
@@ -160,3 +164,196 @@ def test_complete_root_projection_does_not_mark_it_complete(configured_client, c
         assert value['recovery']['roots'][0]['complete'] is True
     with configured_application.unit_of_work.transaction() as tx:
         assert tx.work.get_root(root.id) == root
+
+
+def _prepared_book(client, app, *, chapters=None):
+    scenario = store_book(app, chapters=chapters) if chapters is not None else store_book(app)
+    response = client.post(
+        f'/books/{scenario.book_id}/conditions',
+        json=dict(action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True),
+    )
+    assert response.status_code == 201, response.text
+    start_run(app, scenario)
+    with app.unit_of_work.transaction() as tx:
+        conditions = tx.work.latest_conditions(scenario.book_id)
+    return scenario, conditions
+
+
+def _manifest(run_id, blocks, *, max_calls=3, max_scope_calls=3):
+    return dict(
+        schema_version=1, active_run_id=run_id, ordered_blocks=list(blocks), historical_coverage=[],
+        policy=dict(max_calls=max_calls, max_scope_calls=max_scope_calls, max_depth=3, max_leaves=8),
+    )
+
+
+def _save_root(tx, scenario, conditions, blocks, *, status, reason, calls_used=0, max_calls=3,
+               max_scope_calls=3, scope_status='pending'):
+    root = RecoveryRoot(
+        str(uuid4()), scenario.book_id, conditions.id, str(uuid4()),
+        _manifest(scenario.run_id, blocks, max_calls=max_calls, max_scope_calls=max_scope_calls),
+        calls_used=calls_used, status=status, reason=reason, policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    scope = RecoveryScope(str(uuid4()), root.id, tuple(blocks), status=scope_status)
+    tx.work.add_root(root)
+    tx.work.add_scope(scope)
+    return root, scope
+
+
+def _save_attempt(tx, scenario, conditions, root, scope, *, state, ordinal):
+    attempt = CallAttempt(
+        str(uuid4()), scenario.book_id, state=state, ordinal=ordinal, generation=scope.generation,
+        conditions_id=conditions.id, root_id=root.id, scope_id=scope.id, run_id=scenario.run_id,
+    )
+    tx.work.add_attempt(attempt)
+    return attempt
+
+
+def _save_failed_task(tx, scenario, conditions, roots, *, section_id, task_type):
+    task = ProcessingTask(
+        str(uuid4()), scenario.book_id, task_type, section_id, status=TaskStatus.FAILED, attempts=1,
+        last_error=TaskError(ErrorType.TRANSIENT, 'временный сбой обработки', 'detail'),
+        operation_id=str(uuid4()),
+    )
+    tx.tasks.add(task)
+    tx.work.bind(
+        'task', task.id, book_id=scenario.book_id, conditions_id=conditions.id,
+        payload={'schema_version': 1, 'operation_refs': [
+            {'root_id': root.id, 'policy_version': root.policy_version} for root in roots
+        ]},
+    )
+    return task
+
+
+def test_in_flight_sent_attempt_not_shown_as_unknown(configured_client, configured_application):
+    scenario, conditions = _prepared_book(configured_client, configured_application)
+    blocks = scenario.block_ids()
+    with configured_application.unit_of_work.transaction() as tx:
+        root, scope = _save_root(
+            tx, scenario, conditions, blocks, status='running', reason=None,
+            max_calls=3, max_scope_calls=2,
+        )
+        _save_attempt(tx, scenario, conditions, root, scope, state='cancelled', ordinal=1)
+        _save_attempt(tx, scenario, conditions, root, scope, state='sent', ordinal=2)
+    value = configured_client.get(f'/books/{scenario.book_id}').json()
+    recovery = value['recovery']
+    projected = recovery['roots'][0]
+    assert projected['in_flight'] is True
+    assert projected['has_unknown_outcome'] is False
+    assert projected['reason'] is None
+    assert projected['status'] == 'running'
+    assert projected['can_retry'] is True
+    assert projected['section_id'] == scenario.section().id
+    assert projected['chapter_title'] == 'Chapter 1'
+    assert recovery['reason'] is None
+    assert recovery['can_retry'] is True
+
+
+def test_unknown_and_stopped_roots_expose_can_restart_and_chapter_metadata(
+    configured_client, configured_application,
+):
+    scenario, conditions = _prepared_book(configured_client, configured_application)
+    blocks = scenario.block_ids()
+    stopped_reasons = (
+        'limit', 'scope_limit', 'unknown_outcome', 'interrupted', 'unsafe_partition',
+        'output_truncated', 'context_capacity', 'provider_refusal',
+    )
+    with configured_application.unit_of_work.transaction() as tx:
+        stopped = {
+            reason: _save_root(
+                tx, scenario, conditions, blocks, status='stopped', reason=reason,
+            )[0].id
+            for reason in stopped_reasons
+        }
+        pending_unknown, pending_scope = _save_root(
+            tx, scenario, conditions, blocks, status='pending', reason=None,
+        )
+        _save_attempt(
+            tx, scenario, conditions, pending_unknown, pending_scope, state='unknown', ordinal=1,
+        )
+        stuck_id = _save_root(
+            tx, scenario, conditions, blocks, status='pending', reason=None, scope_status='stopped',
+        )[0].id
+        disallowed_id = _save_root(
+            tx, scenario, conditions, blocks, status='stopped', reason='transient_error',
+        )[0].id
+        unknown_on_other_stop, other_scope = _save_root(
+            tx, scenario, conditions, blocks, status='stopped', reason='validation_error',
+        )
+        _save_attempt(
+            tx, scenario, conditions, unknown_on_other_stop, other_scope, state='unknown', ordinal=1,
+        )
+    value = configured_client.get(f'/books/{scenario.book_id}').json()
+    roots = {item['root_id']: item for item in value['recovery']['roots']}
+    for reason, root_id in stopped.items():
+        projected = roots[root_id]
+        assert projected['can_restart'] is True
+        assert projected['status'] == 'stopped'
+        assert projected['section_id'] == scenario.section().id
+        assert projected['chapter_title'] == 'Chapter 1'
+        assert projected['in_flight'] is False
+        assert projected['has_unknown_outcome'] is (reason in ('unknown_outcome', 'interrupted'))
+        if reason in ('unknown_outcome', 'interrupted'):
+            assert projected['reason'] == reason
+    pending = roots[pending_unknown.id]
+    assert pending['status'] == 'pending'
+    assert pending['has_unknown_outcome'] is True
+    assert pending['reason'] == 'unknown'
+    assert pending['can_restart'] is True
+    assert pending['can_retry'] is False
+    assert pending['section_id'] == scenario.section().id
+    assert pending['chapter_title'] == 'Chapter 1'
+    assert pending['in_flight'] is False
+    stuck = roots[stuck_id]
+    assert stuck['can_restart'] is True
+    assert stuck['can_retry'] is False
+    assert stuck['has_unknown_outcome'] is False
+    assert stuck['status'] == 'pending'
+    assert roots[disallowed_id]['can_restart'] is False
+    assert roots[disallowed_id]['has_unknown_outcome'] is False
+    unknown_stop = roots[unknown_on_other_stop.id]
+    assert unknown_stop['has_unknown_outcome'] is True
+    assert unknown_stop['can_restart'] is True
+    assert unknown_stop['reason'] == 'unknown'
+
+
+def test_one_unknown_root_does_not_disable_can_retry_for_other_chapters(
+    configured_client, configured_application,
+):
+    scenario, conditions = _prepared_book(
+        configured_client, configured_application, chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
+    )
+    with configured_application.unit_of_work.transaction() as tx:
+        unknown_root, unknown_scope = _save_root(
+            tx, scenario, conditions, scenario.block_ids(0), status='stopped', reason='unknown_outcome',
+            calls_used=1,
+        )
+        _save_attempt(
+            tx, scenario, conditions, unknown_root, unknown_scope, state='unknown', ordinal=1,
+        )
+        healthy_root, _healthy_scope = _save_root(
+            tx, scenario, conditions, scenario.block_ids(1), status='pending', reason='transient_error',
+        )
+        blocked = _save_failed_task(
+            tx, scenario, conditions, (unknown_root,), section_id=scenario.section(0).id,
+            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+        allowed = _save_failed_task(
+            tx, scenario, conditions, (healthy_root,), section_id=scenario.section(1).id,
+            task_type=TaskType.REGENERATE_BLOCK,
+        )
+    value = configured_client.get(f'/books/{scenario.book_id}').json()
+    roots = {item['root_id']: item for item in value['recovery']['roots']}
+    failures = {item['task_id']: item for item in value['progress']['failures']}
+    assert roots[unknown_root.id]['chapter_title'] == 'Chapter 1'
+    assert roots[unknown_root.id]['section_id'] == scenario.section(0).id
+    assert roots[unknown_root.id]['has_unknown_outcome'] is True
+    assert roots[unknown_root.id]['can_retry'] is False
+    assert roots[unknown_root.id]['can_restart'] is True
+    assert roots[healthy_root.id]['chapter_title'] == 'Chapter 2'
+    assert roots[healthy_root.id]['section_id'] == scenario.section(1).id
+    assert roots[healthy_root.id]['has_unknown_outcome'] is False
+    assert roots[healthy_root.id]['in_flight'] is False
+    assert roots[healthy_root.id]['can_retry'] is True
+    assert value['recovery']['can_retry'] is True
+    assert failures[blocked.id]['is_retryable'] is False
+    assert failures[allowed.id]['is_retryable'] is True

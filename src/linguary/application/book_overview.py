@@ -81,6 +81,24 @@ _ESTIMATED_STAGES: Mapping[BookStatus, tuple[LLMCallStage, TaskType]] = {
 #: Seconds per minute: request rate limit is configured in requests per minute.
 _SECONDS_PER_MINUTE = 60.0
 
+#: Stopped translation roots the reader may restart explicitly.
+_RESTARTABLE_STOP_REASONS = frozenset({
+    'limit',
+    'scope_limit',
+    'unknown_outcome',
+    'interrupted',
+    'unsafe_partition',
+    'output_truncated',
+    'context_capacity',
+    'provider_refusal',
+})
+
+#: Tasks whose ordinary retry must also pass the recovery guards.
+_RECOVERY_RETRY_TASKS = frozenset({
+    TaskType.PROCESS_TRANSLATION_UNIT,
+    TaskType.REGENERATE_BLOCK,
+})
+
 
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
@@ -306,6 +324,22 @@ def _read_transaction(unit_of_work: UnitOfWork):
     return getattr(unit_of_work, "read_transaction", unit_of_work.transaction)()
 
 
+def _chapter_for_blocks(block_sections, ordered_blocks):
+    """Section id and title when every ordered block belongs to one chapter."""
+    if not ordered_blocks:
+        return None, None
+    sections = []
+    for block_id in ordered_blocks:
+        section = block_sections.get(block_id)
+        if section is None:
+            return None, None
+        sections.append(section)
+    first = sections[0]
+    if any(section.id != first.id for section in sections):
+        return None, None
+    return first.id, first.title
+
+
 def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None, result_block_ids=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
@@ -380,12 +414,28 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         attempts_by_root = {}
         bindings = None
         attempts_by_id = {}
+    block_sections = {}
+    if document is not None:
+        for section in document.ordered_sections:
+            for block in section.ordered_blocks:
+                block_sections[block.id] = section
     for root in roots:
         scopes = scopes_by_root.get(root.id, ())
         attempts = attempts_by_root.get(root.id, ())
-        unknown = any(attempt.state in ('sent', 'unknown') for attempt in attempts)
+        # A live `sent` call is still in flight. It is not an unknown outcome.
+        has_unknown_outcome = root.reason in ('unknown_outcome', 'interrupted') or any(
+            attempt.state == 'unknown' for attempt in attempts
+        )
+        in_flight = any(attempt.state == 'sent' for attempt in attempts)
+        attempt_unknown = any(attempt.state == 'unknown' for attempt in attempts)
         current = conditions is not None and root.conditions_id == conditions.id
-        scope_counts = {scope.id: sum(attempt.scope_id == scope.id for attempt in attempts) for scope in scopes}
+        scope_counts = {
+            scope.id: sum(
+                attempt.scope_id == scope.id and attempt.state != 'cancelled'
+                for attempt in attempts
+            )
+            for scope in scopes
+        }
         retryable = any(scope.status == 'pending' and scope_counts[scope.id] < root.manifest['policy']['max_scope_calls']
             for scope in scopes)
         busy = any(scope.status == 'claimed' for scope in scopes)
@@ -414,30 +464,40 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         except TypeError:
             complete = transaction.work.root_coverage_complete(root.id, update_state=False)
         ordered_blocks = root.manifest['ordered_blocks']
+        section_id, chapter_title = _chapter_for_blocks(block_sections, ordered_blocks)
         policy_ok = True
         try:
             require_policy(getattr(root, 'policy_version', None))
         except Exception:
             policy_ok = False
+        stopped_restartable = root.status == 'stopped' and (
+            root.reason in _RESTARTABLE_STOP_REASONS or has_unknown_outcome
+        )
         can_restart = bool(
             current
-            and not unknown
             and not busy
             and not complete
             and getattr(root, 'superseded_by', None) is None
             and getattr(root, 'operation_kind', 'translation') == 'translation'
             and policy_ok
-            and root.status in ('pending', 'running', 'stopped')
-            and (root.status != 'stopped' or root.reason == 'limit')
             and ordered_blocks
             and len(covered) < len(ordered_blocks)
+            and (root.status in ('pending', 'running') or stopped_restartable)
         )
+        if not current:
+            projected_reason = 'conditions_unavailable'
+        elif attempt_unknown and root.reason not in ('unknown_outcome', 'interrupted'):
+            projected_reason = 'unknown'
+        else:
+            projected_reason = root.reason
         root_summaries.append(dict(root_id=root.id, generation=root.generation,
             covered=len(covered), total=len(ordered_blocks), calls_used=root.calls_used,
-            limit=limit, reason='conditions_unavailable' if not current else 'unknown' if unknown else root.reason,
-            can_retry=bool(current and not unknown and not busy and retryable and root.calls_used < limit
-                and root.status in ('pending', 'running')),
-            can_extend=bool(current and not unknown and not busy and retryable
+            limit=limit, reason=projected_reason, status=root.status,
+            section_id=section_id, chapter_title=chapter_title,
+            has_unknown_outcome=has_unknown_outcome, in_flight=in_flight,
+            can_retry=bool(current and not has_unknown_outcome and not busy and retryable
+                and root.calls_used < limit and root.status in ('pending', 'running')),
+            can_extend=bool(current and not has_unknown_outcome and not busy and retryable
                 and root.status == 'stopped' and root.reason == 'limit'),
             can_restart=can_restart, complete=complete))
     recovery = dict(covered=len(durable_coverage) if roots else len(result_ids & textual), total=len(textual),
@@ -603,12 +663,13 @@ def book_overview(
                 pending_corrections = sum(c["state"] == "awaiting_human" for c in candidates)
             except WorkStateError:
                 pending_corrections = 0
-    progress = _progress(
-        document=document,
-        analyses=analyses,
-        tasks=tasks,
-        processed_blocks=processed_blocks,
-    )
+        progress = _progress(
+            document=document,
+            analyses=analyses,
+            tasks=tasks,
+            processed_blocks=processed_blocks,
+            transaction=transaction,
+        )
     is_paused = bool(pause_requested and progress.running_tasks == 0)
     stage_estimate = _stage_estimate(
         status=book.status,
@@ -1260,11 +1321,11 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
     from linguary.application.correction import CorrectionInputs, candidate_is_current
     from linguary.application.correction_dto import parse_correction_snapshot
     from linguary.domain.book_conditions import WorkStateError, thaw
-    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, correction_policy
+    from linguary.domain.correction import correction_policy, is_candidate_correction_policy
 
     binding = None if run is None else transaction.work.get_binding('run', run.id)
     policy = {} if binding is None else binding['payload_json'].get('correction', {})
-    if policy.get('policy_version') != CORRECTION_POLICY_VERSION_V2:
+    if not is_candidate_correction_policy(policy.get('policy_version')):
         return ()
     pending = transaction.work.list_correction_candidates(
         run.id,
@@ -1435,6 +1496,7 @@ def _progress(
     analyses: Sequence[ChapterAnalysis],
     tasks: Sequence[ProcessingTask],
     processed_blocks: int,
+    transaction=None,
 ) -> BookProgress:
     """Assembles book progress from its plan, tasks, and stored results."""
     sections = document.ordered_sections if document is not None else ()
@@ -1452,7 +1514,7 @@ def _progress(
         ),
         running_chapters=_running_chapters(tasks, numbers=numbers, titles=titles),
         failures=tuple(
-            _failure(task) for task in tasks if task.status is TaskStatus.FAILED
+            _failure(task, transaction) for task in tasks if task.status is TaskStatus.FAILED
         ),
         pending_tasks=sum(1 for task in tasks if task.status is TaskStatus.PENDING),
         running_tasks=sum(1 for task in tasks if task.status is TaskStatus.RUNNING),
@@ -1605,11 +1667,16 @@ def _textual_block_count(document: CanonicalDocument | None) -> int:
     return sum(len(textual_blocks(section)) for section in document.ordered_sections)
 
 
-def _failure(task: ProcessingTask) -> TaskFailure:
+def _failure(task: ProcessingTask, transaction=None) -> TaskFailure:
     """Failed task in UI representation."""
     error = task.last_error
     if error is None:  # domain invariant forbids `failed` status without an error
         raise ApplicationError(f"у неуспешной задачи {task.id} нет ошибки")
+    retryable = task.is_retryable
+    if retryable and transaction is not None and task.task_type in _RECOVERY_RETRY_TASKS:
+        from linguary.application.use_cases.retry_task import is_task_retryable_for_recovery
+
+        retryable = is_task_retryable_for_recovery(transaction, task)[0]
     return TaskFailure(
         task_id=task.id,
         task_type=task.task_type,
@@ -1618,7 +1685,7 @@ def _failure(task: ProcessingTask) -> TaskFailure:
         message=error.message,
         detail=error.detail,
         attempts=task.attempts,
-        is_retryable=task.is_retryable,
+        is_retryable=retryable,
     )
 
 
