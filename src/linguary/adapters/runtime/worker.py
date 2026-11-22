@@ -86,9 +86,18 @@ class TaskWorkerPool:
         Batch run mode: used by CLI and tests where waiting for new tasks is unnecessary.
         """
         finished: list[ProcessingTask] = []
-        await asyncio.gather(
-            *(self._drain_worker(finished) for _ in range(self._concurrency))
-        )
+        workers = [
+            asyncio.create_task(self._drain_worker(finished))
+            for _ in range(self._concurrency)
+        ]
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
         return tuple(finished)
 
     async def run_forever(self) -> None:

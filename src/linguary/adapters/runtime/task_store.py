@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import threading
+from time import sleep
 from uuid import uuid4
 
 from sqlalchemy import Engine, exists, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from linguary.adapters.db import mapping
@@ -113,22 +114,36 @@ class SqliteTaskStore:
                 return None
         session = self._session_factory()
         try:
-            session.connection().exec_driver_sql(_BEGIN_IMMEDIATE)
-            candidate = self._next_pending(session)
-            if candidate is None:
-                session.commit()
-                return None
-            claimed = candidate.start()
-            updated = session.execute(
-                update(ProcessingTaskRow)
-                .where(
-                    ProcessingTaskRow.id == claimed.id,
-                    ProcessingTaskRow.status == TaskStatus.PENDING.value,
-                )
-                .values(status=claimed.status.value, attempts=claimed.attempts)
-            )
-            session.commit()
-            return claimed if updated.rowcount == 1 else None
+            # A busy writer lock is transient. Roll back and retry the claim itself;
+            # do not replay the caller's work, matching unit_of_work transaction startup.
+            for attempt in range(1, 11):
+                try:
+                    session.connection().exec_driver_sql(_BEGIN_IMMEDIATE)
+                    candidate = self._next_pending(session)
+                    if candidate is None:
+                        session.commit()
+                        return None
+                    claimed = candidate.start()
+                    updated = session.execute(
+                        update(ProcessingTaskRow)
+                        .where(
+                            ProcessingTaskRow.id == claimed.id,
+                            ProcessingTaskRow.status == TaskStatus.PENDING.value,
+                        )
+                        .values(status=claimed.status.value, attempts=claimed.attempts)
+                    )
+                    session.commit()
+                    return claimed if updated.rowcount == 1 else None
+                except OperationalError as error:
+                    session.rollback()
+                    message = str(error).lower()
+                    if "locked" not in message and "busy" not in message:
+                        raise
+                    if attempt == 10:
+                        raise PersistenceError(
+                            "база данных занята после ограниченного повтора"
+                        ) from None
+                    sleep(min(0.005 * attempt, 0.02))
         finally:
             session.close()
 
