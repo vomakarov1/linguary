@@ -2850,6 +2850,24 @@ def test_correction_issue_and_note_id_preservation_match_normalized_typography()
     assert non_overlapping[0].glossary_hints[0].translation == "шепнула"
 
 
+def test_llm_run_glossary_list_drops_service_fields_and_empty_note():
+    from linguary.application.use_cases.correct_chapter import _llm_run_glossary
+
+    cleaned = _llm_run_glossary([
+        {
+            'id': 'entry-1',
+            'book_id': 'book-1',
+            'created_at': '2020-01-01T00:00:00Z',
+            'concept_id': 'concept-1',
+            'note': '   ',
+            'source_text': 'cat',
+        },
+        {'source_text': 'dog', 'note': None},
+    ])
+
+    assert cleaned == [{'source_text': 'cat'}, {'source_text': 'dog'}]
+
+
 def test_materialize_for_rejects_null_translation_without_list_edits_on_translate_block():
     from linguary.application.correction_dto import (
         ChapterCorrectionV2Response,
