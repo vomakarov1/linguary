@@ -694,25 +694,32 @@ class SqlAlchemyBlockResultRepository:
     def _seeded_note_ordinal(self, run_id: str, chapter_number: int) -> int:
         """Highest issued ordinal for this run and chapter, or zero when none exist."""
         base = 0
-        values = [
-            *self._session.scalars(
-                select(LanguageNoteRow.note_id).where(LanguageNoteRow.run_id == run_id)
-            ).all(),
-            *self._session.scalars(
-                select(CorrectionCandidateRow.payload_json).where(
-                    CorrectionCandidateRow.run_id == run_id
-                )
-            ).all(),
-            *self._session.scalars(
-                select(ArtifactRevisionRow.body_json).where(
-                    ArtifactRevisionRow.run_id == run_id
-                )
-            ).all(),
-        ]
-        for value in values:
-            for ordinal in _note_ordinals(value, chapter_number):
+        for note_id in self._session.scalars(
+            select(LanguageNoteRow.note_id).where(LanguageNoteRow.run_id == run_id)
+        ).all():
+            ordinal = _match_note_ordinal(note_id, chapter_number)
+            if ordinal is not None and ordinal > base:
+                base = ordinal
+        for payload in self._session.scalars(
+            select(CorrectionCandidateRow.payload_json).where(
+                CorrectionCandidateRow.run_id == run_id
+            )
+        ).all():
+            for ordinal in _structured_note_ordinals(payload, chapter_number):
                 if ordinal > base:
                     base = ordinal
+        run = self._session.get(ProcessingRunRow, run_id)
+        if run is not None:
+            for body in self._session.scalars(
+                select(ArtifactRevisionRow.body_json).where(
+                    ArtifactRevisionRow.book_id == run.book_id,
+                    ArtifactRevisionRow.run_id == run_id,
+                    ArtifactRevisionRow.kind == "block_result",
+                )
+            ).all():
+                for ordinal in _structured_note_ordinals(body, chapter_number):
+                    if ordinal > base:
+                        base = ordinal
         return base
 
     def block_ids_for_run(self, run_id: str) -> frozenset[str]:
@@ -1209,28 +1216,38 @@ class SqlAlchemyLLMCallLogRepository:
         return self.clock() if self.clock is not None else datetime.now(UTC)
 
 
-def _note_ordinals(value: object, chapter_number: int):
-    """Yield ordinals whose whole string is `ln-ch<chapter>-<ordinal>` for this chapter."""
+def _match_note_ordinal(value: object, chapter_number: int) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = _NOTE_ID.fullmatch(value)
+    if match is None or int(match.group(1)) != chapter_number:
+        return None
+    return int(match.group(2))
+
+
+def _structured_note_ordinals(value: object, chapter_number: int):
+    """Yield ordinals strictly from `language_notes[*].id` fields in a block/candidate payload."""
     if isinstance(value, str):
-        match = _NOTE_ID.fullmatch(value)
-        if match is not None:
-            if int(match.group(1)) == chapter_number:
-                yield int(match.group(2))
-            return
         try:
-            parsed = json.loads(value)
+            value = json.loads(value)
         except json.JSONDecodeError:
             return
-        if parsed != value:
-            yield from _note_ordinals(parsed, chapter_number)
+    if not isinstance(value, dict):
         return
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _note_ordinals(item, chapter_number)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _note_ordinals(item, chapter_number)
+    containers = [value]
+    for key in ("result", "current_result"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        notes = container.get("language_notes")
+        if not isinstance(notes, list):
+            continue
+        for note in notes:
+            if isinstance(note, dict):
+                ordinal = _match_note_ordinal(note.get("id"), chapter_number)
+                if ordinal is not None:
+                    yield ordinal
 
 
 def _by_block[RowT: (LanguageNoteRow, ResultWarningRow)](

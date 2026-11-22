@@ -218,6 +218,7 @@ def test_web_restart_route_requires_separate_unknown_acknowledgement(
         expected_generation=root.generation, confirmed=True, acknowledge_unknown_outcome=False,
     ))
     assert denied.status_code == 409, denied.text
+    assert denied.json()['detail']['reason_code'] == 'unknown'
     with configured_application.unit_of_work.transaction() as tx:
         stored = tx.work.get_root(root.id)
         assert stored.superseded_by is None and stored.reason == 'unknown_outcome'
@@ -362,3 +363,81 @@ def test_unproven_price_has_no_review_or_task(configured_client, configured_appl
     assert response.status_code == 409 and response.json()['detail']['reason_code'] == 'price_unavailable'
     with configured_application.unit_of_work.transaction() as tx:
         assert tx.work.list_reviews(scenario.book_id) == () and tx.tasks.list_for_book(scenario.book_id) == ()
+
+
+def test_web_strict_json_content_type_invalid_limit_422_and_stopped_other_unknown_restart(
+    configured_client, configured_application,
+):
+    import json
+    from linguary.domain import ErrorType, ProcessingTask, TaskError, TaskStatus, TaskType
+
+    # 1. Overflow sum in POST .../limit returns 422 invalid_limit
+    lim_scenario, lim_root = recovery_fixture(configured_client, configured_application, book_id='overflow-limit')
+    overflow = configured_client.post(
+        f'/books/{lim_scenario.book_id}/recovery/{lim_root.id}/limit',
+        json=dict(additional_calls=9223372036854775807, expected_generation=0, confirmed=True),
+    )
+    assert overflow.status_code == 422, overflow.text
+    assert overflow.json()['detail']['reason_code'] == 'invalid_limit'
+
+    # 2. Strict JSON validation on /restart + case-insensitive Content-Type + stopped other reason with unknown attempt
+    other_scenario, other_root = restartable_unknown_root(
+        configured_application, book_id='other-stop-unknown', reason='validation_error',
+    )
+    _plant_attempt(configured_application, other_root, state='unknown')
+    path = f'/books/{other_scenario.book_id}/recovery/{other_root.id}/restart'
+
+    bad_bool = configured_client.post(
+        path,
+        json=dict(expected_generation=other_root.generation, confirmed=True, acknowledge_unknown_outcome='yes'),
+    )
+    assert bad_bool.status_code == 422, bad_bool.text
+
+    no_ack = configured_client.post(
+        path,
+        json=dict(expected_generation=other_root.generation, confirmed=True, acknowledge_unknown_outcome=False),
+    )
+    assert no_ack.status_code == 409, no_ack.text
+    assert no_ack.json()['detail']['reason_code'] == 'unknown'
+
+    ok = configured_client.post(
+        path,
+        content=json.dumps(dict(
+            expected_generation=other_root.generation, confirmed=True, acknowledge_unknown_outcome=True,
+        )),
+        headers={'Content-Type': 'Application/JSON; charset=utf-8'},
+    )
+    assert ok.status_code == 202, ok.text
+    assert ok.json()['successor_root_id']
+
+    # 3. /tasks/{id}/retry with Application/JSON empty body vs invalid JSON / non-bool flag
+    with configured_application.unit_of_work.transaction() as tx:
+        retryable_task = ProcessingTask(
+            str(uuid4()), other_scenario.book_id, TaskType.ANALYZE_CHAPTER, 'section-1',
+            status=TaskStatus.FAILED, attempts=1,
+            last_error=TaskError(ErrorType.TRANSIENT, 'временный сбой'),
+        )
+        tx.tasks.add(retryable_task)
+        task_id = retryable_task.id
+
+    bad_json = configured_client.post(
+        f'/tasks/{task_id}/retry',
+        content='{broken',
+        headers={'Content-Type': 'Application/JSON'},
+    )
+    assert bad_json.status_code == 422
+
+    bad_flag = configured_client.post(
+        f'/tasks/{task_id}/retry',
+        content=json.dumps({'acknowledge_unknown_outcome': 'true'}),
+        headers={'Content-Type': 'Application/JSON; charset=utf-8'},
+    )
+    assert bad_flag.status_code == 422
+
+    empty_json = configured_client.post(
+        f'/tasks/{task_id}/retry',
+        content=b'',
+        headers={'Content-Type': 'Application/JSON'},
+    )
+    assert empty_json.status_code == 200, empty_json.text
+    assert empty_json.json()['status'] == 'pending'

@@ -52,7 +52,7 @@ class _InitialAnalysisInput(BaseModel):
 
 
 class _RestartRecoveryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     expected_generation: int = Field(ge=0)
     confirmed: bool = False
@@ -330,13 +330,13 @@ async def restart_recovery_root(
         return input_error_response(
             request, HTTPException(409, detail={"reason_code": "generation_conflict"})
         )
-    except RestartTranslationError:
+    except RestartTranslationError as error:
         with read_tx() as tx:
             book_exists = tx.books.get(book_id) is not None
             root = tx.work.get_root(root_id) if book_exists else None
             missing = not book_exists or root is None or root.book_id != book_id
         code = 404 if missing else 409
-        reason = "not_found" if missing else "state_conflict"
+        reason = "not_found" if missing else getattr(error, "reason_code", "state_conflict")
         return input_error_response(
             request, HTTPException(code, detail={"reason_code": reason})
         )
@@ -392,7 +392,7 @@ async def choose_conditions(
         seed_first_chapter: bool | None = None
 
     try:
-        is_json = request.headers.get("content-type", "").startswith("application/json")
+        is_json = request.headers.get("content-type", "").split(";")[0].strip().lower() == "application/json"
         raw = await request.json() if is_json else dict(await request.form())
         if not is_json and isinstance(raw, dict):
             if raw.get("pronunciation_variant") == "":

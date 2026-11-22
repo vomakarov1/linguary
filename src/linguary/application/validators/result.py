@@ -228,8 +228,9 @@ class TranslationResultValidator:
                 safe_message="Перевод выполнен не на целевом языке",
             )
         text_payload = _payload_with_joined_translation(normalized_payload)
-        for block in text_payload.blocks:
-            single = replace(text_payload, blocks=(block,))
+        service_payload = normalized_payload if validation_policy == "v2" else text_payload
+        for block in service_payload.blocks:
+            single = replace(service_payload, blocks=(block,))
             self._ensure_block(
                 _service_message_violation(
                     single,

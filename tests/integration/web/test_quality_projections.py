@@ -241,11 +241,11 @@ def test_in_flight_sent_attempt_not_shown_as_unknown(configured_client, configur
     assert projected['has_unknown_outcome'] is False
     assert projected['reason'] is None
     assert projected['status'] == 'running'
-    assert projected['can_retry'] is True
+    assert projected['can_retry'] is False
     assert projected['section_id'] == scenario.section().id
     assert projected['chapter_title'] == 'Chapter 1'
     assert recovery['reason'] is None
-    assert recovery['can_retry'] is True
+    assert recovery['can_retry'] is False
 
 
 def test_unknown_and_stopped_roots_expose_can_restart_and_chapter_metadata(
@@ -357,3 +357,66 @@ def test_one_unknown_root_does_not_disable_can_retry_for_other_chapters(
     assert value['recovery']['can_retry'] is True
     assert failures[blocked.id]['is_retryable'] is False
     assert failures[allowed.id]['is_retryable'] is True
+
+
+def test_recovery_reason_prioritizes_unknown_and_interrupted_over_limit(
+    configured_client, configured_application,
+):
+    scenario, conditions = _prepared_book(
+        configured_client, configured_application, chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
+    )
+    with configured_application.unit_of_work.transaction() as tx:
+        _save_root(
+            tx, scenario, conditions, scenario.block_ids(0), status='stopped', reason='limit',
+            calls_used=3, max_calls=3,
+        )
+        _save_root(
+            tx, scenario, conditions, scenario.block_ids(1), status='stopped', reason='interrupted',
+            calls_used=1, max_calls=3,
+        )
+    value = configured_client.get(f'/books/{scenario.book_id}').json()
+    assert value['recovery']['reason'] == 'interrupted'
+
+
+def test_stopped_regeneration_root_does_not_block_epub_ready_or_export(
+    configured_client, configured_application, tmp_path,
+):
+    from dataclasses import replace
+    from linguary.application.book_overview import book_overview
+    from linguary.application.use_cases.export_book import ExportBookCommand
+    from linguary.domain import BookStatus
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+    from web_scenario import translated_result
+
+    scenario, conditions = _prepared_book(configured_client, configured_application)
+    blocks = scenario.block_ids()
+    with configured_application.unit_of_work.transaction() as tx:
+        tx.results.replace_results(
+            scenario.run_id,
+            tuple(translated_result(block_id) for block_id in blocks),
+        )
+        # Add a stopped regeneration root without any unfinished regeneration tasks.
+        regen_root = RecoveryRoot(
+            str(uuid4()), scenario.book_id, conditions.id, str(uuid4()),
+            {
+                'schema_version': 1,
+                'active_run_id': scenario.run_id,
+                'ordered_blocks': [blocks[0]],
+                'atomic_intervals': [[blocks[0]]],
+                'historical_coverage': [],
+                'policy': {'max_calls': 3, 'max_scope_calls': 3, 'max_depth': 1, 'max_leaves': 1},
+            },
+            calls_used=1, status='stopped', reason='provider_error',
+            policy_version=CURRENT_TRANSLATION_POLICY, operation_kind='regeneration',
+        )
+        tx.work.add_root(regen_root)
+        tx.work.add_scope(RecoveryScope(str(uuid4()), regen_root.id, (blocks[0],), status='stopped'))
+        book = tx.books.get(scenario.book_id)
+        tx.books.save(replace(book, status=BookStatus.READY_TO_EXPORT))
+
+    overview = book_overview(configured_application.unit_of_work, scenario.book_id)
+    assert overview.epub_ready is True
+    exported = configured_application.export_book(
+        ExportBookCommand(book_id=scenario.book_id, target_path=str(tmp_path / 'out.epub'))
+    )
+    assert exported.path == str(tmp_path / 'out.epub')

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
+from linguary.application.diagnostics import is_transient_lock_error
 from linguary.application.task_runner import TaskHandler, TaskRunner
 from linguary.domain import ProcessingTask
 
@@ -181,13 +182,19 @@ class TaskWorkerPool:
                 continue
             wake.clear()
             self._busy_slots.add(slot)
+            transient_busy = False
             try:
                 task = await self._runner.run_next()
+            except Exception as error:
+                if not is_transient_lock_error(error):
+                    raise
+                task = None
+                transient_busy = True
             finally:
                 self._busy_slots.remove(slot)
                 for waiting_slot in self._capacity_waiters:
                     self._worker_wakes[waiting_slot].set()
-            if task is None and not self._stop.is_set():
+            if (task is None or transient_busy) and not self._stop.is_set():
                 await self._wait_for_work(wake)
 
     async def _wait_for_work(self, wake: asyncio.Event) -> None:

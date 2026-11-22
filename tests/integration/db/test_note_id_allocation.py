@@ -126,6 +126,66 @@ def test_allocate_note_ids_zero_count_and_cascade_on_run_delete(
     assert _counter_rows(engine) == []
 
 
+def test_allocate_note_ids_rolls_back_ignores_non_block_revisions_and_uses_index(
+    unit_of_work: SqlAlchemyUnitOfWork, engine: Engine
+) -> None:
+    """Counter rolls back on failure, ignores text/non-block artifacts, and uses the composite index."""
+    from sqlalchemy import text
+
+    _prepare(unit_of_work)
+    with unit_of_work.transaction() as uow:
+        uow.work.archive_artifacts(
+            [
+                {
+                    "id": _REVISION_ID,
+                    "book_id": BOOK_ID,
+                    "run_id": RUN_ID,
+                    "kind": "chapter_analysis",
+                    "scope_id": SECTION_ID,
+                    "body": {"schema_version": 1, "result": {"language_notes": [{"id": "ln-ch01-900"}]}},
+                },
+                {
+                    "id": _OTHER_REVISION_ID,
+                    "book_id": BOOK_ID,
+                    "run_id": RUN_ID,
+                    "kind": "block_result",
+                    "scope_id": BLOCK_ID,
+                    "body": {
+                        "schema_version": 1,
+                        "result": {
+                            "translated_text": '"ln-ch01-999"',
+                            "language_notes": [{"id": "ln-ch01-004"}],
+                        },
+                    },
+                },
+            ]
+        )
+
+    with pytest.raises(RuntimeError, match="abort"):
+        with unit_of_work.transaction() as uow:
+            assert uow.results.allocate_note_ids(RUN_ID, 1, 2) == ("ln-ch01-005", "ln-ch01-006")
+            raise RuntimeError("abort")
+    assert _counter_rows(engine) == []
+
+    with unit_of_work.transaction() as uow:
+        assert uow.results.allocate_note_ids(RUN_ID, 1, 1) == ("ln-ch01-005",)
+    assert _counter_rows(engine) == [(RUN_ID, 1, 5)]
+
+    with engine.connect() as connection:
+        plan = " ".join(
+            str(row[-1])
+            for row in connection.execute(
+                text(
+                    "EXPLAIN QUERY PLAN SELECT body_json FROM artifact_revisions "
+                    "WHERE book_id = :book_id AND run_id = :run_id AND kind = 'block_result'"
+                ),
+                {"book_id": BOOK_ID, "run_id": RUN_ID},
+            ).all()
+        )
+    assert "ix_artifact_revisions_book_id_run_id" in plan
+    assert "SCAN artifact_revisions" not in plan
+
+
 def _prepare(unit_of_work: SqlAlchemyUnitOfWork, *, second_run: bool = False) -> None:
     with unit_of_work.transaction() as uow:
         uow.books.add(make_book())

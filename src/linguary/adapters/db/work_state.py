@@ -75,6 +75,18 @@ class SqlAlchemyWorkRepository:
         row = self._session.get(WorkBindingRow, (entity_kind, entity_id))
         return self._binding_from_row(row)
 
+    def get_bindings(self, entity_kind: str, entity_ids: Sequence[str]):
+        unique_ids = tuple(dict.fromkeys(entity_ids))
+        if not unique_ids:
+            return {}
+        rows = self._session.scalars(
+            select(WorkBindingRow).where(
+                WorkBindingRow.entity_kind == entity_kind,
+                WorkBindingRow.entity_id.in_(unique_ids),
+            )
+        ).all()
+        return {row.entity_id: self._binding_from_row(row) for row in rows}
+
     @staticmethod
     def _binding_from_row(row):
         if row is None:
@@ -504,6 +516,19 @@ class SqlAlchemyWorkRepository:
     def list_task_attempts(self, task_id):
         rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.task_id == task_id)).all()
         return tuple(self._attempt_from_row(row) for row in rows)
+
+    def list_attempts_for_tasks(self, task_ids: Sequence[str]):
+        unique_ids = tuple(dict.fromkeys(task_ids))
+        if not unique_ids:
+            return {}
+        grouped = {task_id: [] for task_id in unique_ids}
+        rows = self._session.scalars(
+            select(LLMAttemptRow).where(LLMAttemptRow.task_id.in_(unique_ids))
+        ).all()
+        for row in rows:
+            if row.task_id is not None:
+                grouped.setdefault(row.task_id, []).append(self._attempt_from_row(row))
+        return {task_id: tuple(items) for task_id, items in grouped.items()}
 
     def add_root(self, root):
         self._owned(BookConditionsRow, root.conditions_id, root.book_id)
@@ -1586,7 +1611,12 @@ class SqlAlchemyWorkRepository:
         signature = local_failure_signature(violation, scope.ordered_blocks)
         outcome = {**thaw(attempt.outcome), 'failure_signature': signature,
                    'violation': violation.to_dict() if violation is not None else None}
-        state = 'failed' if attempt.state in {'sent', 'created'} else attempt.state
+        if attempt.state in {'sent', 'created'}:
+            state = 'failed'
+        elif attempt.state == 'validated':
+            state = 'rejected'
+        else:
+            state = attempt.state
         self._session.execute(update(LLMAttemptRow).where(LLMAttemptRow.id == attempt_id,
             LLMAttemptRow.state == attempt.state).values(state=state, outcome_json=outcome))
         self._session.execute(update(RecoveryScopeRow).where(RecoveryScopeRow.id == scope.id,
@@ -1801,41 +1831,65 @@ class SqlAlchemyWorkRepository:
 
     def reconcile_recovery_attempts(self):
         # Generations are snapshotted first so a second live attempt is not stale after one root bump.
-        rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.root_id.is_not(None),
-            LLMAttemptRow.state.in_(('created', 'sent', 'unknown', 'validated')))).all()
-        claimed = self._session.scalars(select(RecoveryScopeRow).where(RecoveryScopeRow.status == 'claimed')).all()
-        root_generation = {}
-        scope_generation = {}
-        scope_status = {}
-        for row in rows:
-            root = self._session.get(RecoveryRootRow, row.root_id)
-            scope = self._session.get(RecoveryScopeRow, row.scope_id) if row.scope_id is not None else None
-            if root is not None and root.id not in root_generation:
-                root_generation[root.id] = root.generation
-            if scope is not None and scope.id not in scope_generation:
-                scope_generation[scope.id] = scope.generation
-                scope_status[scope.id] = scope.status
-        for scope in claimed:
-            if scope.id not in scope_generation:
-                scope_generation[scope.id] = scope.generation
-                scope_status[scope.id] = scope.status
-            if scope.root_id not in root_generation:
-                root = self._session.get(RecoveryRootRow, scope.root_id)
-                if root is not None:
-                    root_generation[root.id] = root.generation
+        all_rows = self._session.scalars(select(LLMAttemptRow).where(
+            LLMAttemptRow.root_id.is_not(None),
+            LLMAttemptRow.state.in_(('created', 'sent', 'unknown', 'validated')),
+        )).all()
+        rows = [
+            row for row in all_rows
+            if not (
+                row.state == 'unknown'
+                and (row.outcome_json or {}).get('decision') in {'interrupted', 'stale'}
+            )
+        ]
+        claimed = self._session.scalars(
+            select(RecoveryScopeRow).where(RecoveryScopeRow.status == 'claimed')
+        ).all()
+
+        root_ids = {row.root_id for row in rows if row.root_id is not None} | {
+            scope.root_id for scope in claimed
+        }
+        scope_ids = {row.scope_id for row in rows if row.scope_id is not None}
+
+        roots_by_id = (
+            {
+                root.id: root
+                for root in self._session.scalars(
+                    select(RecoveryRootRow).where(RecoveryRootRow.id.in_(root_ids))
+                ).all()
+            }
+            if root_ids
+            else {}
+        )
+        scopes_by_id = {scope.id: scope for scope in claimed}
+        missing_scope_ids = scope_ids - scopes_by_id.keys()
+        if missing_scope_ids:
+            for scope in self._session.scalars(
+                select(RecoveryScopeRow).where(RecoveryScopeRow.id.in_(missing_scope_ids))
+            ).all():
+                scopes_by_id[scope.id] = scope
+
+        root_generation = {root_id: root.generation for root_id, root in roots_by_id.items()}
+        scope_generation = {scope_id: scope.generation for scope_id, scope in scopes_by_id.items()}
+        scope_status = {scope_id: scope.status for scope_id, scope in scopes_by_id.items()}
+
         scope_updates = {}
         root_bumps = set()
         root_stops = set()
         for row in rows:
             outcome = row.outcome_json or {}
-            if row.state == 'unknown' and outcome.get('decision') in {'interrupted', 'stale'}:
-                continue
-            scope = self._session.get(RecoveryScopeRow, row.scope_id) if row.scope_id is not None else None
-            root = self._session.get(RecoveryRootRow, row.root_id)
-            if scope is None or root is None:
-                continue
-            stale = (scope_status[scope.id] == 'accepted' or scope_generation[scope.id] != row.generation
-                     or root_generation[root.id] != (row.context_json or {}).get('root_generation'))
+            scope = scopes_by_id.get(row.scope_id) if row.scope_id is not None else None
+            root = roots_by_id.get(row.root_id)
+            expected_root_gen = (row.context_json or {}).get('root_generation')
+            stale = (
+                root is None
+                or root.superseded_by is not None
+                or root.status not in {'pending', 'running'}
+                or (expected_root_gen is not None and root_generation[root.id] != expected_root_gen)
+                or scope is None
+                or scope_status[scope.id] == 'accepted'
+                or scope_generation[scope.id] != row.generation
+            )
             if stale:
                 if row.state == 'created':
                     row.state = 'cancelled'
@@ -1854,27 +1908,177 @@ class SqlAlchemyWorkRepository:
                 scope_updates[scope.id] = 'stopped'
                 root_bumps.add(root.id)
                 root_stops.add(root.id)
-            row.outcome_json = {**(row.outcome_json or {}), 'decision': 'interrupted'}
-        for scope in claimed:
-            if scope.id in scope_updates:
+            row.outcome_json = {**outcome, 'decision': 'interrupted'}
+
+        self._session.flush()
+        remaining_claimed = [scope for scope in claimed if scope.id not in scope_updates]
+        latest_by_scope = {}
+        if remaining_claimed:
+            remaining_ids = [scope.id for scope in remaining_claimed]
+            attempt_rows = self._session.scalars(
+                select(LLMAttemptRow)
+                .where(LLMAttemptRow.scope_id.in_(remaining_ids))
+                .order_by(LLMAttemptRow.scope_id, LLMAttemptRow.ordinal.desc())
+            ).all()
+            for attempt_row in attempt_rows:
+                if attempt_row.scope_id not in latest_by_scope:
+                    latest_by_scope[attempt_row.scope_id] = attempt_row
+
+        for scope in remaining_claimed:
+            root = roots_by_id.get(scope.root_id)
+            if root is None or root.superseded_by is not None or root.status == 'stopped':
+                scope_updates[scope.id] = 'stopped'
                 continue
-            latest = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id)
-                .order_by(LLMAttemptRow.ordinal.desc()).limit(1)).first()
-            if latest is None or latest.state not in {'rejected', 'failed'}:
+            if root.status == 'complete':
+                scope_updates[scope.id] = (
+                    'accepted' if scope.accepted_attempt_id is not None else 'stopped'
+                )
                 continue
-            scope_updates[scope.id] = 'pending'
-            root_bumps.add(scope.root_id)
+            latest = latest_by_scope.get(scope.id)
+            if latest is None or latest.state in {'rejected', 'failed', 'cancelled'}:
+                scope_updates[scope.id] = 'pending'
+                root_bumps.add(root.id)
+            elif latest.state == 'unknown':
+                scope_updates[scope.id] = 'stopped'
+                root_bumps.add(root.id)
+                root_stops.add(root.id)
+
         for scope_id, status in scope_updates.items():
-            scope = self._session.get(RecoveryScopeRow, scope_id)
+            scope = scopes_by_id[scope_id]
             scope.status = status
             scope.generation = scope_generation[scope_id] + 1
         for root_id in root_bumps:
-            root = self._session.get(RecoveryRootRow, root_id)
+            root = roots_by_id[root_id]
             root.generation = root_generation[root_id] + 1
             if root_id in root_stops:
                 root.status = 'stopped'
                 root.reason = 'interrupted'
         self._session.flush()
+
+    def reconcile_correction_attempts(self) -> int:
+        from linguary.domain import TaskType
+        rows = self._session.scalars(
+            select(LLMAttemptRow).where(
+                LLMAttemptRow.root_id.is_(None),
+                LLMAttemptRow.review_id.is_(None),
+                LLMAttemptRow.task_id.is_not(None),
+                LLMAttemptRow.state.in_(('created', 'sent', 'validated')),
+            )
+        ).all()
+        if not rows:
+            return 0
+        correction_stages = {'chapter_correction', 'chapter_correction_review'}
+        missing_stage_task_ids = {
+            row.task_id
+            for row in rows
+            if (row.context_json or {}).get('stage') is None and row.task_id is not None
+        }
+        task_types: dict[str, str] = {}
+        if missing_stage_task_ids:
+            for task_row in self._session.scalars(
+                select(ProcessingTaskRow).where(ProcessingTaskRow.id.in_(missing_stage_task_ids))
+            ).all():
+                task_types[task_row.id] = task_row.task_type
+        updated = 0
+        for row in rows:
+            stage = (row.context_json or {}).get('stage')
+            if stage is not None:
+                if stage not in correction_stages:
+                    continue
+            elif task_types.get(row.task_id) != TaskType.CHAPTER_CORRECTION.value:
+                continue
+            outcome = dict(row.outcome_json or {'schema_version': 1})
+            outcome.setdefault('schema_version', 1)
+            outcome['decision'] = 'interrupted'
+            if row.state == 'created':
+                row.state = 'cancelled'
+            elif row.state == 'sent':
+                row.state = 'unknown'
+            elif row.state == 'validated':
+                row.state = 'rejected'
+            row.outcome_json = outcome
+            updated += 1
+        if updated:
+            self._session.flush()
+        return updated
+
+    def supersede_stopped_regeneration_roots(
+        self, book_id: str, *, run_id: str, block_id: str, successor_id: str
+    ) -> tuple[str, ...]:
+        from linguary.domain import TaskStatus, TaskType
+        stopped_ids = tuple(
+            root.id
+            for root in self.list_roots(book_id, run_id=run_id)
+            if root.id != successor_id
+            and root.superseded_by is None
+            and root.operation_kind == 'regeneration'
+            and root.status == 'stopped'
+            and tuple(root.manifest.get('ordered_blocks', ())) == (block_id,)
+        )
+        if not stopped_ids:
+            return ()
+        self._session.execute(
+            update(RecoveryRootRow)
+            .where(
+                RecoveryRootRow.id.in_(stopped_ids),
+                RecoveryRootRow.superseded_by.is_(None),
+            )
+            .values(
+                superseded_by=successor_id,
+                generation=RecoveryRootRow.generation + 1,
+            )
+        )
+        self._session.execute(
+            update(RecoveryScopeRow)
+            .where(
+                RecoveryScopeRow.root_id.in_(stopped_ids),
+                RecoveryScopeRow.status.in_(('pending', 'claimed', 'stopped')),
+            )
+            .values(
+                status='stopped',
+                generation=RecoveryScopeRow.generation + 1,
+            )
+        )
+        self._session.execute(
+            update(LLMAttemptRow)
+            .where(
+                LLMAttemptRow.root_id.in_(stopped_ids),
+                LLMAttemptRow.state.in_(('created', 'reserved')),
+            )
+            .values(state='cancelled')
+        )
+        self._session.execute(
+            update(ProcessingTaskRow)
+            .where(
+                ProcessingTaskRow.book_id == book_id,
+                ProcessingTaskRow.task_type == TaskType.REGENERATE_BLOCK.value,
+                ProcessingTaskRow.operation_id.in_(stopped_ids),
+                ProcessingTaskRow.status.in_(
+                    (
+                        TaskStatus.FAILED.value,
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    )
+                ),
+            )
+            .values(
+                status=TaskStatus.SUPERSEDED.value,
+                error_type=None,
+                error_message=None,
+                error_detail=None,
+            )
+        )
+        self._session.flush()
+        for row in list(self._session.identity_map.values()):
+            if isinstance(row, RecoveryRootRow) and row.id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, RecoveryScopeRow) and row.root_id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, LLMAttemptRow) and row.root_id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, ProcessingTaskRow) and row.operation_id in stopped_ids:
+                self._session.expire(row)
+        return stopped_ids
 
     def scope_attempt_count(self, scope_id):
         return self._session.scalar(select(func.count()).select_from(LLMAttemptRow).where(

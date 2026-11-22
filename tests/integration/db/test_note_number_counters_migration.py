@@ -44,12 +44,27 @@ def test_migration_0018_backfills_notes_candidates_and_live_revisions(
             body={
                 "schema_version": 1,
                 "result": {
+                    "translated_text": '"ln-ch01-999"',
                     "language_notes": [
                         {"id": "ln-ch01-012"},
                         {"id": "custom-note"},
                     ],
                     "label": "see ln-ch01-099",
                 },
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO artifact_revisions ("
+                "id, book_id, run_id, kind, scope_id, body_json, sha256, created_at"
+                ") VALUES ("
+                "'artifact-analysis', 'book-1', 'run-1', 'chapter_analysis', 'section-1', "
+                ":body, :sha, '2026-10-10 00:00:00'"
+                ")"
+            ),
+            {
+                "body": json.dumps({"result": {"language_notes": [{"id": "ln-ch01-888"}]}}),
+                "sha": "c" * 64,
             },
         )
 

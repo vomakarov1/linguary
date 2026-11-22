@@ -894,3 +894,43 @@ async def test_closed_pacing_loop_does_not_block_the_next_waiter():
             live.cancel()
             await asyncio.gather(live, return_exceptions=True)
 
+
+@pytest.mark.asyncio
+async def test_closed_pacing_loop_does_not_block_without_set_limit_or_with_done_head_wake():
+    """Closing the head loop without set_limit(), even with a resolved _head_wake, never stalls acquire()."""
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ManualClock()
+    dead = asyncio.new_event_loop()
+
+    async def sleep(seconds: float) -> None:
+        if asyncio.get_running_loop() is dead:
+            await asyncio.Event().wait()
+        await clock.sleep(seconds)
+
+    limiter = LLMRateLimiter(60, clock=clock, sleep=sleep)
+    await limiter.acquire()
+    parked: list[asyncio.Task] = []
+
+    def queue_on_dead_loop() -> None:
+        async def queue_dead_waiter() -> None:
+            task = asyncio.create_task(limiter.acquire())
+            for _ in range(5):
+                await asyncio.sleep(0)
+            if limiter._head_wake is not None and not limiter._head_wake.done():
+                limiter._head_wake.set_result(None)
+            parked.append(task)
+
+        dead.run_until_complete(queue_dead_waiter())
+
+    try:
+        await asyncio.to_thread(queue_on_dead_loop)
+        assert parked and not parked[0].done()
+        dead.set_exception_handler(lambda *_args: None)
+        dead.close()
+        await asyncio.wait_for(limiter.acquire(), timeout=1)
+    finally:
+        if not dead.is_closed():
+            dead.set_exception_handler(lambda *_args: None)
+            dead.close()
+

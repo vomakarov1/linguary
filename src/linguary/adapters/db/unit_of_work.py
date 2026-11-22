@@ -78,20 +78,25 @@ class SqlAlchemyUnitOfWork:
         session = self._session_factory()
         token = self._current.set(session)
         try:
-            with session.begin():
-                # Acquire SQLite's writer lock before application work: retries never
-                # replay user code or encompass a physical model request.
-                for attempt in range(1, 11):
-                    try:
-                        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
-                        break
-                    except OperationalError as error:
-                        if 'locked' not in str(error).lower() and 'busy' not in str(error).lower():
-                            raise
-                        if attempt == 10:
-                            raise PersistenceError('база данных занята после ограниченного повтора') from None
-                        sleep(min(0.005 * attempt, 0.02))
-                yield self
+            try:
+                with session.begin():
+                    # Acquire SQLite's writer lock before application work: retries never
+                    # replay user code or encompass a physical model request.
+                    for attempt in range(1, 11):
+                        try:
+                            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                            break
+                        except OperationalError as error:
+                            if 'locked' not in str(error).lower() and 'busy' not in str(error).lower():
+                                raise
+                            if attempt == 10:
+                                raise PersistenceError('база данных занята после ограниченного повтора') from None
+                            sleep(min(0.005 * attempt, 0.02))
+                    yield self
+            except OperationalError as error:
+                if 'locked' in str(error).lower() or 'busy' in str(error).lower():
+                    raise PersistenceError('база данных занята') from None
+                raise
         finally:
             self._current.reset(token)
             session.close()
@@ -106,8 +111,13 @@ class SqlAlchemyUnitOfWork:
         session = self._session_factory()
         token = self._current.set(session)
         try:
-            with session.begin():
-                yield self
+            try:
+                with session.begin():
+                    yield self
+            except OperationalError as error:
+                if 'locked' in str(error).lower() or 'busy' in str(error).lower():
+                    raise PersistenceError('база данных занята') from None
+                raise
         finally:
             self._current.reset(token)
             session.close()

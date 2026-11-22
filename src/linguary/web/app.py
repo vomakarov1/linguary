@@ -294,6 +294,11 @@ def _lifespan(
                         worker.cancel()
                         with suppress(asyncio.CancelledError):
                             await worker
+                    except asyncio.CancelledError:
+                        worker.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await worker
+                        raise
             finally:
                 try:
                     await built.system_settings.aclose()

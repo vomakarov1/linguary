@@ -215,3 +215,77 @@ async def test_correction_refuses_unacknowledged_unknown_before_another_send():
     assert len(allowed_inner.calls) == 1
     states = sorted(item.state for item in allowed_work.attempts.values())
     assert states == ["failed", "unknown"]
+
+
+@pytest.mark.asyncio
+async def test_correction_payload_error_after_response_marks_failed_and_toctou_unknown_cancels_created():
+    from linguary.adapters.llm.logging import LoggingLLMClient
+    from linguary.application.correction_dto import ChapterCorrectionResponse, UnchangedBlockResponse
+    from linguary.application.llm_dto import LLMPayloadError
+    from linguary.application.ports.llm import LLMConfigurationError, LLMResponse
+
+    # 1. LLMPayloadError from with_resolved_block_ids marks attempt as failed (not unknown)
+    client, request, work, _inner = _client(RuntimeError("unused"))
+    bad_payload = ChapterCorrectionResponse((
+        UnchangedBlockResponse("b1"),
+        UnchangedBlockResponse("block-1"),
+    ))
+
+    class _ReturningInner:
+        async def generate(self, req):
+            return LLMResponse(
+                payload=bad_payload,
+                provider="fake",
+                model="pinned-model",
+                call_context=req.call_context,
+            )
+
+    client.inner = _ReturningInner()
+    aliased_request = LLMRequest.for_chapter_correction(
+        instructions=request.instructions,
+        input_text="{}",
+        ordered_block_ids=("block-1",),
+        block_aliases=(("b1", "block-1"),),
+    ).with_logging(
+        book_id=request.book_id,
+        stage=request.stage,
+        task_id=request.task_id,
+        scope_id=request.scope_id,
+        ordered_block_ids=("block-1",),
+        run_id=request.run_id,
+    )
+    with pytest.raises(LLMPayloadError):
+        await client.generate(aliased_request)
+    assert [item.state for item in work.attempts.values()] == ["failed"]
+
+    # 2. TOCTOU: unknown attempt appears while waiting in rate limiter -> TX2 refuses and cancels created
+    limiter = LLMRateLimiter(max_concurrency=1)
+    await limiter.acquire_concurrency()
+    client2, request2, work2, inner2 = _client(LLMTransportError("should not run"), limiter=limiter)
+    running = asyncio.create_task(client2.generate(request2))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if work2.attempts:
+            break
+    assert len(work2.attempts) == 1
+    work2.add_attempt(CallAttempt(str(uuid4()), "book-1", state="unknown", task_id="task-1"))
+    limiter.release_concurrency()
+    with pytest.raises(RecoveryError, match="unknown_outcome"):
+        await running
+    assert inner2.calls == []
+    assert sorted(item.state for item in work2.attempts.values()) == ["cancelled", "unknown"]
+
+    # 3. Poisoned LoggingLLMClient stops before TX2 and cancels created attempt
+    client3, request3, work3, inner3 = _client(LLMTransportError("should not run"))
+    logged = LoggingLLMClient(
+        inner=inner3,
+        unit_of_work=client3.service.uow,
+        provider="fake",
+        model="pinned-model",
+    )
+    logged._observation_failed = True
+    client3.inner = logged
+    with pytest.raises(LLMConfigurationError):
+        await client3.generate(request3)
+    assert inner3.calls == []
+    assert [item.state for item in work3.attempts.values()] == ["cancelled"]

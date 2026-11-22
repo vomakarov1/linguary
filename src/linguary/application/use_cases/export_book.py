@@ -625,6 +625,11 @@ def _ensure_recovery_complete(transaction, book_id, run_id):
         # A superseded root is the previous operation. Its successor is checked separately.
         if getattr(root, 'superseded_by', None) is not None:
             continue
+        if (
+            getattr(root, 'operation_kind', 'translation') == 'regeneration'
+            and getattr(root, 'status', None) == 'stopped'
+        ):
+            continue
         try:
             complete = transaction.work.root_coverage_complete(root.id, update_state=False)
         except TypeError:

@@ -213,15 +213,18 @@ class TranslationCall:
             attempts += 1
             response = None
             physical_context = None
+            attempt_root_generation = None
             try:
                 if recovery is not None:
-                    from linguary.application.diagnostics import diagnostics_for
+                    from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
                     diagnostics_for(self._unit_of_work).ensure_available()
+                    stopped_reason = None
                     try:
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
                             if root is None or root.policy_version != policy.version:
                                 raise RecoveryError('conditions_unavailable', recovery[0])
+                            attempt_root_generation = getattr(root, 'generation', None)
                             checked_conditions_id = root.conditions_id
                             loaded_conditions = transaction.work.get_conditions(root.conditions_id)
                             if loaded_conditions is None:
@@ -231,12 +234,21 @@ class TranslationCall:
                                 assigned_model=loaded_conditions.payload['models']['processing'],
                                 prompt_hash=sha256(request.instructions.encode()).hexdigest(),
                                 policy_version=policy.version)
+                            if physical_context is None:
+                                stopped = transaction.work.get_root(recovery[0])
+                                stopped_reason = (
+                                    getattr(stopped, 'reason', None)
+                                    if stopped is not None
+                                    else None
+                                ) or 'limit'
                     except RecoveryError:
                         raise
-                    except Exception:
+                    except Exception as error:
+                        if is_transient_lock_error(error):
+                            raise
                         diagnostics_for(self._unit_of_work).fail()
                     if physical_context is None:
-                        raise RecoveryError('limit', recovery[0])
+                        raise RecoveryError(stopped_reason or 'limit', recovery[0])
                     request = replace(request, call_context=physical_context,
                                       scope_id=physical_context.scope_id)
                 response = await self._llm_client.generate(request)
@@ -377,8 +389,23 @@ class TranslationCall:
                 outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
                     violation = violation_of(error, context=physical_context)
+                    was_superseded = False
+                    was_stale_gen = False
+                    existing_reason = None
                     with self._unit_of_work.transaction() as transaction:
                         attempt = _attempt(transaction.work, physical_context.attempt_id)
+                        if attempt is not None:
+                            ctx_gen = (getattr(attempt, 'context', None) or {}).get('root_generation')
+                            if ctx_gen is not None:
+                                attempt_root_generation = ctx_gen
+                        pre_root = transaction.work.get_root(recovery[0])
+                        if pre_root is not None:
+                            was_superseded = getattr(pre_root, 'superseded_by', None) is not None
+                            was_stale_gen = (
+                                attempt_root_generation is not None
+                                and getattr(pre_root, 'generation', None) != attempt_root_generation
+                            )
+                            existing_reason = getattr(pre_root, 'reason', None)
                         outcome = _failure_outcome(
                             error,
                             state=None if attempt is None else attempt.state,
@@ -398,6 +425,10 @@ class TranslationCall:
                                 transaction.work, current_root, recovery[1], unit
                             )
                     if outcome == 'unknown':
+                        if was_superseded:
+                            raise RecoveryError('superseded', recovery[0], original_error=error) from error
+                        if was_stale_gen and existing_reason != 'unknown_outcome':
+                            raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                     if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None
@@ -407,16 +438,52 @@ class TranslationCall:
                     can_retry = (policy is not None and context.has_optional_neighbours
                         and capacity_retries < policy.capacity_retries_without_neighbours)
                     if recovery is not None:
+                        stale_reason = None
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
-                            within_budget = False
                             if root is not None:
-                                count = transaction.work.scope_attempt_count(recovery[1])
-                                within_budget = (root.calls_used < root.manifest['policy']['max_calls'] + root.extra_calls
-                                    and count < root.manifest['policy']['max_scope_calls'])
-                            can_retry = can_retry and within_budget
-                            if not can_retry and root is not None:
-                                _set_root_status(transaction.work, root, 'context_capacity', pause=False)
+                                if getattr(root, "superseded_by", None) is not None:
+                                    stale_reason = "superseded"
+                                elif (
+                                    attempt_root_generation is not None
+                                    and getattr(root, "generation", None) != attempt_root_generation
+                                ):
+                                    stale_reason = "interrupted"
+                                elif (
+                                    getattr(root, "status", None) == "stopped"
+                                    and getattr(root, "reason", None) in {"unknown_outcome", "interrupted"}
+                                ):
+                                    stale_reason = getattr(root, "reason", None)
+                                else:
+                                    count = transaction.work.scope_attempt_count(recovery[1])
+                                    within_budget = (
+                                        root.calls_used < root.manifest['policy']['max_calls'] + root.extra_calls
+                                        and count < root.manifest['policy']['max_scope_calls']
+                                    )
+                                    can_retry = can_retry and within_budget
+                                    if not can_retry:
+                                        try:
+                                            _set_root_status(
+                                                transaction.work,
+                                                root,
+                                                'context_capacity',
+                                                pause=False,
+                                                expected_generation=attempt_root_generation,
+                                            )
+                                        except WorkStateError:
+                                            latest = transaction.work.get_root(recovery[0])
+                                            stale_reason = (
+                                                "superseded"
+                                                if (
+                                                    latest is not None
+                                                    and getattr(latest, "superseded_by", None) is not None
+                                                )
+                                                else "interrupted"
+                                            )
+                            else:
+                                can_retry = False
+                        if stale_reason is not None:
+                            raise RecoveryError(stale_reason, recovery[0], original_error=error) from error
                     if not can_retry:
                         if recovery is not None:
                             raise RecoveryError('context_capacity', recovery[0], original_error=error) from error
@@ -433,7 +500,12 @@ class TranslationCall:
                 if not decision.should_retry:
                     if recovery is not None:
                         with self._unit_of_work.transaction() as transaction:
-                            reason = _stop_or_pause_root(transaction.work, recovery, error)
+                            reason = _stop_or_pause_root(
+                                transaction.work,
+                                recovery,
+                                error,
+                                expected_generation=attempt_root_generation,
+                            )
                         raise RecoveryError(reason, recovery[0], original_error=error) from error
                     raise
                 if decision.backoff_seconds > 0 and self._sleep is not None:
@@ -945,8 +1017,14 @@ def _finalize_cancelled_attempt(work, physical_context) -> None:
         _record_recovery_failure(work, attempt_id, violation, "unknown")
 
 
-def _set_root_status(work, root, reason: str, *, pause: bool) -> None:
-    generation = getattr(root, "generation", None)
+def _set_root_status(
+    work, root, reason: str, *, pause: bool, expected_generation: int | None = None
+) -> None:
+    generation = (
+        expected_generation
+        if expected_generation is not None
+        else getattr(root, "generation", None)
+    )
     if pause:
         pause_root = getattr(work, "pause_root", None)
         if callable(pause_root):
@@ -995,12 +1073,24 @@ def _terminal_reason(error: Exception, *, calls_exhausted: bool, scope_exhausted
     return _pause_reason(error), True
 
 
-def _stop_or_pause_root(work, recovery, error: Exception) -> str:
+def _stop_or_pause_root(
+    work, recovery, error: Exception, *, expected_generation: int | None = None
+) -> str:
     root = work.get_root(recovery[0])
     if root is None:
         return "conditions_unavailable"
-    if getattr(root, "status", None) == "stopped" and getattr(root, "reason", None) == "unknown_outcome":
-        return "unknown_outcome"
+    if getattr(root, "superseded_by", None) is not None:
+        return "superseded"
+    if (
+        expected_generation is not None
+        and getattr(root, "generation", None) != expected_generation
+    ):
+        return "interrupted"
+    if (
+        getattr(root, "status", None) == "stopped"
+        and getattr(root, "reason", None) in {"unknown_outcome", "interrupted"}
+    ):
+        return getattr(root, "reason", None)
     count = work.scope_attempt_count(recovery[1])
     limit = root.manifest["policy"]["max_calls"] + root.extra_calls
     reason, pause = _terminal_reason(
@@ -1008,7 +1098,19 @@ def _stop_or_pause_root(work, recovery, error: Exception) -> str:
         calls_exhausted=root.calls_used >= limit,
         scope_exhausted=count >= root.manifest["policy"]["max_scope_calls"],
     )
-    _set_root_status(work, root, reason, pause=pause)
+    try:
+        _set_root_status(
+            work,
+            root,
+            reason,
+            pause=pause,
+            expected_generation=expected_generation,
+        )
+    except WorkStateError:
+        latest = work.get_root(recovery[0])
+        if latest is not None and getattr(latest, "superseded_by", None) is not None:
+            return "superseded"
+        return "interrupted"
     return reason
 
 

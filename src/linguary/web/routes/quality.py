@@ -34,7 +34,8 @@ def require_book(application, book_id):
 
 async def read_input(request, schema):
     try:
-        if request.headers.get('content-type', '').startswith('application/json'):
+        content_type = request.headers.get('content-type', '').split(';')[0].strip().lower()
+        if content_type == 'application/json':
             raw = await request.json()
         else:
             form = await request.form()
@@ -137,7 +138,8 @@ async def extend_limit(request: Request, application: CurrentApplication, book_i
     except ExtendRecoveryLimitNotFoundError as error:
         return input_error_response(request, HTTPException(404, detail={'reason_code': error.reason_code}))
     except ExtendRecoveryLimitError as error:
-        return input_error_response(request, HTTPException(409, detail={'reason_code': error.reason_code}))
+        code = 422 if error.reason_code == 'invalid_limit' else 409
+        return input_error_response(request, HTTPException(code, detail={'reason_code': error.reason_code}))
     except HTTPException as error:
         return input_error_response(request, error)
     if wants_html(request):
@@ -186,8 +188,21 @@ class _UnboundWork:
         return None
 
 
-def _retry_tasks(application, tasks, labels):
+def _retry_tasks(application, tasks, labels, *, overview=None):
     """Ordinary retries, plus chapter-correction sends that still need an acknowledgement."""
+    if overview is not None:
+        retry_rows = []
+        unknown_rows = []
+        for failure in overview.progress.failures:
+            if failure.task_type.value not in _RETRY_TASK_TYPES:
+                continue
+            row = dict(id=failure.task_id, label=labels.task_type_label(failure.task_type))
+            if failure.is_retryable:
+                retry_rows.append(row)
+            elif getattr(failure, 'requires_unknown_acknowledgement', False):
+                unknown_rows.append(row)
+        return retry_rows, unknown_rows
+
     candidates = [
         task for task in tasks
         if task.is_retryable and task.task_type.value in _RETRY_TASK_TYPES
@@ -224,6 +239,7 @@ def quality_page_context(request, application, book_id, *, tasks=None, overview=
         diagnostic_list_command=f'linguary diagnostics list {quote(book_id)}')
     if request.headers.get('x-linguary-fragment') == 'result-header':
         return base
+    explicit_tasks = tasks is not None
     if overview is not None and getattr(overview, '_tasks', None) is not None:
         document = getattr(overview, '_document', None)
         calls = getattr(overview, '_calls', ()) or ()
@@ -287,7 +303,9 @@ def quality_page_context(request, application, book_id, *, tasks=None, overview=
         diagnostics.append(dict(status=labels.DIAGNOSTIC_BODY_LABELS.get(status, labels.DIAGNOSTIC_BODY_LABELS['unavailable']),
             url=f'/books/{book_id}/diagnostics/{call.id}' if local_diagnostics else None,
             command=f'linguary diagnostics show {quote(book_id)} {quote(call.id)}'))
-    retry_tasks, unknown_retry_tasks = _retry_tasks(application, tasks, labels)
+    retry_tasks, unknown_retry_tasks = _retry_tasks(
+        application, tasks, labels, overview=None if explicit_tasks else overview
+    )
     return dict(base, forms=forms, scope_choices=[dict(value=key, title=title, selected=key == selected[0]) for key, _, title in scopes],
         legacy=legacy, retry_tasks=retry_tasks, unknown_retry_tasks=unknown_retry_tasks,
         diagnostics=diagnostics)

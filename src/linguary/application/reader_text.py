@@ -594,7 +594,7 @@ def record_reader_warnings(unit_of_work, response, channels, *, reader_level):
                 for reason in policy.warnings(kind, body, reader_level=reader_level)]
     if not warnings or response.call_id is None:
         return
-    from linguary.application.diagnostics import diagnostics_for
+    from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
     try:
         with unit_of_work.transaction() as transaction:
             record = transaction.llm_calls.diagnostic_record(call_id=response.call_id)
@@ -603,7 +603,9 @@ def record_reader_warnings(unit_of_work, response, channels, *, reader_level):
             metadata = dict(record['metadata'])
             metadata['reader_warnings'] = warnings
             transaction.llm_calls.update_diagnostics(response.call_id, metadata=metadata)
-    except Exception:
+    except Exception as error:
+        if is_transient_lock_error(error):
+            return
         diagnostics_for(unit_of_work).fail()
 
 

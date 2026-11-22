@@ -372,6 +372,8 @@ def test_reconcile_recovery_attempts_recovers_claimed_scope_with_rejected_attemp
         context = dict(row.context_json)
         context["root_generation"] = 99
         row.context_json = context
+        from linguary.adapters.db.models import RecoveryScopeRow
+        tx.work._session.get(RecoveryScopeRow, stale_scope.id).status = "stopped"
         tx.work._session.flush()
         stale_generation = tx.work.get_root(stale_root.id).generation
         stale_status = tx.work.get_root(stale_root.id).status
@@ -382,6 +384,101 @@ def test_reconcile_recovery_attempts_recovers_claimed_scope_with_rejected_attemp
         assert kept.outcome["marker"] == "keep"
         assert tx.work.get_root(stale_root.id).generation == stale_generation
         assert tx.work.get_root(stale_root.id).status == stale_status
+
+
+def test_reconcile_recovery_attempts_handles_claimed_edge_cases_and_correction_reconcile(unit_of_work):
+    from linguary.adapters.db.models import RecoveryRootRow, RecoveryScopeRow
+    from linguary.domain import ProcessingTask, TaskStatus, TaskType
+    from linguary.domain.recovery import CallAttempt
+
+    conditions, _, _ = prepare(unit_of_work)
+    with unit_of_work.transaction() as tx:
+        # 1. claimed + unknown (interrupted) -> scope=stopped, root=('stopped', 'interrupted')
+        u_root, u_scope, u_task = _plant(tx, conditions, scope_blocks=("block-1",))
+        u_ctx = _begin(tx, u_root, u_scope, u_task)
+        u_row = tx.work._session.get(LLMAttemptRow, u_ctx.attempt_id)
+        u_row.state = "unknown"
+        u_row.outcome_json = {"schema_version": 1, "decision": "interrupted"}
+        tx.work._session.flush()
+
+        # 2. claimed + stale created -> created->cancelled, scope->pending
+        sc_root, sc_scope, sc_task = _plant(tx, conditions, scope_blocks=("block-1",))
+        sc_ctx = _begin(tx, sc_root, sc_scope, sc_task)
+        sc_row = tx.work._session.get(LLMAttemptRow, sc_ctx.attempt_id)
+        sc_row.context_json = {**dict(sc_row.context_json), "root_generation": 999}
+        tx.work._session.flush()
+
+        # 3. claimed with no attempts (latest is None) -> scope->pending
+        empty_root, empty_scope, _ = _plant(tx, conditions, scope_blocks=("block-1",))
+        tx.work.claim_scope(empty_scope.id, expected_generation=empty_scope.generation)
+
+        # 4. claimed on stopped root and superseded root -> scope->stopped without mutating root
+        stopped_root, stopped_scope, _ = _plant(tx, conditions, scope_blocks=("block-1",))
+        tx.work.claim_scope(stopped_scope.id, expected_generation=stopped_scope.generation)
+        tx.work.stop_root(stopped_root.id, "limit")
+        stopped_gen = tx.work.get_root(stopped_root.id).generation
+
+        sup_root, sup_scope, _ = _plant(tx, conditions, scope_blocks=("block-1",))
+        tx.work.claim_scope(sup_scope.id, expected_generation=sup_scope.generation)
+        tx.work._session.get(RecoveryRootRow, sup_root.id).superseded_by = stopped_root.id
+        tx.work._session.flush()
+        sup_gen = tx.work.get_root(sup_root.id).generation
+
+        tx.work.reconcile_recovery_attempts()
+
+        assert tx.work.get_scope(u_scope.id).status == "stopped"
+        assert (tx.work.get_root(u_root.id).status, tx.work.get_root(u_root.id).reason) == ("stopped", "interrupted")
+
+        assert tx.work.get_attempt(sc_ctx.attempt_id).state == "cancelled"
+        assert tx.work.get_scope(sc_scope.id).status == "pending"
+
+        assert tx.work.get_scope(empty_scope.id).status == "pending"
+
+        assert tx.work.get_scope(stopped_scope.id).status == "stopped"
+        assert tx.work.get_root(stopped_root.id).generation == stopped_gen
+        assert tx.work.get_root(stopped_root.id).reason == "limit"
+
+        assert tx.work.get_scope(sup_scope.id).status == "stopped"
+        assert tx.work.get_root(sup_root.id).generation == sup_gen
+        assert tx.work.get_root(sup_root.id).superseded_by == stopped_root.id
+
+        # 5. reconcile_correction_attempts settles correction attempts and skips chapter_analysis attempts
+        corr_task = ProcessingTask(
+            id="corr-task-1", book_id="book-1", task_type=TaskType.CHAPTER_CORRECTION,
+            scope_id="section-1", status=TaskStatus.RUNNING,
+        )
+        analysis_task = ProcessingTask(
+            id="analysis-task-1", book_id="book-1", task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-1", status=TaskStatus.RUNNING,
+        )
+        tx.tasks.add(corr_task)
+        tx.tasks.add(analysis_task)
+        corr_sent = CallAttempt(
+            uid(), "book-1", state="sent", conditions_id=conditions.id, task_id=corr_task.id,
+            context={"schema_version": 1, "stage": "chapter_correction"},
+        )
+        corr_created = CallAttempt(
+            uid(), "book-1", state="created", conditions_id=conditions.id, task_id=corr_task.id,
+            context={"schema_version": 1, "stage": "chapter_correction_review"},
+        )
+        corr_validated = CallAttempt(
+            uid(), "book-1", state="validated", conditions_id=conditions.id, task_id=corr_task.id,
+            context={"schema_version": 1},
+        )
+        analysis_sent = CallAttempt(
+            uid(), "book-1", state="sent", conditions_id=conditions.id, task_id=analysis_task.id,
+            context={"schema_version": 1, "stage": "chapter_analysis"},
+        )
+        for att in (corr_sent, corr_created, corr_validated, analysis_sent):
+            tx.work.add_attempt(att)
+
+        updated = tx.work.reconcile_correction_attempts()
+        assert updated == 3
+        assert tx.work.get_attempt(corr_sent.id).state == "unknown"
+        assert tx.work.get_attempt(corr_sent.id).outcome["decision"] == "interrupted"
+        assert tx.work.get_attempt(corr_created.id).state == "cancelled"
+        assert tx.work.get_attempt(corr_validated.id).state == "rejected"
+        assert tx.work.get_attempt(analysis_sent.id).state == "sent"
 
 
 def test_rollback_not_sent_attempt_releases_only_a_matching_charge(unit_of_work):

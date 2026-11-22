@@ -1240,5 +1240,57 @@ async def test_web_lifespan_waits_gracefully_before_cancelling_worker(monkeypatc
     assert cooperative.shutdown_at is not None and cooperative.closed_at is not None
     assert cooperative.closed_at - cooperative.shutdown_at < grace
 
+    # 3. Cancelling lifespan itself during grace window cancels and awaits worker before aclose()
+    cancel_started = asyncio.Event()
+    events: list[str] = []
+
+    class _CancelProbe(_Probe):
+        async def aclose(self) -> None:
+            events.append("aclose")
+            await super().aclose()
+
+    cancel_probe = _CancelProbe()
+
+    async def blocking_worker(_application: object) -> None:
+        cancel_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("worker_cancelled")
+            raise
+
+    monkeypatch.setattr(web_app, "run_worker", blocking_worker)
+    web = create_app(application=cancel_probe, run_background_worker=True)
+    lifespan = web.router.lifespan_context(web)
+    await lifespan.__aenter__()
+    await asyncio.wait_for(cancel_started.wait(), 1)
+    exit_task = asyncio.create_task(lifespan.__aexit__(None, None, None))
+    await asyncio.sleep(0.02)
+    exit_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await exit_task
+    assert events == ["worker_cancelled", "aclose"]
+
+
+async def test_web_lifespan_with_real_worker_pool_shuts_down_cleanly(tmp_path) -> None:
+    """Real lifespan -> begin_close() -> TaskWorkerPool.run_forever() exits cleanly without hanging."""
+    import asyncio
+    from linguary.adapters.config import AppSettings, StorageSettings
+    from linguary.composition import build_application
+    from linguary.web.app import create_app
+
+    app = build_application(
+        settings=AppSettings(storage=StorageSettings(data_root=str(tmp_path / "data"))),
+    )
+    try:
+        web = create_app(application=app, run_background_worker=True)
+        lifespan = web.router.lifespan_context(web)
+        await lifespan.__aenter__()
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=3.0)
+        assert app.worker_pool.stop_requested is True
+    finally:
+        await app.aclose()
+
 
 

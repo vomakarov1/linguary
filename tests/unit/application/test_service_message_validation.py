@@ -258,3 +258,116 @@ def test_correction_checks_only_changed_texts_and_parses_v2_and_v3_snapshots() -
     assert parsed_v2.policy_version == CORRECTION_POLICY_VERSION_V2
     assert dict(parsed_v2.versions) == CORRECTION_VERSIONS_V2
     assert is_candidate_correction_policy(parsed_v2.policy_version) is True
+
+
+def test_validator_v2_preserves_segments_for_excluded_service_texts_and_masks_apostrophes() -> None:
+    """v2 validation keeps block.segments for service-message exclusions and normalizes apostrophes in quotes."""
+    import pytest
+    from linguary.application.correction_dto import unchanged_reader_texts
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.validators import TranslationResultValidator
+    from linguary.domain import (
+        BlockSegment,
+        TreatmentPlan,
+        TreatmentPlanItem,
+        TranslationUnit,
+    )
+
+    part1 = "First line of English prose."
+    part2 = " Second line of English prose."
+    block = replace(
+        make_block(order=0, text=part1 + part2),
+        segments=(
+            BlockSegment(0, len(part1), 0),
+            BlockSegment(len(part1), len(part1) + len(part2), 1),
+        ),
+    )
+    plan = TreatmentPlan(
+        section_id=block.section_id,
+        items=(
+            TreatmentPlanItem(
+                block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+                sentence_indexes=(0, 1),
+            ),
+        ),
+    )
+    unit = TranslationUnit.of_blocks(id="u1", blocks=(block,), plan=plan)
+    validator = TranslationResultValidator(
+        target_language_min_share=0.5,
+        language_check_min_length=10,
+        repetition_ngram_size=5,
+        repetition_min_repeats=4,
+    )
+
+    previous = BlockProcessingResult(
+        block_id=block.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=f"{_OLD_SEGMENT} Старый перевод второй строки.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        segment_translations=(_OLD_SEGMENT, "Старый перевод второй строки."),
+    )
+    excluded = {block.id: unchanged_reader_texts(previous)}
+
+    # Segment 1 untouched (contains marker), segment 2 changed to clean text -> passes under v2
+    clean_edit = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                block.id,
+                BlockTreatment.TRANSLATE,
+                segments=(
+                    SegmentTranslationResponse(1, _OLD_SEGMENT),
+                    SegmentTranslationResponse(2, "Обновлённый чистый перевод второй строки."),
+                ),
+            ),
+        ),
+    )
+    results = validator.validate(
+        clean_edit,
+        unit=unit,
+        target_language="ru",
+        note_id_factory=lambda: "ln-ch01-001",
+        validation_policy="v2",
+        excluded_service_texts=excluded,
+    )
+    assert len(results) == 1
+
+    # Marker introduced in changed segment 2 -> rejected under v2
+    dirty_edit = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                block.id,
+                BlockTreatment.TRANSLATE,
+                segments=(
+                    SegmentTranslationResponse(1, _OLD_SEGMENT),
+                    SegmentTranslationResponse(2, "Извините, но я не могу выполнить этот запрос снова."),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as caught:
+        validator.validate(
+            dirty_edit,
+            unit=unit,
+            target_language="ru",
+            note_id_factory=lambda: "ln-ch01-001",
+            validation_policy="v2",
+            excluded_service_texts=excluded,
+        )
+    assert caught.value.violation is not None
+    assert caught.value.violation.rule_code == "service_message_leak"
+
+    # Curly apostrophe in protected source quote matches straight apostrophe in model output
+    curly_source = 'She whispered “I’m sorry, but I cannot help you.”'
+    protected = source_quote_fragments((curly_source,))
+    quoted_block = make_block(order=1, text=curly_source)
+    quoted_resp = make_response(
+        (
+            make_block_result(
+                quoted_block,
+                translated_text="Она прошептала: \"I'm sorry, but I cannot help you.\"",
+            ),
+        )
+    )
+    assert service_message_violation(quoted_resp, protected_quotes=protected) is None

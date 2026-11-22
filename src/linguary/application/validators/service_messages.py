@@ -113,9 +113,11 @@ def _texts_of(
 def _mask_protected(text: str, protected_quotes: Sequence[str]) -> str:
     """Hide verbatim source quotes before marker search, longest match first."""
     quotes = sorted(
-        {quote for quote in protected_quotes if quote}, key=len, reverse=True
+        {quote.translate(_APOSTROPHES) for quote in protected_quotes if quote},
+        key=len,
+        reverse=True,
     )
-    masked = text
+    masked = text.translate(_APOSTROPHES)
     for quote in quotes:
         masked = masked.replace(quote, " ")
     return masked

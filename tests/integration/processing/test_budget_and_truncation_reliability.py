@@ -170,3 +170,77 @@ async def test_save_allocates_db_note_ids_atomically_and_skips_stale(tmp_path):
             assert transaction.results.allocate_note_ids(work.run.id, 1, 1) == ('ln-ch01-003',)
     finally:
         await app.aclose()
+
+
+async def test_scope_limit_reported_when_max_calls_exceeds_max_scope_calls(tmp_path):
+    """When begin_recovery_attempt hits max_scope_calls (< max_calls), RecoveryError.reason is scope_limit and persisted."""
+    from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+    from linguary.adapters.config.settings import RecoverySettings
+    from linguary.composition import build_application
+
+    fake = FakeLLMClient([
+        analysis_reply(1),
+        LLMTransportError('HTTP 503', outcome='known_transient'),
+        LLMTransportError('HTTP 503', outcome='known_transient'),
+        LLMTransportError('HTTP 503', outcome='known_transient'),
+        LLMTransportError('HTTP 503', outcome='known_transient'),
+    ])
+    app = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(
+                model='pinned-model',
+                api_key='synthetic-secret',
+                proxy_mode='direct',
+                max_attempts=5,
+            ),
+            recovery=RecoverySettings(max_calls=10, max_scope_calls=2),
+            storage=StorageSettings(data_root=str(tmp_path / 'data')),
+        ),
+        llm_client=fake,
+        content_plan_profile='legacy-v1',
+    )
+    try:
+        _doc, run, _task = await prepare(app, blocks=1)
+        completed = await drain_tasks(app)
+        assert completed[-1].status is TaskStatus.FAILED
+        with app.unit_of_work.transaction() as tx:
+            root, = tx.work.list_roots('book-1', run_id=run.id)
+            assert root.status == 'stopped'
+            assert root.reason == 'scope_limit'
+            assert root.calls_used == 2
+        assert len(_translation_requests(fake)) == 2
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('rule_code', ['provider_refusal', 'provider_content_filter'])
+async def test_provider_refusal_and_content_filter_stop_without_retry_or_split(tmp_path, rule_code):
+    """provider_refusal and provider_content_filter stop immediately with reason='provider_refusal' without retries or splits."""
+    from linguary.application.ports.llm import LLMResponseFormatError
+    from linguary.domain.llm_log import Violation
+
+    refusal_err = LLMResponseFormatError(
+        'отказ провайдера',
+        truncated=False,
+        violation=Violation(rule_code, 'translation_unit', safe_message='Отказ'),
+    )
+    fake = FakeLLMClient([
+        analysis_reply(2),
+        refusal_err,
+        translation_reply(2),
+    ])
+    app = make_app(tmp_path, fake)
+    try:
+        _doc, run, _task = await prepare(app, blocks=2)
+        completed = await drain_tasks(app)
+        assert completed[-1].status is TaskStatus.FAILED
+        with app.unit_of_work.transaction() as tx:
+            root, = tx.work.list_roots('book-1', run_id=run.id)
+            scopes = tx.work.list_scopes(root.id)
+            assert (root.status, root.reason) == ('stopped', 'provider_refusal')
+            assert root.calls_used == 1
+            assert len(scopes) == 1
+            assert scopes[0].status != 'split'
+        assert len(_translation_requests(fake)) == 1
+    finally:
+        await app.aclose()

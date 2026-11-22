@@ -328,42 +328,6 @@ class RegenerateBlock:
         )
 
 
-def _supersede_stopped_regeneration_roots(
-    transaction, *, book_id: str, run_id: str | None, block_id: str, successor_id: str
-) -> None:
-    """Point stopped regeneration roots of this block at the new root.
-
-    The work port can transfer a root only by creating another successor.
-    The stopped row is already loaded, so the link is written on that row.
-    """
-    if run_id is None:
-        return
-    stopped_ids = {
-        root.id
-        for root in transaction.work.list_roots(book_id, run_id=run_id)
-        if root.id != successor_id
-        and root.superseded_by is None
-        and root.operation_kind == "regeneration"
-        and root.status == "stopped"
-        and tuple(root.manifest.get("ordered_blocks", ())) == (block_id,)
-    }
-    if not stopped_ids:
-        return
-    # The identity map holds rows weakly, so a flushed attribute write can
-    # disappear with the row. Update the loaded transaction directly.
-    session = transaction.work._session
-    session.flush()
-    connection = session.connection()
-    for root_id in stopped_ids:
-        connection.exec_driver_sql(
-            "UPDATE recovery_roots SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL",
-            (successor_id, root_id),
-        )
-    for row in list(session.identity_map.values()):
-        if getattr(row, "id", None) in stopped_ids and hasattr(row, "superseded_by"):
-            session.expire(row)
-
-
 class BlockRegenerationSequence:
     """Enqueues block regeneration tasks and returns the book to export readiness (PRD § 18, § 21.5)."""
 
@@ -413,13 +377,15 @@ class BlockRegenerationSequence:
                     if len(scopes) == 1 and scopes[0].ordered_blocks == (block_id,):
                         return existing
             root = self._regenerate_block.prepare_operation(command, transaction=transaction)
-            _supersede_stopped_regeneration_roots(
-                transaction,
-                book_id=book_id,
-                run_id=None if run is None else run.id,
-                block_id=block_id,
-                successor_id=root.id,
-            )
+            if run is not None:
+                supersede = getattr(transaction.work, "supersede_stopped_regeneration_roots", None)
+                if callable(supersede):
+                    supersede(
+                        book_id,
+                        run_id=run.id,
+                        block_id=block_id,
+                        successor_id=root.id,
+                    )
             identity = TaskIdentity(book_id=book_id, task_type=TaskType.REGENERATE_BLOCK,
                                     scope_id=block_id, operation_id=root.id,
                                     policy_version=root.policy_version)

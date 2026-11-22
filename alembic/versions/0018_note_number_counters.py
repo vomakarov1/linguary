@@ -39,10 +39,10 @@ def backfill_note_number_counters(connection) -> None:
     """Seed counters from issued note ids. A higher existing counter is kept."""
     maxima: dict[tuple[str, int], int] = {}
 
-    def absorb(run_id: object, payload: object) -> None:
+    def absorb_pairs(run_id: object, pairs) -> None:
         if not isinstance(run_id, str) or not run_id:
             return
-        for chapter_number, ordinal in _note_ordinals(payload):
+        for chapter_number, ordinal in pairs:
             key = (run_id, chapter_number)
             current = maxima.get(key)
             if current is None or ordinal > current:
@@ -51,20 +51,22 @@ def backfill_note_number_counters(connection) -> None:
     for run_id, note_id in connection.execute(
         sa.text('SELECT run_id, note_id FROM language_notes')
     ):
-        absorb(run_id, note_id)
+        pair = _parse_note_id(note_id)
+        if pair is not None:
+            absorb_pairs(run_id, (pair,))
     for run_id, payload in connection.execute(
         sa.text('SELECT run_id, payload_json FROM correction_candidates')
     ):
-        absorb(run_id, payload)
+        absorb_pairs(run_id, _structured_note_ordinals(payload))
     # artifact_revisions.run_id is not a foreign key. ResetProcessing can leave
     # rows whose run is gone; inserting those would fail with foreign_keys=ON.
     for run_id, body in connection.execute(
         sa.text(
-            'SELECT run_id, body_json FROM artifact_revisions '
-            'WHERE run_id IN (SELECT id FROM processing_runs)'
+            "SELECT run_id, body_json FROM artifact_revisions "
+            "WHERE kind = 'block_result' AND run_id IN (SELECT id FROM processing_runs)"
         )
     ):
-        absorb(run_id, body)
+        absorb_pairs(run_id, _structured_note_ordinals(body))
 
     statement = sa.text(
         'INSERT INTO note_number_counters (run_id, chapter_number, last_ordinal) '
@@ -83,26 +85,38 @@ def backfill_note_number_counters(connection) -> None:
         )
 
 
-def _note_ordinals(value: object):
+def _parse_note_id(value: object) -> tuple[int, int] | None:
+    if not isinstance(value, str):
+        return None
+    match = _NOTE_ID.fullmatch(value)
+    if match is None:
+        return None
+    chapter_number = int(match.group(1))
+    # CHECK (chapter_number >= 1) rejects a zero chapter.
+    if chapter_number < 1:
+        return None
+    return chapter_number, int(match.group(2))
+
+
+def _structured_note_ordinals(value: object):
     if isinstance(value, str):
-        match = _NOTE_ID.fullmatch(value)
-        if match is not None:
-            chapter_number = int(match.group(1))
-            # CHECK (chapter_number >= 1) rejects a zero chapter.
-            if chapter_number >= 1:
-                yield chapter_number, int(match.group(2))
-            return
         try:
-            parsed = json.loads(value)
+            value = json.loads(value)
         except json.JSONDecodeError:
             return
-        if parsed != value:
-            yield from _note_ordinals(parsed)
+    if not isinstance(value, dict):
         return
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _note_ordinals(item)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _note_ordinals(item)
+    containers = [value]
+    for key in ('result', 'current_result'):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+    for container in containers:
+        notes = container.get('language_notes')
+        if not isinstance(notes, list):
+            continue
+        for note in notes:
+            if isinstance(note, dict):
+                pair = _parse_note_id(note.get('id'))
+                if pair is not None:
+                    yield pair

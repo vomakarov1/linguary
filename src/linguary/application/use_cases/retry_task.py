@@ -19,7 +19,7 @@ Chapter correction may send again only after an explicit duplicate-billing ackno
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from linguary.application.errors import ApplicationError
@@ -101,19 +101,103 @@ _OPEN_ROOT_STATUSES = frozenset({"pending", "running"})
 _UNKNOWN_REASONS = frozenset({"unknown_outcome", "interrupted"})
 
 
-def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]:
-    """Whether ordinary retry may resume this task's bound recovery roots.
-
-    Translation and regeneration tasks with bound roots need an active run, current
-    book conditions, and at least one root that is not superseded, still
-    `pending` or `running`, free of `attempt.state == 'unknown'`, and inside its
-    call budget. Chapter correction with an unacknowledged unknown attempt needs
-    an explicit duplicate-billing acknowledgement before another send. Other tasks,
-    and translation tasks without bound roots, keep the existing retry rules.
-    A refusal names an explicit restart or a limit extension.
-    """
+def evaluate_task_retryable(
+    task,
+    *,
+    active_run,
+    conditions,
+    binding,
+    roots_by_id: Mapping[str, object],
+    scopes_by_root: Mapping[str, Sequence[object]] | None = None,
+    attempts_by_root: Mapping[str, Sequence[object]] | None = None,
+    task_attempts: Sequence[object] | None = None,
+) -> tuple[bool, str | None, bool]:
+    """Pure recovery-guard check returning ``(allowed, reason, requires_unknown_ack)``."""
     if task.task_type is TaskType.CHAPTER_CORRECTION:
-        return _chapter_correction_ordinary_retry(transaction, task)
+        if task_attempts is None:
+            return True, None, False
+        if any(
+            item.state == "unknown" and not _acknowledged_duplicate_billing(item)
+            for item in task_attempts
+        ):
+            return (
+                False,
+                _refusal(task.id, restart=True, extend=False, unknown=True, stale=False),
+                True,
+            )
+        return True, None, False
+    if task.task_type not in _RECOVERY_TASKS:
+        return True, None, False
+    root_ids = () if binding is None else _bound_root_ids(binding)
+    if not root_ids:
+        return True, None, False
+    if active_run is None or conditions is None or binding.get("conditions_id") != conditions.id:
+        return (
+            False,
+            _refusal(task.id, restart=True, extend=False, unknown=False, stale=True),
+            False,
+        )
+    restart = False
+    extend = False
+    unknown = False
+    all_complete = True
+    for root_id in root_ids:
+        root = roots_by_id.get(root_id)
+        if root is None or root.book_id != task.book_id or getattr(root, "superseded_by", None) is not None:
+            all_complete = False
+            restart = True
+            continue
+        attempts = () if attempts_by_root is None else attempts_by_root.get(root.id, ())
+        scopes = None if scopes_by_root is None else scopes_by_root.get(root.id)
+        if _root_is_retryable(
+            root, attempts, scopes=scopes, conditions_id=conditions.id, run_id=active_run.id
+        ):
+            return True, None, False
+        if not (
+            root.conditions_id == conditions.id
+            and root.manifest.get("active_run_id") == active_run.id
+            and root.status == "complete"
+            and not any(attempt.state in {"unknown", "sent"} for attempt in attempts)
+        ):
+            all_complete = False
+        has_unknown = _has_unknown_outcome(root, attempts)
+        if has_unknown:
+            unknown = True
+            restart = True
+        if root.reason == "limit" or (
+            not _budget_remaining(root) and root.status in _OPEN_ROOT_STATUSES
+        ):
+            extend = True
+        if not has_unknown and root.reason != "limit":
+            restart = True
+    if all_complete:
+        return True, None, False
+    if not restart and not extend:
+        restart = True
+    return (
+        False,
+        _refusal(task.id, restart=restart, extend=extend, unknown=unknown, stale=False),
+        False,
+    )
+
+
+def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]:
+    """Whether ordinary retry may resume this task's bound recovery roots."""
+    if task.task_type is TaskType.CHAPTER_CORRECTION:
+        work = getattr(transaction, "work", None)
+        if work is None:
+            return True, None
+        listed = getattr(work, "list_task_attempts", None)
+        task_attempts = listed(task.id) if callable(listed) else None
+        allowed, reason, _ = evaluate_task_retryable(
+            task,
+            active_run=None,
+            conditions=None,
+            binding=None,
+            roots_by_id={},
+            task_attempts=task_attempts,
+        )
+        return allowed, reason
     if task.task_type not in _RECOVERY_TASKS:
         return True, None
     work = getattr(transaction, "work", None)
@@ -126,48 +210,28 @@ def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]
     runs = getattr(transaction, "runs", None)
     active = None if runs is None else runs.active_for_book(task.book_id)
     conditions = work.latest_conditions(task.book_id)
-    if active is None or conditions is None or binding.get("conditions_id") != conditions.id:
-        return False, _refusal(task.id, restart=True, extend=False, unknown=False, stale=True)
-    restart = False
-    extend = False
-    unknown = False
-    for root_id in root_ids:
-        root = work.get_root(root_id)
-        if root is None or root.book_id != task.book_id or root.superseded_by is not None:
-            restart = True
-            continue
-        attempts = work.list_root_attempts(root.id)
-        if _root_is_retryable(root, attempts, conditions_id=conditions.id, run_id=active.id):
-            return True, None
-        has_unknown = _has_unknown_outcome(root, attempts)
-        if has_unknown:
-            unknown = True
-            restart = True
-        if root.reason == "limit" or (
-            not _budget_remaining(root) and root.status in _OPEN_ROOT_STATUSES
-        ):
-            extend = True
-        if not has_unknown and root.reason != "limit":
-            restart = True
-    if not restart and not extend:
-        restart = True
-    return False, _refusal(task.id, restart=restart, extend=extend, unknown=unknown, stale=False)
-
-
-def _chapter_correction_ordinary_retry(transaction, task) -> tuple[bool, str | None]:
-    work = getattr(transaction, "work", None)
-    if work is None:
-        return True, None
-    listed = getattr(work, "list_task_attempts", None)
-    if not callable(listed):
-        return True, None
-    attempts = listed(task.id)
-    if any(
-        item.state == "unknown" and not _acknowledged_duplicate_billing(item)
-        for item in attempts
-    ):
-        return False, _refusal(task.id, restart=True, extend=False, unknown=True, stale=False)
-    return True, None
+    roots_by_id = {}
+    attempts_by_root = {}
+    list_scopes = getattr(work, "list_scopes", None)
+    scopes_by_root = {} if callable(list_scopes) else None
+    if active is not None and conditions is not None and binding.get("conditions_id") == conditions.id:
+        for root_id in root_ids:
+            root = work.get_root(root_id)
+            if root is not None:
+                roots_by_id[root_id] = root
+                attempts_by_root[root.id] = work.list_root_attempts(root.id)
+                if scopes_by_root is not None:
+                    scopes_by_root[root.id] = list_scopes(root.id)
+    allowed, reason, _ = evaluate_task_retryable(
+        task,
+        active_run=active,
+        conditions=conditions,
+        binding=binding,
+        roots_by_id=roots_by_id,
+        scopes_by_root=scopes_by_root,
+        attempts_by_root=attempts_by_root,
+    )
+    return allowed, reason
 
 
 def _acknowledged_duplicate_billing(attempt) -> bool:
@@ -189,14 +253,36 @@ def _bound_root_ids(binding) -> tuple[str, ...]:
     )
 
 
-def _root_is_retryable(root, attempts, *, conditions_id, run_id) -> bool:
-    return (
+def _root_is_retryable(root, attempts, *, scopes=None, conditions_id, run_id) -> bool:
+    if not (
         root.conditions_id == conditions_id
         and root.manifest.get("active_run_id") == run_id
         and root.status in _OPEN_ROOT_STATUSES
-        and not any(attempt.state == "unknown" for attempt in attempts)
+        and getattr(root, "reason", None) not in _UNKNOWN_REASONS
+        and not any(attempt.state in {"unknown", "sent"} for attempt in attempts)
         and _budget_remaining(root)
-    )
+    ):
+        return False
+    if scopes is not None:
+        policy = root.manifest.get("policy")
+        max_scope_calls = policy.get("max_scope_calls") if isinstance(policy, Mapping) else None
+        if type(max_scope_calls) is not int or max_scope_calls < 0:
+            return False
+        if any(scope.status == "claimed" for scope in scopes):
+            return False
+        scope_counts = {
+            scope.id: sum(
+                attempt.scope_id == scope.id and attempt.state != "cancelled"
+                for attempt in attempts
+            )
+            for scope in scopes
+        }
+        if not any(
+            scope.status == "pending" and scope_counts[scope.id] < max_scope_calls
+            for scope in scopes
+        ):
+            return False
+    return True
 
 
 def _has_unknown_outcome(root, attempts) -> bool:
@@ -254,5 +340,6 @@ __all__ = [
     "RetryTaskCommand",
     "RetryTaskError",
     "TaskNotFoundError",
+    "evaluate_task_retryable",
     "is_task_retryable_for_recovery",
 ]

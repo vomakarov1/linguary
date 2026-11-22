@@ -178,6 +178,12 @@ class LLMRateLimiter:
         try:
             while True:
                 with self._lock:
+                    if (
+                        self._prune_closed_pacing_locked()
+                        and self._pacing_waiters
+                        and self._pacing_waiters[0] is not ticket
+                    ):
+                        self._signal_next_pacing_locked()
                     is_head = bool(self._pacing_waiters) and self._pacing_waiters[0] is ticket
                     if is_head:
                         now = self._clock()
@@ -241,12 +247,22 @@ class LLMRateLimiter:
                     sleep_task.add_done_callback(_retrieve_task_exception)
                 except RuntimeError:
                     pass
-        if sleep_task.done() and not sleep_task.cancelled():
+        if sleep_task is not None and sleep_task.done() and not sleep_task.cancelled():
             error = sleep_task.exception()
             if error is not None:
                 raise error
 
+    def _prune_closed_pacing_locked(self) -> bool:
+        removed_head = False
+        while self._pacing_waiters and self._pacing_waiters[0].get_loop().is_closed():
+            self._pacing_waiters.popleft()
+            removed_head = True
+        if removed_head or (self._head_wake is not None and self._head_wake.get_loop().is_closed()):
+            self._head_wake = None
+        return removed_head
+
     def _signal_next_pacing_locked(self) -> None:
+        self._prune_closed_pacing_locked()
         while self._pacing_waiters:
             head = self._pacing_waiters[0]
             if self._deliver(head):
@@ -257,7 +273,9 @@ class LLMRateLimiter:
                 self._head_wake = None
 
     def _wake_pacing_head_locked(self) -> None:
+        self._prune_closed_pacing_locked()
         if self._head_wake is None:
+            self._signal_next_pacing_locked()
             return
         if self._deliver(self._head_wake):
             return
@@ -268,6 +286,8 @@ class LLMRateLimiter:
         self._signal_next_pacing_locked()
 
     def _deliver(self, waiter: asyncio.Future[None]) -> bool:
+        if waiter.get_loop().is_closed():
+            return False
         if waiter.done():
             return True
         try:

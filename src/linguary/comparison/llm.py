@@ -204,7 +204,7 @@ class ObservationLedger:
             # HTTP-boundary metadata is authoritative; never substitute configured names.
             if item.usage is None:
                 item.usage = outcome.usage
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             item.failure_category = 'model_output' if isinstance(outcome, LLMResponseFormatError) else 'no_response'
         self.persist(item)
 

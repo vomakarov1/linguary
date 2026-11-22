@@ -76,7 +76,9 @@ async def test_cancel_while_waiting_in_rate_limiter_stays_not_sent_without_budge
         with app.unit_of_work.transaction() as transaction:
             saved = transaction.work.get_attempt(attempt.id)
             root = transaction.work.get_root(_root.id)
-        assert saved.state in {'created', 'cancelled'}
+            scope = transaction.work.get_scope(saved.scope_id)
+        assert saved.state == 'cancelled'
+        assert scope.status == 'pending'
         assert root.calls_used == 0
         assert _translation_requests(fake) == []
     finally:
@@ -185,3 +187,156 @@ async def test_drain_tasks_recovers_interrupted_when_alone_under_executor_lock(t
             assert transaction.tasks.get('task-live').status is TaskStatus.RUNNING
     finally:
         await app.aclose()
+
+
+async def test_provenance_send_gate_commits_cancel_and_stop_on_rejection(tmp_path):
+    """Send-gate rejections by limit, scope_limit, conditions conflict, and interrupted commit cancellation/stop."""
+    import pytest
+    from linguary.adapters.db.models import RecoveryRootRow
+    from linguary.application.book_conditions import ConditionsError
+    from linguary.application.recovery import RecoveryError
+    from linguary.domain.recovery import CallAttempt
+    from uuid import uuid4
+
+    for reason in ('limit', 'scope_limit', 'conditions_revision_conflict', 'interrupted'):
+        case = tmp_path / reason
+        case.mkdir()
+        fake = FakeLLMClient([analysis_reply(2), translation_reply(2)])
+        app = make_app(case, fake)
+        try:
+            _doc, run, _task = await prepare(app)
+            entered, release = _arm_rate_limit(app)
+            worker = asyncio.create_task(drain_tasks(app))
+            await asyncio.wait_for(entered.wait(), 3)
+            root, attempt = await _running_attempt(app, run.id)
+            scope_id = attempt.scope_id
+            with app.unit_of_work.transaction() as transaction:
+                if reason == 'limit':
+                    row = transaction.work._session.get(RecoveryRootRow, root.id)
+                    row.calls_used = row.manifest_json['policy']['max_calls'] + row.extra_calls
+                elif reason == 'scope_limit':
+                    policy = root.manifest['policy']
+                    for idx in range(policy['max_scope_calls']):
+                        transaction.work.add_attempt(CallAttempt(
+                            str(uuid4()), 'book-1', state='rejected',
+                            generation=attempt.generation, ordinal=100 + idx,
+                            conditions_id=attempt.conditions_id, task_id=attempt.task_id,
+                            run_id=run.id, root_id=root.id, scope_id=scope_id,
+                            context={'schema_version': 1, 'root_generation': root.generation},
+                        ))
+                elif reason == 'conditions_revision_conflict':
+                    current_cond = transaction.work.latest_conditions('book-1')
+                    from linguary.domain.book_conditions import BookConditions
+                    from datetime import UTC, datetime
+                    transaction.work.add_conditions(BookConditions(
+                        str(uuid4()), 'book-1', current_cond.revision + 1,
+                        dict(current_cond.payload), datetime.now(UTC),
+                    ))
+                elif reason == 'interrupted':
+                    transaction.work.pause_root(root.id, 'user_pause', expected_generation=root.generation)
+            _open_gate(app, release)
+            await asyncio.wait_for(worker, 5)
+            assert _translation_requests(fake, attempt.id) == []
+            with app.unit_of_work.transaction() as transaction:
+                saved_attempt = transaction.work.get_attempt(attempt.id)
+                saved_scope = transaction.work.get_scope(scope_id)
+                saved_root = transaction.work.get_root(root.id)
+            assert saved_attempt.state == 'cancelled', reason
+            assert saved_scope.status == 'pending', reason
+            if reason in {'limit', 'scope_limit'}:
+                assert saved_root.status == 'stopped'
+                assert saved_root.reason == reason
+        finally:
+            await app.aclose()
+
+
+async def test_full_chain_not_sent_rollback_cancel_in_http_and_poisoned_diagnostics(tmp_path):
+    """Full RateLimited -> Provenance -> Logging chain: not_sent rolls back, HTTP cancel becomes unknown, poisoned diagnostics cancels created."""
+    from linguary.application.diagnostics import diagnostics_for
+    from linguary.application.ports.persistence import PersistenceError
+
+    # 1. not_sent rolls back calls_used and scope -> pending
+    case1 = tmp_path / 'not_sent'
+    case1.mkdir()
+    fake1 = FakeLLMClient([analysis_reply(2), LLMTransportError('connect', outcome='not_sent'), translation_reply(2)])
+    app1 = make_app(case1, fake1)
+    _one_attempt(app1)
+    try:
+        _doc, run, _task = await prepare(app1)
+        completed = await drain_tasks(app1)
+        assert completed[0].status == TaskStatus.FAILED
+        with app1.unit_of_work.transaction() as transaction:
+            root, = transaction.work.list_roots('book-1', run_id=run.id)
+            attempts = transaction.work.list_root_attempts(root.id)
+            scopes = transaction.work.list_scopes(root.id)
+        assert root.calls_used == 0
+        assert [a.state for a in attempts] == ['cancelled']
+        assert all(s.status == 'pending' for s in scopes)
+    finally:
+        await app1.aclose()
+
+    # 2. Cancellation AFTER mark_attempt_sent during HTTP with _log failing still yields attempt=unknown & root=unknown_outcome
+    case2 = tmp_path / 'cancel_http'
+    case2.mkdir()
+    entered_http = asyncio.Event()
+
+    class _HangingFake(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage == LLMCallStage.TRANSLATION_UNIT:
+                entered_http.set()
+                await asyncio.Event().wait()
+            return await super().generate(request)
+
+    fake2 = _HangingFake([analysis_reply(2)])
+    app2 = make_app(case2, fake2)
+    try:
+        _doc, run, _task = await prepare(app2)
+        worker = asyncio.create_task(drain_tasks(app2))
+        await asyncio.wait_for(entered_http.wait(), 3)
+        root, attempt = await _running_attempt(app2, run.id)
+        assert attempt.state == 'sent'
+        # Make LoggingLLMClient._log fail on cancellation to prove CancelledError still propagates cleanly.
+        proc_client = _processing_client(app2)
+        logging_client = proc_client._inner.inner
+        async def _broken_log(*_a, **_kw):
+            raise PersistenceError('hard failure')
+        logging_client._log = _broken_log
+        worker.cancel()
+        await asyncio.wait({worker})
+        with app2.unit_of_work.transaction() as transaction:
+            saved_attempt = transaction.work.get_attempt(attempt.id)
+            saved_root = transaction.work.get_root(root.id)
+        assert saved_attempt.state == 'unknown'
+        assert saved_root.status == 'stopped'
+        assert saved_root.reason == 'unknown_outcome'
+    finally:
+        await app2.aclose()
+
+    # 3. Permanently poisoned diagnostics cancels created attempt without burning calls_used
+    case3 = tmp_path / 'poisoned'
+    case3.mkdir()
+    fake3 = FakeLLMClient([analysis_reply(2), translation_reply(2)])
+    app3 = make_app(case3, fake3)
+    try:
+        _doc, run, _task = await prepare(app3)
+        entered, release = _arm_rate_limit(app3)
+        worker = asyncio.create_task(drain_tasks(app3))
+        await asyncio.wait_for(entered.wait(), 3)
+        root, attempt = await _running_attempt(app3, run.id)
+        assert attempt.state == 'created'
+        diagnostics_for(app3.unit_of_work)._failed = True
+        _open_gate(app3, release)
+        try:
+            await asyncio.wait_for(worker, 5)
+        except LLMConfigurationError:
+            pass
+        with app3.unit_of_work.transaction() as transaction:
+            saved_attempt = transaction.work.get_attempt(attempt.id)
+            saved_root = transaction.work.get_root(root.id)
+            saved_scope = transaction.work.get_scope(attempt.scope_id)
+        assert saved_attempt.state == 'cancelled'
+        assert saved_scope.status == 'pending'
+        assert saved_root.calls_used == 0
+        assert _translation_requests(fake3) == []
+    finally:
+        await app3.aclose()

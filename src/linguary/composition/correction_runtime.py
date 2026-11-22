@@ -16,10 +16,11 @@ from linguary.application.correction_dto import (
     CORRECTION_VERSIONS_V3, CorrectionSnapshotV2, ChapterCorrectionV2Response,
     ChapterCorrectionReviewResponse, parse_correction_snapshot,
 )
+from linguary.application.diagnostics import diagnostics_for
 from linguary.application.llm_dto import LLMPayloadError
 from linguary.application.ports.llm import (
-    LLMConfigurationError, LLMProviderError, LLMResponseFormatError, LLMResponseKind,
-    LLMTransportError,
+    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMResponseFormatError,
+    LLMResponseKind, LLMTransportError,
 )
 from linguary.application.recovery import RecoveryError
 from linguary.composition.book_runtime import route_snapshot
@@ -428,20 +429,28 @@ class CorrectionProvenanceClient:
             limiter = self.inner._limiter
             target = self.inner._inner
         acquired = False
+        received_response = False
         try:
             if limiter is not None:
                 await limiter.acquire_concurrency()
                 acquired = True
                 await limiter.acquire()
+            if isinstance(target, LoggingLLMClient):
+                if target._observation_failed:
+                    raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
+                diagnostics_for(target.unit_of_work).ensure_available()
             with self.service.uow.transaction() as transaction:
                 current = transaction.work.get_attempt(attempt.id)
                 if current is None or current.state != 'created':
                     raise RecoveryError('interrupted')
                 task, binding = self._ownership(transaction, request)
+                if self._has_unacked_unknown(transaction, task.id):
+                    raise RecoveryError('unknown_outcome')
                 if thaw(current.context) != self._attempt_context(context, task, binding):
                     raise RecoveryError('interrupted')
                 transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
             response = await target.generate(request)
+            received_response = True
             expected_type = (ChapterCorrectionReviewResponse if reviewing else
                 ChapterCorrectionV2Response if isinstance(self.snapshot, CorrectionSnapshotV2) else ChapterCorrectionResponse)
             if response.truncated or type(response.payload) is not expected_type:
@@ -476,7 +485,7 @@ class CorrectionProvenanceClient:
             if (limiter is not None and isinstance(error, LLMTransportError)
                     and error.retry_after_seconds is not None):
                 limiter.hold(error.retry_after_seconds)
-            self._settle_correction(attempt.id, error)
+            self._settle_correction(attempt.id, error, received_response=received_response)
             raise
         finally:
             if acquired and limiter is not None:
@@ -497,7 +506,7 @@ class CorrectionProvenanceClient:
                 return True
         return False
 
-    def _settle_correction(self, attempt_id, error) -> None:
+    def _settle_correction(self, attempt_id, error, *, received_response: bool = False) -> None:
         with self.service.uow.transaction() as transaction:
             current = transaction.work.get_attempt(attempt_id)
             if current is None:
@@ -517,7 +526,16 @@ class CorrectionProvenanceClient:
                         return
                     transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')
                     return
-                if isinstance(error, (LLMResponseFormatError, LLMProviderError, LLMConfigurationError)):
+                if received_response or isinstance(
+                    error,
+                    (
+                        LLMResponseFormatError,
+                        LLMPayloadError,
+                        LLMProviderError,
+                        LLMConfigurationError,
+                        LLMContextCapacityError,
+                    ),
+                ):
                     transaction.work.transition_attempt(attempt_id, 'failed', expected_state='sent')
                     return
                 transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')

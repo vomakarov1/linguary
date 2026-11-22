@@ -22,9 +22,16 @@ from linguary.domain.recovery import RecoveryRoot, RecoveryScope
 class RestartTranslationError(ApplicationError):
     """The selected translation root cannot be restarted safely."""
 
+    def __init__(self, message: str, *, reason_code: str = "state_conflict") -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
+
 
 class RestartTranslationConflict(RestartTranslationError):
     """The root changed after the caller last read it."""
+
+    def __init__(self, message: str, *, reason_code: str = "generation_conflict") -> None:
+        super().__init__(message, reason_code=reason_code)
 
 
 _RESTARTABLE_STOPPED_REASONS = frozenset({
@@ -131,27 +138,31 @@ class RestartTranslation:
             pending_ordered = tuple(block_id for block_id in ordered if block_id not in historical)
             if root.status == "complete" or not pending_ordered:
                 raise RestartTranslationError("все блоки уже приняты; используйте повторную генерацию")
-            if root.status == "stopped" and root.reason not in _RESTARTABLE_STOPPED_REASONS:
+            attempts = transaction.work.list_root_attempts(root.id)
+            had_unknown = root.reason in _UNKNOWN_REASONS or any(
+                attempt.state == "unknown" for attempt in attempts
+            )
+            if root.status == "stopped" and not (
+                root.reason in _RESTARTABLE_STOPPED_REASONS or had_unknown
+            ):
                 raise RestartTranslationError("для этой области нельзя безопасно запустить перевод заново")
             if (not historical <= set(ordered) or len(leaf_blocks) != len(set(leaf_blocks))
                     or historical.intersection(leaf_blocks)
                     or historical | set(leaf_blocks) != set(ordered)):
                 raise RestartTranslationError("неполная область перевода")
             pending_scopes.sort(key=lambda scope: positions[scope.ordered_blocks[0]])
-            attempts = transaction.work.list_root_attempts(root.id)
             in_flight = any(scope.status == "claimed" for scope in pending_scopes) or any(
                 attempt.state == "sent" for attempt in attempts
             )
             if in_flight and not command.acknowledge_unknown_outcome:
                 raise RestartTranslationError(
-                    "нельзя перезапустить перевод, пока запрос ещё выполняется"
+                    "нельзя перезапустить перевод, пока запрос ещё выполняется",
+                    reason_code="state_conflict",
                 )
-            had_unknown = root.reason in _UNKNOWN_REASONS or any(
-                attempt.state == "unknown" for attempt in attempts
-            )
             if had_unknown and not command.acknowledge_unknown_outcome:
                 raise RestartTranslationError(
-                    "требуется явное подтверждение перезапуска после неизвестного исхода (возможна повторная оплата)"
+                    "требуется явное подтверждение перезапуска после неизвестного исхода (возможна повторная оплата)",
+                    reason_code="unknown",
                 )
             audit = {
                 "schema_version": 1,
