@@ -698,7 +698,7 @@ def _analysis_sequence(
             max_concurrency=settings.worker.concurrency,
             seed_first_chapter=settings.checks.seed_first_chapter,
             sequential_analysis=settings.checks.sequential_analysis,
-            max_output_tokens=settings.llm.effective_output_token_budget,
+            max_output_tokens=settings.llm.effective_output_token_budget_for(32_768),
             staged_analysis=settings.llm.staged_analysis,
         ),
     )

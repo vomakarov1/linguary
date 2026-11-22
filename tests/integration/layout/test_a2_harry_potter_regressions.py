@@ -897,11 +897,19 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
     assert {
         difficulty.id: difficulty.help_kind
         for difficulty in harry_regression.normalized.difficulties
+        if not difficulty.id.startswith("auto-vocab-")
     } == {
         "d-bundle": "explanation",
         "d-demanded": "lexical_hint",
         "d-snapped": "lexical_hint",
     }
+    auto_diffs = [
+        difficulty
+        for difficulty in harry_regression.normalized.difficulties
+        if difficulty.id.startswith("auto-vocab-")
+    ]
+    assert auto_diffs
+    assert all(d.kind == "vocabulary" and d.help_kind == "lexical_hint" for d in auto_diffs)
     for key in _EXCEPTIONS:
         assert _mode(harry_regression, key) is _BY_KEY[key].original
         assert _mode(harry_regression, key) is not BlockTreatment.TRANSLATE
@@ -1761,7 +1769,12 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
         notes_block.id: BlockTreatment.TRANSLATE,
         verbs.id: BlockTreatment.GLOSSARY_ONLY,
     }
-    assert normalized.difficulties == ()
+    assert [d for d in normalized.difficulties if not d.id.startswith("auto-vocab-")] == []
+    assert normalized.difficulties
+    assert all(
+        d.kind == "vocabulary" and d.help_kind == "lexical_hint"
+        for d in normalized.difficulties
+    )
 
     sniggered = GlossaryHint(
         "sniggered",

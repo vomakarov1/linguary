@@ -463,3 +463,46 @@ def test_non_core_a2_words_hyphenated_with_known_names() -> None:
         "A freckle-faced boy looked at Mary-Jane.",
         known_names=("Mary-Jane",),
     ) == ("freckle-faced",)
+
+
+def test_spoken_hesitation_interjections_are_core_a2() -> None:
+    assert non_core_a2_words("\u2018Er \u2013 no,\u2019 said Harry.", known_names=("Harry",)) == ()
+    assert non_core_a2_words("Erm, phew, huh, mhm!", known_names=()) == ()
+    assert non_core_a2_words("Whoa!", known_names=()) == ("whoa",)
+
+
+def test_title_case_minor_words_and_author_attribution_boundaries() -> None:
+    from linguary.application.a2_core_vocab import non_core_a2_word_spans
+
+    assert non_core_a2_words(
+        "A Beginner\u2019s Guide to Transfiguration by Emeric Switch",
+        known_names=(),
+    ) == ("transfiguration",)
+    assert non_core_a2_words(
+        "Magical Drafts and Potions by Arsenius Jigger",
+        known_names=(),
+    ) == ("drafts", "potions")
+    assert non_core_a2_words(
+        "The Standard Book of Incantations (Grade 1) by Miranda Goshawk",
+        known_names=(),
+    ) == ("incantations",)
+    assert non_core_a2_words(
+        "The Dark Forces: A Guide to Self-Protection",
+        known_names=(),
+    ) == ("self-protection",)
+    # Negative controls: pairs of names, comma-separated names, titled person phrases.
+    assert non_core_a2_words("Harry and Ron", known_names=("Harry",)) == ()
+    assert non_core_a2_words("Harry, Ron and Hermione", known_names=("Harry",)) == ()
+    assert non_core_a2_words("Mr. Dursley of Privet Drive", known_names=()) == ()
+    # Exact span extraction skips earlier proper-name occurrence of the same word.
+    text = "He met Cannon. Wait, cannon!"
+    spans = non_core_a2_word_spans(text, known_names=())
+    assert len(spans) == 1
+    word, start, end = spans[0]
+    assert word == "cannon"
+    assert text[start:end] == "cannon"
+
+
+def test_lowercase_article_a_does_not_bypass_title_case_guard() -> None:
+    assert non_core_a2_words("Look, a Severus Snape", known_names=()) == ()
+    assert non_core_a2_words("Wait, a Harry Dursley", known_names=()) == ()

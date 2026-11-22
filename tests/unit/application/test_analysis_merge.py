@@ -3104,6 +3104,7 @@ def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_g
         "d-b1-untouched": "lexical_hint",
         "d-b1-promoted": "explanation",
         "d-b2-untouched": "lexical_hint",
+        "auto-vocab-b2-1": "lexical_hint",
     }
 
     # Demotion guard: all guarded short replies keep TRANSLATE; plain reply demotes to READ_AS_IS
@@ -3920,3 +3921,567 @@ def test_validate_content_plan_rejects_duplicate_difficulty_anchor_in_same_block
 
 
 
+
+
+def test_normalize_difficulty_kinds_and_non_lexical_validation() -> None:
+    from linguary.application.analysis_merge import (
+        AnalysisMergeError,
+        normalize_a2_dialogue_response,
+        normalize_difficulty_kinds,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="\u2018Where\u2019s the cannon?\u2019"),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="\u2018Get up!\u2019 she demanded."),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="Stalagmite\u2019s got an \u201cm\u201d in it."),
+    )
+    aliases = {"b1": blocks[0].id, "b2": blocks[1].id, "b3": blocks[2].id}
+    texts = {b.id: b.text for b in blocks}
+    visible = {a: texts[bid] for a, bid in aliases.items()}
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-cannon",
+                (QuotedSourceAnchorResponse("b1", "cannon"),),
+                "b1",
+                "wordplay",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "cannon \u2014 \u043f\u0443\u0448\u043a\u0430."),),
+            ),
+            QuotedDifficultyResponse(
+                "d-demanded",
+                (QuotedSourceAnchorResponse("b2", "demanded"),),
+                "b2",
+                "idiom",
+                "useful",
+                "explanation",
+                (RequiredPoint("p1", "\u041f\u043e\u0442\u0440\u0435\u0431\u043e\u0432\u0430\u043b\u0430."),),
+            ),
+            QuotedDifficultyResponse(
+                "d-pun",
+                (QuotedSourceAnchorResponse("b3", "Stalagmite"),),
+                "b3",
+                "wordplay",
+                "useful",
+                "explanation",
+                (RequiredPoint("p1", "\u041a\u0430\u043b\u0430\u043c\u0431\u0443\u0440 \u0441 \u0431\u0443\u043a\u0432\u043e\u0439 m."),),
+            ),
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level="a2", english_help=False
+    )
+    by_id = {d.id: d for d in normalized.difficulties}
+    assert by_id["d-cannon"].kind == "vocabulary"
+    assert by_id["d-cannon"].help_kind == "lexical_hint"
+    assert normalized.treatment_plan[0].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert by_id["d-demanded"].kind == "vocabulary"
+    assert by_id["d-pun"].kind == "wordplay"
+
+    # Genuine pun description on lexical_hint is NOT silently turned into vocabulary,
+    # so validate_content_plan rejects it with non_lexical_kind_requires_explanation.
+    bad_pun = PedagogicalAnalysisResponse(
+        treatment_plan=(TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-bad-pun",
+                (QuotedSourceAnchorResponse("b3", "Stalagmite"),),
+                "b3",
+                "wordplay",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "\u041a\u0430\u043b\u0430\u043c\u0431\u0443\u0440 \u0441 \u0431\u0443\u043a\u0432\u043e\u0439 m."),),
+            ),
+        ),
+    )
+    still_pun = normalize_difficulty_kinds(bad_pun, (blocks[2],), {"b3": blocks[2].id})
+    assert still_pun.difficulties[0].kind == "wordplay"
+    combined = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=still_pun.treatment_plan,
+        content_plan=QuotedContentPlanResponse(difficulties=still_pun.difficulties),
+    )
+    with pytest.raises(AnalysisMergeError) as exc:
+        validate_content_plan(
+            combined,
+            {"b3": blocks[2].id},
+            {blocks[2].id: blocks[2].text},
+            visible_texts_by_alias={"b3": blocks[2].text},
+            blocks=(blocks[2],),
+        )
+    assert exc.value.violation.rule_code == "non_lexical_kind_requires_explanation"
+
+
+def test_auto_vocab_materialization_supports_content_plan_v3_and_mixed_segments() -> None:
+    from linguary.application.analysis_merge import (
+        normalize_a2_dialogue_response,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        ContentPlanResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment
+
+    # 1. Mixed block initially READ_AS_IS: seg1 -> GLOSSARY_ONLY, seg2 -> TRANSLATE.
+    s1 = "It winked. "
+    s2 = "He has been here."
+    mixed_block = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=s1 + s2),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(s1) + len(s2), 1),
+        ),
+    )
+    aliases = {"b1": mixed_block.id}
+    ped_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.READ_AS_IS,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+        ),
+    )
+    norm_ped = normalize_a2_dialogue_response(
+        ped_payload, (mixed_block,), aliases, reader_level="a2", english_help=False
+    )
+    assert [seg.treatment for seg in norm_ped.treatment_plan[0].segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert len(norm_ped.difficulties) == 1
+    assert norm_ped.difficulties[0].kind == "vocabulary"
+    assert norm_ped.difficulties[0].help_kind == "lexical_hint"
+    assert norm_ped.difficulties[0].anchors[0].quote == "winked"
+    validated = validate_content_plan(
+        ChapterAnalysisResponse(
+            translation_instructions="Keep voice.",
+            chapter_summary="Summary.",
+            treatment_plan=norm_ped.treatment_plan,
+            content_plan=QuotedContentPlanResponse(difficulties=norm_ped.difficulties),
+        ),
+        aliases,
+        {mixed_block.id: mixed_block.text},
+        visible_texts_by_alias={"b1": mixed_block.text},
+        blocks=(mixed_block,),
+    )
+    assert validated is not None and len(validated.difficulties) == 1
+
+    # 2. ContentPlanResponse (v3 domain Difficulty/SourceAnchor) uses alias b1 and validates cleanly.
+    plain_block = make_analysis_block(section_id=SECTION_ID, order=1, text="It winked.")
+    v3_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        content_plan=ContentPlanResponse(version=3, profile="content-plan-v3"),
+    )
+    norm_v3 = normalize_a2_dialogue_response(
+        v3_payload, (plain_block,), {"b1": plain_block.id}, reader_level="a2", english_help=False
+    )
+    assert norm_v3.content_plan is not None and len(norm_v3.content_plan.difficulties) == 1
+    assert norm_v3.content_plan.difficulties[0].owner_block_id == "b1"
+    validated_v3 = validate_content_plan(
+        norm_v3,
+        {"b1": plain_block.id},
+        {plain_block.id: plain_block.text},
+        visible_texts_by_alias={"b1": plain_block.text},
+        blocks=(plain_block,),
+    )
+    assert validated_v3 is not None and validated_v3.difficulties[0].owner_block_id == plain_block.id
+
+    # 3. content_plan=None does not fail.
+    none_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        content_plan=None,
+    )
+    norm_none = normalize_a2_dialogue_response(
+        none_payload, (plain_block,), {"b1": plain_block.id}, reader_level="a2", english_help=False
+    )
+    assert norm_none.treatment_plan[0].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert norm_none.content_plan is None
+
+
+def test_unify_verse_stanza_treatments_and_poem_fragment_boundary_guard() -> None:
+    from linguary.application.analysis_merge import (
+        normalize_pedagogical_response,
+        plan_fragments,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain import InlineAnnotation, InlineAnnotationType
+    from linguary.domain.content_plan import RequiredPoint
+
+    # 1. Implicit enjambed verse stanza in <p><i>...</i></p> (mixed TRANSLATE / READ_AS_IS -> all TRANSLATE).
+    verse_lines = (
+        "Enter, stranger, but take heed",
+        "Of what awaits the sin of greed,",
+        "For those who take, but do not earn,",
+        "Must pay most dearly in their turn.",
+    )
+    verse_blocks = tuple(
+        replace(
+            make_analysis_block(section_id=SECTION_ID, order=i, text=line),
+            inline_annotations=(InlineAnnotation(InlineAnnotationType.ITALIC, 0, len(line)),),
+        )
+        for i, line in enumerate(verse_lines)
+    )
+    aliases = {f"b{i + 1}": b.id for i, b in enumerate(verse_blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-earn",
+                (QuotedSourceAnchorResponse("b3", "earn"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "earn \u2014 \u0437\u0430\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u0442\u044c."),),
+            ),
+        ),
+    )
+    # Works for both A2 and B2 (switching promoted lexical_hint -> explanation and not synthesizing auto-vocab).
+    for level in ("a2", "b2"):
+        norm = normalize_pedagogical_response(
+            payload, verse_blocks, aliases, reader_level=level, english_help=False
+        )
+        assert [item.treatment for item in norm.treatment_plan] == [BlockTreatment.TRANSLATE] * 4
+        assert len(norm.difficulties) == 1
+        assert norm.difficulties[0].help_kind == "explanation"
+        validated = validate_content_plan(
+            ChapterAnalysisResponse(
+                translation_instructions="Keep voice.",
+                chapter_summary="Summary.",
+                treatment_plan=norm.treatment_plan,
+                content_plan=QuotedContentPlanResponse(difficulties=norm.difficulties),
+            ),
+            aliases,
+            {b.id: b.text for b in verse_blocks},
+            visible_texts_by_alias={a: verse_blocks[i].text for i, a in enumerate(aliases)},
+            blocks=verse_blocks,
+        )
+        assert validated is not None
+
+    # All-light verse stanza stays untouched.
+    light_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+    )
+    light_norm = normalize_pedagogical_response(
+        light_payload, verse_blocks, aliases, reader_level="b2", english_help=False
+    )
+    assert [item.treatment for item in light_norm.treatment_plan] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # 2. Negative controls: unnumbered item list and interrupted closed dialogue are NOT unified.
+    list_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="Three sets of plain work robes (black)"),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="One plain pointed hat (black) for day wear"),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="One winter cloak (black, silver fastenings)"),
+    )
+    list_aliases = {f"b{i + 1}": b.id for i, b in enumerate(list_blocks)}
+    list_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+        ),
+    )
+    list_norm = normalize_pedagogical_response(
+        list_payload, list_blocks, list_aliases, reader_level="b2", english_help=False
+    )
+    assert [item.treatment for item in list_norm.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+    ]
+
+    dialogue_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="\u2018Wait \u2014\u2019"),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="\u2018Don\u2019t move \u2014\u2019"),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="\u2018I told you \u2014\u2019"),
+        make_analysis_block(section_id=SECTION_ID, order=3, text="\u2018Shut up!\u2019"),
+    )
+    dlg_aliases = {f"b{i + 1}": b.id for i, b in enumerate(dialogue_blocks)}
+    dlg_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b3", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+    )
+    dlg_norm = normalize_pedagogical_response(
+        dlg_payload, dialogue_blocks, dlg_aliases, reader_level="b2", english_help=False
+    )
+    assert [item.treatment for item in dlg_norm.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # 3. plan_fragments avoids cutting contiguous BlockType.POEM blocks when another balanced cut exists.
+    mixed_poem_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="Intro paragraph one."),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="Intro paragraph two."),
+        replace(make_analysis_block(section_id=SECTION_ID, order=2, text="Line one of verse"), type=BlockType.POEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=3, text="Line two of verse"), type=BlockType.POEM),
+        make_analysis_block(section_id=SECTION_ID, order=4, text="Outro paragraph."),
+    )
+    frags = plan_fragments(mixed_poem_blocks, max_blocks=3, max_chars=10_000)
+    assert len(frags) == 2
+    poem_frag_indices = [
+        idx for idx, frag in enumerate(frags)
+        if any(b.type is BlockType.POEM for b in frag.blocks)
+    ]
+    assert len(poem_frag_indices) == 1
+
+
+def test_verse_unification_clears_stale_demotion_trims_adjacent_prose_and_drops_auto_vocab() -> None:
+    from linguary.application.analysis_merge import (
+        normalize_difficulty_kinds,
+        normalize_pedagogical_response,
+        unify_chapter_analysis_verse_stanzas,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import (
+        BlockSegment,
+        ChapterAnalysis,
+        CoverageStatus,
+        TreatmentPlan,
+        TreatmentPlanItem,
+    )
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, SourceAnchor
+
+    # 1. Blocker 1 regression: short TRANSLATE verse line demoted on step 2, then lifted back to TRANSLATE
+    #    on step 3 must keep help_kind="explanation" and pass validate_content_plan without lexical_help_channel.
+    stanza_lines = (
+        "Enter, stranger, but take heed",
+        "Of the sin of greed,",
+        "For those who take, but do not earn,",
+        "Must pay most dearly in their turn.",
+    )
+    stanza_blocks = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=i, text=line)
+        for i, line in enumerate(stanza_lines)
+    )
+    stanza_aliases = {f"b{i + 1}": b.id for i, b in enumerate(stanza_blocks)}
+    stanza_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b3", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-greed",
+                (QuotedSourceAnchorResponse("b2", "greed"),),
+                "b2",
+                "vocabulary",
+                "useful",
+                "explanation",
+                (RequiredPoint("p1", "greed \u2014 \u0436\u0430\u0434\u043d\u043e\u0441\u0442\u044c."),),
+            ),
+        ),
+    )
+    stanza_norm = normalize_pedagogical_response(
+        stanza_payload, stanza_blocks, stanza_aliases, reader_level="a2", english_help=False
+    )
+    assert [item.treatment for item in stanza_norm.treatment_plan] == [BlockTreatment.TRANSLATE] * 4
+    assert [d.help_kind for d in stanza_norm.difficulties] == ["explanation"]
+    validated = validate_content_plan(
+        ChapterAnalysisResponse(
+            translation_instructions="Keep voice.",
+            chapter_summary="Summary.",
+            treatment_plan=stanza_norm.treatment_plan,
+            content_plan=QuotedContentPlanResponse(difficulties=stanza_norm.difficulties),
+        ),
+        stanza_aliases,
+        {b.id: b.text for b in stanza_blocks},
+        visible_texts_by_alias={f"b{i + 1}": b.text for i, b in enumerate(stanza_blocks)},
+        blocks=stanza_blocks,
+    )
+    assert validated is not None
+
+    # 2. Blocker 2 regression: short prose paragraphs before and after a non-italic verse stanza
+    #    are neither absorbed into TRANSLATE nor allowed to hide the stanza.
+    prose_and_verse = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="They stopped near the doors."),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="Words were carved on them:"),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="Enter, stranger, but take heed"),
+        make_analysis_block(section_id=SECTION_ID, order=3, text="Of what awaits the sin of greed,"),
+        make_analysis_block(section_id=SECTION_ID, order=4, text="For those who take, but do not earn,"),
+        make_analysis_block(section_id=SECTION_ID, order=5, text="Must pay most dearly in their turn."),
+        make_analysis_block(section_id=SECTION_ID, order=6, text="Harry looked at the doors."),
+        make_analysis_block(section_id=SECTION_ID, order=7, text="Hagrid stood beside him."),
+        make_analysis_block(section_id=SECTION_ID, order=8, text="The hall was quiet."),
+    )
+    pv_aliases = {f"b{i + 1}": b.id for i, b in enumerate(prose_and_verse)}
+    pv_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b5", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b6", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b7", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b8", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b9", BlockTreatment.READ_AS_IS),
+        ),
+    )
+    pv_norm = normalize_pedagogical_response(
+        pv_payload, prose_and_verse, pv_aliases, reader_level="b2", english_help=False
+    )
+    assert [item.treatment for item in pv_norm.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # 3. Single BlockType.POEM block with mixed segments unifies to TRANSLATE.
+    poem_text = "Enter, stranger, take heed. Pay dearly in your turn."
+    cut = poem_text.index("Pay")
+    single_poem = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=poem_text),
+        type=BlockType.POEM,
+        segments=(BlockSegment(0, cut, 0), BlockSegment(cut, len(poem_text), 1)),
+    )
+    single_poem_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+        ),
+    )
+    sp_norm = normalize_pedagogical_response(
+        single_poem_payload, (single_poem,), {"b1": single_poem.id}, reader_level="b2", english_help=False
+    )
+    assert [seg.treatment for seg in sp_norm.treatment_plan[0].segments] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+
+    # 4. Cross-fragment unify_chapter_analysis_verse_stanzas drops promoted auto-vocab instead of
+    #    converting it into an explanation on TRANSLATE.
+    p1 = replace(make_analysis_block(section_id=SECTION_ID, order=0, text="Line one of verse"), type=BlockType.POEM)
+    p2 = replace(make_analysis_block(section_id=SECTION_ID, order=1, text="Line two with heed."), type=BlockType.POEM)
+    heed_start = p2.text.index("heed")
+    auto_diff = Difficulty(
+        id="canonical-hash-id",
+        anchors=(SourceAnchor(p2.id, heed_start, heed_start + 4, "heed"),),
+        owner_block_id=p2.id,
+        kind="vocabulary",
+        priority="useful",
+        help_kind="lexical_hint",
+        required_points=(RequiredPoint("p1", "Дать краткую контекстную словарную подсказку для «heed»."),),
+    )
+    merged_analysis = ChapterAnalysis(
+        id="a1",
+        section_id=SECTION_ID,
+        coverage_status=CoverageStatus.COMPLETE,
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=TreatmentPlan(
+            section_id=SECTION_ID,
+            items=(
+                TreatmentPlanItem(p1.id, BlockTreatment.TRANSLATE),
+                TreatmentPlanItem(p2.id, BlockTreatment.GLOSSARY_ONLY),
+            ),
+        ),
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=(auto_diff,)),
+    )
+    unified_analysis = unify_chapter_analysis_verse_stanzas(merged_analysis, (p1, p2), english_help=False)
+    assert [item.treatment for item in unified_analysis.treatment_plan.items] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert unified_analysis.content_plan is not None
+    assert unified_analysis.content_plan.difficulties == ()
+
+    # 5. Russian oblique cases ("игру слов", "двойной смысл") protect genuine wordplay from reclassification.
+    oblique_block = make_analysis_block(section_id=SECTION_ID, order=0, text="A clever pun.")
+    for desc in ("Объяснить игру слов.", "Раскрыть двойной смысл выражения."):
+        oblique_payload = PedagogicalAnalysisResponse(
+            treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-oblique",
+                    (QuotedSourceAnchorResponse("b1", "pun"),),
+                    "b1",
+                    "wordplay",
+                    "useful",
+                    "lexical_hint",
+                    (RequiredPoint("p1", desc),),
+                ),
+            ),
+        )
+        kept = normalize_difficulty_kinds(oblique_payload, (oblique_block,), {"b1": oblique_block.id})
+        assert kept.difficulties[0].kind == "wordplay"

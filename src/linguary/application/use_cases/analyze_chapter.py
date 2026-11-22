@@ -56,7 +56,8 @@ from linguary.application.analysis_merge import (
     merge_narrative_fragments,
     merged_glossary_suggestion_keys,
     combine_staged_analysis_responses,
-    normalize_a2_dialogue_response,
+    normalize_pedagogical_response,
+    unify_chapter_analysis_verse_stanzas,
     select_staged_a2_summary,
 )
 from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
@@ -760,16 +761,14 @@ class AnalyzeChapter:
         *,
         known_names: Sequence[str] = (),
     ):
-        if not self._is_a2_reader() or self._context_builder._english_help:
-            return payload
         if not isinstance(payload, (ChapterAnalysisResponse, PedagogicalAnalysisResponse)):
             return payload
-        return normalize_a2_dialogue_response(
+        return normalize_pedagogical_response(
             payload,
             blocks,
             block_ids_by_alias,
-            reader_level='a2',
-            english_help=False,
+            reader_level=getattr(self._context_builder, '_reader_level', None),
+            english_help=bool(self._context_builder._english_help),
             known_names=known_names,
         )
 
@@ -1398,6 +1397,11 @@ class AnalyzeChapter:
             id_factory=self._id_factory,
             name_translation_policy=self._name_translation_policy,
             conditions_id=self._conditions_id,
+        )
+        analysis = unify_chapter_analysis_verse_stanzas(
+            analysis,
+            blocks,
+            english_help=bool(self._context_builder._english_help),
         )
         return analysis, attempts, _total_usage(usages)
 

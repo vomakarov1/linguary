@@ -894,7 +894,8 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     # Upgraded to explicit AFTER spoiler check!
     assert promoted_facts[0].certainty == 'explicit'
 
-    # 4. Visual facts: reject obvious sound/smell/taste markers by word boundary, allow visual forms like беззвучно.
+    # 4. Visual facts: filter out obvious sound/smell/taste markers without failing the chunk,
+    #    while preserving visual forms like беззвучно, музыкальные магазины, магазин сладостей.
     for bad_detail in (
         'Громкий звук шагов за дверью',
         'Резкий запах дыма в комнате',
@@ -908,13 +909,13 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
                 QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', bad_detail,
             ),),
         )
-        with pytest.raises(AnalysisMergeError) as vf_exc:
-            validate_narrative_response(
-                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_vf_scene,)),
-                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
-            )
-        assert vf_exc.value.violation.rule_code == 'non_visual_fact'
-        assert vf_exc.value.violation.block_ids == ('id-1',)
+        filtered_scenes, _ = validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_vf_scene,)),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        )
+        assert len(filtered_scenes) == 1
+        assert filtered_scenes[0].visual_facts == ()
+        assert filtered_scenes[0].id == filtered_scenes[0].canonical_id
 
     good_vf_scene = scene(
         'b1', 'b3',
@@ -927,12 +928,14 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
             ),
         ),
     )
-    assert len(validate_narrative_response(
+    kept_scenes, _ = validate_narrative_response(
         NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(good_vf_scene,)),
         ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
-    )[0]) == 1
+    )
+    assert len(kept_scenes) == 1
+    assert len(kept_scenes[0].visual_facts) == 2
 
-    # 5. Strict priority: name_assessment_conflict > spoiler_name_leak > non_visual_fact > context_fact_conflict.
+    # 5. Strict priority: name_assessment_conflict > spoiler_name_leak > context_fact_conflict.
     bad_vf_spoiler_scene = (
         QuotedSceneResponse(
             'b1', 'b2', 'Разговор.', participants=('Harry Potter',),
@@ -966,7 +969,7 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     assert prio_spoiler_exc.value.violation.rule_code == 'spoiler_name_leak'
 
 
-def test_validate_narrative_visual_facts_allow_visual_objects_and_colors_while_rejecting_sounds():
+def test_validate_narrative_visual_facts_allow_visual_objects_and_colors_while_filtering_sounds():
     visual_ok_scene = scene(
         'b1', 'b3',
         visual_facts=(
@@ -980,30 +983,50 @@ def test_validate_narrative_visual_facts_allow_visual_objects_and_colors_while_r
                 'Watson',
                 'Стоит у дверного звонка в безвкусном наряде',
             ),
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'red coat'),
+                'Holmes',
+                'На улице видны книжные и музыкальные магазины и магазин сладостей',
+            ),
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b2', 'opened the door'),
+                'Watson',
+                'Держит кружку сладкого чая и плитку горького шоколада',
+            ),
         ),
     )
-    assert len(validate_narrative_response(
+    kept_scenes, _ = validate_narrative_response(
         NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(visual_ok_scene,)),
         ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
-    )[0]) == 1
+    )
+    assert len(kept_scenes) == 1
+    assert len(kept_scenes[0].visual_facts) == 4
 
     for bad_detail in (
         'Скрипит деревянная половица под ногами',
         'Кислый привкус во рту',
         'Звон колокольчика у двери',
+        'Сладкий привкус сиропа',
+        'Горький вкус лекарства',
     ):
+        # Even an unresolved quote on a filtered non-visual fact must not abort the chunk.
         bad_scene = scene(
             'b1', 'b3',
-            visual_facts=(QuotedSceneVisualFactResponse(
-                QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', bad_detail,
-            ),),
+            visual_facts=(
+                QuotedSceneVisualFactResponse(
+                    QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', 'Красное пальто',
+                ),
+                QuotedSceneVisualFactResponse(
+                    QuotedSourceAnchorResponse('b1', 'nonexistent quote'), 'Holmes', bad_detail,
+                ),
+            ),
         )
-        with pytest.raises(AnalysisMergeError) as exc:
-            validate_narrative_response(
-                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_scene,)),
-                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
-            )
-        assert exc.value.violation.rule_code == 'non_visual_fact'
+        filtered_scenes, _ = validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_scene,)),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        )
+        assert [vf.detail for vf in filtered_scenes[0].visual_facts] == ['Красное пальто']
+        assert filtered_scenes[0].id == filtered_scenes[0].canonical_id
 
 
 def test_validate_narrative_does_not_false_flag_lowercase_or_article_role_participants():

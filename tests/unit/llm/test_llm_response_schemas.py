@@ -604,3 +604,24 @@ def test_quoted_context_fact_inferred_falls_back_to_subject_anchor_when_anchors_
     ):
         with pytest.raises(ValidationError):
             QuotedContextFactSchema.model_validate(bad_payload)
+
+
+def test_difficulty_kind_schema_lists_vocabulary_first() -> None:
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.schemas import PedagogicalAnalysisSchema
+
+    schema = strict_json_schema(PedagogicalAnalysisSchema)
+    defs = schema.get("$defs", {})
+    kind_enum = defs["QuotedDifficultySchema"]["properties"]["kind"]["enum"]
+    assert kind_enum[0] == "vocabulary"
+    assert set(kind_enum) == {
+        "vocabulary",
+        "grammar",
+        "idiom",
+        "cultural_reference",
+        "speech_style",
+        "false_friend",
+        "semantic_relation",
+        "wordplay",
+        "parody",
+    }

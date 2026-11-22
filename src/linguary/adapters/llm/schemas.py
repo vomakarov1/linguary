@@ -309,8 +309,8 @@ class DifficultySchema(_ResponseModel):
     anchors: list[SourceAnchorSchema] = Field(min_length=1)
     owner_block_id: str = Field(min_length=1)
     kind: Literal[
-        'wordplay', 'semantic_relation', 'grammar', 'cultural_reference', 'idiom', 'vocabulary',
-        'false_friend', 'speech_style', 'parody',
+        'vocabulary', 'grammar', 'idiom', 'cultural_reference',
+        'speech_style', 'false_friend', 'semantic_relation', 'wordplay', 'parody',
     ]
     priority: Literal['critical', 'useful']
     help_kind: Literal['explanation', 'lexical_hint']

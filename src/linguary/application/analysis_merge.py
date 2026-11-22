@@ -24,18 +24,20 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, Scene, SceneVisualFact, SourceAnchor, artifact_key
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, RequiredPoint, Scene, SceneVisualFact, SourceAnchor, artifact_key
 from linguary.domain.llm_log import Violation
 
-from linguary.application.a2_core_vocab import non_core_a2_words
+from linguary.application.a2_core_vocab import non_core_a2_word_spans, non_core_a2_words
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import _same_word, expression_words
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     ChapterAnalysisResponse,
+    ContentPlanResponse,
     GlossaryCandidateResponse,
     QuotedContentPlanResponse,
+    QuotedDifficultyResponse,
     NarrativeAnalysisResponse,
     PedagogicalAnalysisResponse,
     QuotedContextFactResponse,
@@ -56,6 +58,7 @@ from linguary.domain import (
     DocumentBlock,
     DomainError,
     GlossaryCandidate,
+    InlineAnnotationType,
     SupportStatus,
     TreatmentPlan,
     TreatmentPlanError,
@@ -404,8 +407,8 @@ def _cut_priority_key(
     prev_block = blocks[cut - 1]
     next_block = blocks[cut]
     splits_quote = (
-        prev_block.type is BlockType.QUOTE
-        and next_block.type is BlockType.QUOTE
+        prev_block.type in {BlockType.QUOTE, BlockType.POEM}
+        and next_block.type is prev_block.type
         and next_block.order == prev_block.order + 1
     )
     trailing_heading = prev_block.type is BlockType.HEADING
@@ -1815,7 +1818,6 @@ _NARRATIVE_RULE_PRIORITY = (
     "scene_summary_language",
     "name_assessment_conflict",
     "spoiler_name_leak",
-    "non_visual_fact",
     "speaker_subject_anchor",
     "gender_plural_subject",
     "context_fact_conflict",
@@ -1826,7 +1828,12 @@ _SCENE_SUMMARY_DETECTOR_MIN_LETTERS = 30
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
 _SPOILER_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+(?:['’][A-Za-z]+)?")
 _VISUAL_SAFE_EXCLUSIONS_RE = re.compile(
-    r"\b(?:беззвучн\w*|бесшумн\w*|soundless\w*)\b",
+    r"\b(?:"
+    r"беззвучн\w*|бесшумн\w*|soundless\w*"
+    r"|музыкальн\w*\s+(?:магазин\w*|лавк\w*|инструмент\w*|шкатулк\w*|зал\w*|школ\w*|киоск\w*|колонк\w*|автомат\w*)"
+    r"|(?:магазин\w*|лавк\w*)\s+музык\w*"
+    r"|music(?:al)?\s+(?:shop|store|instrument|box|hall|room|stand|school)s?"
+    r")\b",
     re.IGNORECASE,
 )
 _NON_VISUAL_FACT_RE = re.compile(
@@ -1841,8 +1848,10 @@ _NON_VISUAL_FACT_RE = re.compile(
     r"|мелоди\w*|музык\w*|эхо\w*|слышн\w*|слышит\w*|слышать\w*|аудио\w*|интонаци\w*"
     # Russian smell markers
     r"|запах\w*|аромат\w*|вонь\w*|воня\w*|пахн\w*|благоухан\w*|смрад\w*|зловон\w*|душист\w*"
-    # Russian taste markers
-    r"|вкус\w*|привкус\w*|сладк\w*|горьк\w*"
+    # Russian taste markers (taste-specific context; avoids visible foods/shops like «магазин сладостей» or «сладкий чай»)
+    r"|вкус\w*|привкус\w*"
+    r"|сладк\w*\s+(?:вкус\w*|привкус\w*|запах\w*|аромат\w*)|сладковат\w*"
+    r"|горьк\w*\s+(?:вкус\w*|привкус\w*|запах\w*|аромат\w*)|горчит\w*|гореч\w*"
     r"|кисл(?:ый|ая|ое|ые|ого|ой|ому|ым|ом|ую|ых|ыми|оват\w*)|солён\w*|солен\w*"
     # English sound/smell/taste markers
     r"|sound(?:s|ed|ing)?|noise(?:s|y)?|noisy|loud(?:ly|er|est)?|voice(?:s)?"
@@ -1854,6 +1863,12 @@ _NON_VISUAL_FACT_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def _is_non_visual_fact(detail: str) -> bool:
+    """Return True when a scene visual fact describes sound, smell, or taste rather than sight."""
+    cleaned = _VISUAL_SAFE_EXCLUSIONS_RE.sub(" ", detail)
+    return _NON_VISUAL_FACT_RE.search(cleaned) is not None
 
 
 def _has_cyrillic(text: str) -> bool:
@@ -2671,22 +2686,6 @@ def _collect_spoiler_name_leaks(
     return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
 
 
-def _collect_non_visual_facts(
-    scenes: Sequence[Scene],
-    aliases_by_block_id: Mapping[str, str],
-) -> tuple[list[str], list[str]]:
-    details: list[str] = []
-    block_ids: list[str] = []
-    for sc in scenes:
-        for fact in sc.visual_facts:
-            cleaned = _VISUAL_SAFE_EXCLUSIONS_RE.sub(" ", fact.detail)
-            if _NON_VISUAL_FACT_RE.search(cleaned) is not None:
-                label = aliases_by_block_id.get(fact.anchor.block_id, fact.anchor.block_id)
-                details.append(f"{label}: «{_preview_quote(fact.detail)}»")
-                block_ids.append(fact.anchor.block_id)
-    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
-
-
 def _format_unresolved_anchor_issue(
     block_alias: str,
     quote: str,
@@ -2742,9 +2741,11 @@ def _validate_scene_visual_facts(
     vf_oob_details: list[str],
     vf_oob_blocks: list[str],
 ) -> tuple[SceneVisualFact, ...]:
-    """Resolve visual facts of a scene with valid bounds using lenient quote matching."""
+    """Resolve visual facts of a scene with valid bounds, filtering non-visual details."""
     facts: list[SceneVisualFact] = []
     for fact in visual_facts:
+        if _is_non_visual_fact(fact.detail):
+            continue
         anchor = _resolve_quoted_anchor(
             fact.anchor.block_id,
             fact.anchor.quote,
@@ -3331,18 +3332,6 @@ def validate_narrative_response(
                 "spoiler_name_leak",
                 f"обнаружен спойлер имени до первого упоминания в главе ({'; '.join(spoiler_details)})",
                 tuple(spoiler_blocks),
-            )
-        )
-
-    non_visual_details, non_visual_blocks = _collect_non_visual_facts(
-        scenes, scoped_aliases_by_block_id
-    )
-    if non_visual_details:
-        issues.append(
-            (
-                "non_visual_fact",
-                f"визуальный факт содержит незрительное описание ({'; '.join(non_visual_details)})",
-                tuple(non_visual_blocks),
             )
         )
 
@@ -4316,6 +4305,24 @@ def validate_content_plan(
                 rule_code="grammar_requires_explanation",
                 block_ids=(difficulty.owner_block_id,),
             )
+        if (
+            plan.version == 3
+            and difficulty.kind in _EXPLANATION_ONLY_NON_GRAMMAR_KINDS
+            and difficulty.help_kind != "explanation"
+            and covered != {p.id for p in difficulty.required_points}
+        ):
+            label = aliases_by_block_id.get(
+                difficulty.owner_block_id, difficulty.owner_block_id
+            )
+            msg = (
+                f"трудность вида {difficulty.kind} требует объяснения "
+                f"({label}, {difficulty.id})"
+            )
+            raise _analysis_error(
+                msg,
+                rule_code="non_lexical_kind_requires_explanation",
+                block_ids=(difficulty.owner_block_id,),
+            )
         all_glossary = bool(effective_treatments) and all(
             mode is BlockTreatment.GLOSSARY_ONLY for mode in effective_treatments
         )
@@ -4903,6 +4910,924 @@ _CHAPTER_NUMBER_WORDS = frozenset({
 _ROMAN_NUMERAL = re.compile(
     r"(?=[ivxlcdm]+$)m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
 )
+_EXPLANATION_ONLY_NON_GRAMMAR_KINDS = frozenset({"wordplay", "parody", "semantic_relation"})
+_AUTO_VOCAB_POINT_PREFIX = "Дать краткую контекстную словарную подсказку для «"
+_NON_LEXICAL_KIND_MARKER_RE = re.compile(
+    r"(?:каламбур|игр(?:а|ы|е|у|ой|ою)\s+слов|двойн\w*\s+смысл\w*|двусмыслен|"
+    r"пароди|обыгрыва|рифм|созвуч\w*|прототип|аллюзи|"
+    r"\bwordplay\b|\bpun\b|\bparody\b)",
+    re.IGNORECASE,
+)
+_VERSE_TERMINAL_PUNCT_RE = re.compile(r"""[.!?…:][”"’'»)\]]*\s*$""")
+_VERSE_CLOSURE_PUNCT_RE = re.compile(r"""[.!?…][”"’'»)\]]*\s*$""")
+_VERSE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-•*–—]|\d+[.)])\s+")
+_VERSE_CARDINAL_START_RE = re.compile(
+    r"^\s*(?:one|two|three|four|five|six|seven|eight|nine|ten)\b",
+    re.IGNORECASE,
+)
+_VERSE_OPENING_QUOTES = '‘“"\'«'
+_VERSE_CLOSING_QUOTES = '’”"\'»'
+_VERSE_WORD_RE = re.compile(r"[A-Za-z\u00C0-\u024FА-Яа-яЁё]+(?:['’-][A-Za-z\u00C0-\u024FА-Яа-яЁё]+)*")
+
+
+@dataclass(frozen=True, slots=True)
+class _StoplistDecision:
+    mode: BlockTreatment
+    target_spans: tuple[tuple[int, int], ...] = ()
+
+
+def _replace_payload_difficulties(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+    difficulties,
+    *,
+    treatment_plan=None,
+    before_you_read_evidence=None,
+):
+    if isinstance(payload, PedagogicalAnalysisResponse):
+        kwargs: dict[str, object] = {"difficulties": tuple(difficulties)}
+        if treatment_plan is not None:
+            kwargs["treatment_plan"] = tuple(treatment_plan)
+        if before_you_read_evidence is not None:
+            kwargs["before_you_read_evidence"] = tuple(before_you_read_evidence)
+        return replace(payload, **kwargs)
+    content_plan = payload.content_plan
+    if content_plan is None:
+        if treatment_plan is None:
+            return payload
+        return replace(payload, treatment_plan=tuple(treatment_plan))
+    cp_kwargs: dict[str, object] = {"difficulties": tuple(difficulties)}
+    if before_you_read_evidence is not None:
+        cp_kwargs["before_you_read_evidence"] = tuple(before_you_read_evidence)
+    updated_cp = replace(content_plan, **cp_kwargs)
+    if treatment_plan is not None:
+        return replace(payload, treatment_plan=tuple(treatment_plan), content_plan=updated_cp)
+    return replace(payload, content_plan=updated_cp)
+
+
+def _is_auto_vocab_difficulty(difficulty) -> bool:
+    if getattr(difficulty, "id", "").startswith("auto-vocab-"):
+        return True
+    points = getattr(difficulty, "required_points", ())
+    return (
+        getattr(difficulty, "kind", None) == "vocabulary"
+        and len(points) == 1
+        and points[0].description.startswith(_AUTO_VOCAB_POINT_PREFIX)
+    )
+
+
+def _difficulty_on_glossary_only(
+    difficulty,
+    items_by_owner: Mapping[str, TreatmentPlanItemResponse],
+    aliases: Mapping[str, str],
+    blocks_by_id: Mapping[str, DocumentBlock],
+) -> bool:
+    owner = difficulty.owner_block_id
+    item = items_by_owner.get(owner) or items_by_owner.get(aliases.get(owner, ""))
+    if item is None:
+        return False
+    if not item.segments:
+        return item.treatment is BlockTreatment.GLOSSARY_ONLY
+    block = _block_for_plan_item(item.source_block_id, blocks_by_id, aliases)
+    if block is None or not block.segment_spans:
+        return any(seg.treatment is BlockTreatment.GLOSSARY_ONLY for seg in item.segments)
+    spans = block.segment_spans
+    owners = frozenset(part for part in (item.source_block_id, block.id, owner) if part)
+    glossary_ranges = tuple(
+        (spans[seg.index - 1].start, spans[seg.index - 1].end)
+        for seg in item.segments
+        if seg.treatment is BlockTreatment.GLOSSARY_ONLY and 1 <= seg.index <= len(spans)
+    )
+    if not glossary_ranges:
+        return False
+    return _difficulty_hits_ranges(difficulty, owners, block.text, glossary_ranges)
+
+
+def _is_single_word_anchor(quote: str) -> bool:
+    if any(dash in quote for dash in ("-", "–", "—")):
+        return False
+    return len(expression_words(quote)) == 1
+
+
+def normalize_difficulty_kinds(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+    blocks: Sequence[DocumentBlock] = (),
+    block_ids_by_alias: Mapping[str, str] | None = None,
+) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
+    """Fix provably contradictory difficulty kinds before A2 normalization and validation.
+
+    Reclassifies single-anchor `wordplay`/`parody`/`semantic_relation` with
+    `help_kind="lexical_hint"` on `GLOSSARY_ONLY` blocks/segments (when `required_points`
+    contains no pun/parody explanation markers) and single-word `idiom` entries
+    to `kind="vocabulary"`. Multi-anchor and genuine wordplay/parody explanations
+    are preserved untouched.
+    """
+    difficulties = _response_difficulties(payload)
+    if not difficulties:
+        return payload
+    aliases = block_ids_by_alias or {}
+    blocks_by_id = {block.id: block for block in blocks}
+    items_by_owner: dict[str, TreatmentPlanItemResponse] = {}
+    for item in payload.treatment_plan:
+        items_by_owner[item.source_block_id] = item
+        resolved_id = aliases.get(item.source_block_id)
+        if resolved_id:
+            items_by_owner[resolved_id] = item
+    updated: list = []
+    changed = False
+    for difficulty in difficulties:
+        new_kind = difficulty.kind
+        anchors = getattr(difficulty, "anchors", ())
+        if (
+            difficulty.kind in _EXPLANATION_ONLY_NON_GRAMMAR_KINDS
+            and difficulty.help_kind == "lexical_hint"
+            and len(anchors) == 1
+            and _difficulty_on_glossary_only(difficulty, items_by_owner, aliases, blocks_by_id)
+            and not any(
+                _NON_LEXICAL_KIND_MARKER_RE.search(point.description)
+                for point in difficulty.required_points
+            )
+        ):
+            new_kind = "vocabulary"
+        elif (
+            difficulty.kind == "idiom"
+            and len(anchors) == 1
+            and _is_single_word_anchor(getattr(anchors[0], "quote", ""))
+        ):
+            new_kind = "vocabulary"
+        if new_kind != difficulty.kind:
+            updated.append(replace(difficulty, kind=new_kind))
+            changed = True
+        else:
+            updated.append(difficulty)
+    if not changed:
+        return payload
+    return _replace_payload_difficulties(payload, updated)
+
+
+def _strip_leading_quotes(text: str) -> str:
+    return text.lstrip().lstrip(_VERSE_OPENING_QUOTES).lstrip()
+
+
+def _starts_with_upper_verse(text: str) -> bool:
+    stripped = _strip_leading_quotes(text)
+    for ch in stripped:
+        if ch.isalpha():
+            return ch.isupper()
+    return False
+
+
+def _is_closed_dialogue_line(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped[0] in _VERSE_OPENING_QUOTES and stripped[-1] in _VERSE_CLOSING_QUOTES:
+        return True
+    quotes = list(_DIALOGUE_QUOTES.finditer(stripped))
+    if quotes and quotes[-1].end() < len(stripped):
+        tail = stripped[quotes[-1].end():].strip()
+        if tail and any(ch.isalpha() for ch in tail):
+            return True
+    return False
+
+
+def _is_full_block_italic(block: DocumentBlock) -> bool:
+    text = block.text
+    first = next((i for i, ch in enumerate(text) if not ch.isspace()), None)
+    if first is None:
+        return False
+    last = next((i for i in range(len(text) - 1, -1, -1) if not text[i].isspace()), first) + 1
+    return any(
+        ann.type is InlineAnnotationType.ITALIC and ann.start <= first and ann.end >= last
+        for ann in block.inline_annotations
+    )
+
+
+def _is_verse_paragraph_candidate(block: DocumentBlock) -> bool:
+    if block.type is not BlockType.PARAGRAPH:
+        return False
+    stripped = block.text.strip()
+    if not stripped or len(stripped) > 100:
+        return False
+    if _VERSE_LIST_PREFIX_RE.match(stripped):
+        return False
+    if _is_closed_dialogue_line(stripped):
+        return False
+    words = _VERSE_WORD_RE.findall(stripped)
+    if not (2 <= len(words) <= 15):
+        return False
+    # At most one internal sentence break inside a single verse line.
+    internal = stripped[:-1]
+    breaks = len(re.findall(r"[.!?…]\s+[A-ZА-ЯЁ]", internal))
+    return breaks <= 1
+
+
+def _is_valid_implicit_verse_run(run: Sequence[DocumentBlock]) -> bool:
+    if len(run) < 3:
+        return False
+    # Require sentence-case prose lines (distinguishes verse from Title Case lists/addresses).
+    non_initial_alpha = 0
+    non_initial_lower = 0
+    for block in run:
+        tokens = _VERSE_WORD_RE.findall(block.text)
+        for token in tokens[1:]:
+            if len(token) > 1:
+                non_initial_alpha += 1
+                if token[0].islower():
+                    non_initial_lower += 1
+    if non_initial_alpha == 0 or non_initial_lower * 2 <= non_initial_alpha:
+        return False
+    final_closed = _VERSE_CLOSURE_PUNCT_RE.search(run[-1].text) is not None
+    all_italic = all(_is_full_block_italic(block) for block in run)
+    if not final_closed and not all_italic:
+        return False
+    # Guard against unnumbered item lists (e.g. "One plain hat (black)").
+    cardinal_starts = sum(1 for block in run if _VERSE_CARDINAL_START_RE.match(block.text))
+    if cardinal_starts * 2 >= len(run):
+        return False
+    if not final_closed and sum(1 for block in run if "(" in block.text and ")" in block.text) * 2 >= len(run):
+        return False
+    # Require enjambment + verse capitalization on >= half (and >= 2) of non-final lines.
+    non_final = len(run) - 1
+    enjambed_caps = 0
+    for index in range(non_final):
+        cur_text = run[index].text.strip()
+        next_text = run[index + 1].text.strip()
+        if (
+            _VERSE_TERMINAL_PUNCT_RE.search(cur_text) is None
+            and _starts_with_upper_verse(next_text)
+        ):
+            enjambed_caps += 1
+    return enjambed_caps >= 2 and enjambed_caps * 2 >= non_final
+
+
+def _is_enjambed_pair(first_text: str, second_text: str) -> bool:
+    return (
+        _VERSE_TERMINAL_PUNCT_RE.search(first_text.strip()) is None
+        and _starts_with_upper_verse(second_text.strip())
+    )
+
+
+def _extract_implicit_verse_subruns(
+    strip: Sequence[DocumentBlock],
+) -> list[tuple[DocumentBlock, ...]]:
+    """Trim leading/trailing prose paragraphs around enjambed verse lines inside a strip."""
+    if len(strip) < 3:
+        return []
+    enjambed_indices = [
+        i for i in range(len(strip) - 1)
+        if _is_enjambed_pair(strip[i].text, strip[i + 1].text)
+    ]
+    if len(enjambed_indices) < 2:
+        return []
+    # Group enjambed transitions separated by at most 1 closed verse line (e.g. rhyming couplets).
+    groups: list[tuple[int, int]] = []
+    cur_start = enjambed_indices[0]
+    cur_end = enjambed_indices[0] + 1
+    for idx in enjambed_indices[1:]:
+        if idx <= cur_end + 1:
+            cur_end = idx + 1
+        else:
+            groups.append((cur_start, cur_end))
+            cur_start = idx
+            cur_end = idx + 1
+    groups.append((cur_start, cur_end))
+    result: list[tuple[DocumentBlock, ...]] = []
+    for start_idx, end_idx in groups:
+        candidate = tuple(strip[start_idx:end_idx + 1])
+        if _is_valid_implicit_verse_run(candidate):
+            result.append(candidate)
+    return result
+
+
+def _detect_verse_stanza_runs(blocks: Sequence[DocumentBlock]) -> tuple[tuple[DocumentBlock, ...], ...]:
+    """Detect contiguous multi-block verse stanzas (explicit POEM or enjambed PARAGRAPH)."""
+    runs: list[tuple[DocumentBlock, ...]] = []
+    n = len(blocks)
+    index = 0
+    while index < n:
+        block = blocks[index]
+        if block.type is BlockType.POEM:
+            end = index + 1
+            while (
+                end < n
+                and blocks[end].type is BlockType.POEM
+                and blocks[end].order == blocks[end - 1].order + 1
+            ):
+                end += 1
+            if end - index >= 2:
+                runs.append(tuple(blocks[index:end]))
+            index = end
+            continue
+        if _is_verse_paragraph_candidate(block):
+            italic_flag = _is_full_block_italic(block)
+            end = index + 1
+            while (
+                end < n
+                and blocks[end].order == blocks[end - 1].order + 1
+                and _is_verse_paragraph_candidate(blocks[end])
+                and _is_full_block_italic(blocks[end]) is italic_flag
+            ):
+                end += 1
+            runs.extend(_extract_implicit_verse_subruns(blocks[index:end]))
+            index = end
+            continue
+        index += 1
+    return tuple(runs)
+
+
+def _item_has_mixed_translate_segments(item: TreatmentPlanItemResponse) -> bool:
+    if not item.segments:
+        return False
+    modes = {seg.treatment for seg in item.segments}
+    return BlockTreatment.TRANSLATE in modes and len(modes) > 1
+
+
+def unify_verse_stanza_treatments(
+    items: Sequence[TreatmentPlanItemResponse],
+    blocks: Sequence[DocumentBlock],
+    block_ids_by_alias: Mapping[str, str],
+    *,
+    english_help: bool = False,
+) -> tuple[tuple[TreatmentPlanItemResponse, ...], bool]:
+    """Keep verse/poem stanzas in one cohesive language mode (never half-translated).
+
+    Leaves all-light (`READ_AS_IS`/`GLOSSARY_ONLY`) stanzas untouched. When any line
+    or segment of a stanza requires `TRANSLATE` alongside non-`TRANSLATE` lines,
+    elevates the entire stanza to `TRANSLATE`.
+    """
+    if english_help or not items or not blocks:
+        return tuple(items), False
+    blocks_by_id = {block.id: block for block in blocks}
+    item_index_by_block_id: dict[str, int] = {}
+    ordered_blocks: list[DocumentBlock] = []
+    for idx, item in enumerate(items):
+        block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+        if block is not None:
+            item_index_by_block_id[block.id] = idx
+            ordered_blocks.append(block)
+    ordered_blocks.sort(key=lambda b: b.order)
+    updated = list(items)
+    changed = False
+
+    # Group 0: single BlockType.POEM block with mixed TRANSLATE / non-TRANSLATE segments.
+    for block in ordered_blocks:
+        if block.type is BlockType.POEM:
+            idx = item_index_by_block_id[block.id]
+            if _item_has_mixed_translate_segments(updated[idx]):
+                updated[idx] = _force_block_treatment(updated[idx], BlockTreatment.TRANSLATE)
+                changed = True
+
+    # Group 1 (contiguous BlockType.POEM) & Group 2 (implicit enjambed PARAGRAPH stanzas).
+    for run in _detect_verse_stanza_runs(ordered_blocks):
+        run_indices = [item_index_by_block_id[b.id] for b in run if b.id in item_index_by_block_id]
+        if len(run_indices) < 2:
+            continue
+        has_translate = any(
+            updated[i].treatment is BlockTreatment.TRANSLATE
+            or any(seg.treatment is BlockTreatment.TRANSLATE for seg in updated[i].segments)
+            for i in run_indices
+        )
+        has_non_translate = any(
+            updated[i].treatment is not BlockTreatment.TRANSLATE
+            or any(seg.treatment is not BlockTreatment.TRANSLATE for seg in updated[i].segments)
+            for i in run_indices
+        )
+        if has_translate and has_non_translate:
+            for i in run_indices:
+                forced = _force_block_treatment(updated[i], BlockTreatment.TRANSLATE)
+                if forced is not updated[i]:
+                    updated[i] = forced
+                    changed = True
+
+    return tuple(updated), changed
+
+
+def unify_chapter_analysis_verse_stanzas(
+    analysis: ChapterAnalysis,
+    blocks: Sequence[DocumentBlock],
+    *,
+    english_help: bool = False,
+) -> ChapterAnalysis:
+    """Unify verse stanzas across fragment boundaries on a merged `ChapterAnalysis`."""
+    if english_help or not blocks or not analysis.treatment_plan.items:
+        return analysis
+    response_items = tuple(
+        TreatmentPlanItemResponse(
+            source_block_id=item.block_id,
+            treatment=item.treatment,
+            segments=tuple(
+                SegmentTreatmentResponse(index=idx, treatment=mode)
+                for idx, mode in enumerate(item.segment_treatments, start=1)
+            ),
+        )
+        for item in analysis.treatment_plan.items
+    )
+    identity_aliases = {block.id: block.id for block in blocks}
+    unified_items, changed = unify_verse_stanza_treatments(
+        response_items, blocks, identity_aliases, english_help=english_help,
+    )
+    if not changed:
+        return analysis
+    blocks_by_id = {block.id: block for block in blocks}
+    promoted_blocks: list[_PromotedBlock] = []
+    new_plan_items: list[TreatmentPlanItem] = []
+    for orig, upd in zip(response_items, unified_items, strict=True):
+        block = blocks_by_id.get(upd.source_block_id)
+        if block is not None and upd is not orig:
+            promoted = _compute_promoted_block(orig, upd, block, frozenset((block.id,)))
+            if promoted is not None:
+                promoted_blocks.append(promoted)
+        seg_modes = tuple(seg.treatment for seg in upd.segments)
+        new_plan_items.append(
+            TreatmentPlanItem(
+                block_id=upd.source_block_id,
+                treatment=upd.treatment,
+                segment_treatments=seg_modes,
+            )
+        )
+    new_treatment_plan = TreatmentPlan(
+        section_id=analysis.section_id,
+        items=tuple(new_plan_items),
+    )
+    new_content_plan = analysis.content_plan
+    if new_content_plan is not None and promoted_blocks:
+        covered_points: dict[str, set[str]] = {}
+        for ev in new_content_plan.before_you_read_evidence:
+            covered_points.setdefault(ev.difficulty_id, set()).add(ev.point_id)
+        updated_diffs = []
+        dropped_ids: set[str] = set()
+        for difficulty in new_content_plan.difficulties:
+            switched = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
+            if switched is not difficulty and _is_auto_vocab_difficulty(difficulty):
+                dropped_ids.add(difficulty.id)
+                continue
+            updated_diffs.append(switched)
+        new_difficulties = tuple(updated_diffs)
+        if new_difficulties != new_content_plan.difficulties:
+            new_evidence = tuple(
+                ev for ev in new_content_plan.before_you_read_evidence
+                if ev.difficulty_id not in dropped_ids
+            )
+            new_content_plan = replace(
+                new_content_plan,
+                difficulties=new_difficulties,
+                before_you_read_evidence=new_evidence,
+            )
+    return replace(
+        analysis,
+        treatment_plan=new_treatment_plan,
+        content_plan=new_content_plan,
+    )
+
+
+def _resolved_anchor_spans_for_block(
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+) -> set[tuple[int, int]]:
+    spans: set[tuple[int, int]] = set()
+    for difficulty in difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        for anchor in getattr(difficulty, "anchors", ()):
+            if getattr(anchor, "block_id", None) not in owners:
+                continue
+            start = getattr(anchor, "start", None)
+            end = getattr(anchor, "end", None)
+            if type(start) is int and type(end) is int and 0 <= start < end <= len(block_text):
+                spans.add((start, end))
+                continue
+            quote = getattr(anchor, "quote", "")
+            if quote:
+                for q_start, q_end, _ in _quote_spans(block_text, quote):
+                    spans.add((q_start, q_end))
+    return spans
+
+
+def _has_difficulty_in_range(
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    *,
+    whole_block: bool,
+) -> bool:
+    ranges = ((span_start, span_end),)
+    for difficulty in difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        if whole_block or _difficulty_hits_ranges(difficulty, owners, block_text, ranges):
+            return True
+    return False
+
+
+def _uncovered_spans_in_slice(
+    text: str,
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    difficulties,
+    owners: frozenset[str],
+    *,
+    whole_block: bool,
+    known_names: Sequence[str] = (),
+) -> tuple[tuple[int, int], ...]:
+    spans_out: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for match in _A2_B1_PHRASAL_VERB_RE.finditer(text):
+        phrase = match.group(0)
+        if not _uncovered_a2_words(
+            (phrase.casefold(),),
+            difficulties,
+            owners,
+            block_text,
+            span_start,
+            span_end,
+            whole_block=whole_block,
+        ):
+            continue
+        span = (span_start + match.start(), span_start + match.end())
+        if span not in seen:
+            seen.add(span)
+            spans_out.append(span)
+            if len(spans_out) >= 3:
+                return tuple(spans_out)
+    if dominant_script(text) == "LATIN":
+        word_spans = non_core_a2_word_spans(text, known_names=known_names)
+        if word_spans:
+            uncovered = set(
+                _uncovered_a2_words(
+                    tuple(w for w, _, _ in word_spans),
+                    difficulties,
+                    owners,
+                    block_text,
+                    span_start,
+                    span_end,
+                    whole_block=whole_block,
+                )
+            )
+            for word, local_s, local_e in word_spans:
+                if word not in uncovered:
+                    continue
+                span = (span_start + local_s, span_start + local_e)
+                if span not in seen and not any(
+                    span[0] < ex[1] and ex[0] < span[1] for ex in seen
+                ):
+                    seen.add(span)
+                    spans_out.append(span)
+                    if len(spans_out) >= 3:
+                        break
+    return tuple(spans_out)
+
+
+def _materialize_a2_glossary_difficulties(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+    plan_items: Sequence[TreatmentPlanItemResponse],
+    difficulties: Sequence,
+    blocks_by_id: Mapping[str, DocumentBlock],
+    block_ids_by_alias: Mapping[str, str],
+    stoplist_spans_by_block: Mapping[str, tuple[tuple[int, int], ...]],
+    *,
+    known_names: Sequence[str] = (),
+) -> tuple:
+    """Append canonical `vocabulary`/`lexical_hint` difficulties for final GLOSSARY_ONLY spans."""
+    is_quoted = isinstance(payload, PedagogicalAnalysisResponse) or isinstance(
+        getattr(payload, "content_plan", None), QuotedContentPlanResponse
+    )
+    is_domain_plan = isinstance(payload, ChapterAnalysisResponse) and isinstance(
+        payload.content_plan, ContentPlanResponse
+    )
+    if not is_quoted and not is_domain_plan:
+        return tuple(difficulties)
+    from linguary.application.context_builder import _analysis_visible_origins
+
+    existing_ids = {d.id for d in difficulties}
+    appended: list = []
+    for item in plan_items:
+        block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+        if block is None:
+            continue
+        owners = frozenset(part for part in (item.source_block_id, block.id) if part)
+        # Determine final GLOSSARY_ONLY slices of this block.
+        glossary_slices: list[tuple[int, int, bool]] = []
+        if item.segments:
+            spans = block.segment_spans
+            sentence_bounds = _sentence_bounds_by_index(block)
+            sentence_modes: dict[int, list[BlockTreatment]] = {}
+            for seg in item.segments:
+                if 1 <= seg.index <= len(spans):
+                    sentence_modes.setdefault(spans[seg.index - 1].sentence_index, []).append(
+                        seg.treatment
+                    )
+            for s_idx, modes in sentence_modes.items():
+                if strongest_treatment(modes) is BlockTreatment.GLOSSARY_ONLY:
+                    s_start, s_end = sentence_bounds[s_idx]
+                    glossary_slices.append((s_start, s_end, len(sentence_modes) == 1))
+        elif item.treatment is BlockTreatment.GLOSSARY_ONLY:
+            glossary_slices.append((0, len(block.text), True))
+        if not glossary_slices:
+            continue
+
+        candidate_spans: list[tuple[int, int]] = []
+        for s_start, s_end in stoplist_spans_by_block.get(block.id, ()):
+            if any(g_start <= s_start and s_end <= g_end for g_start, g_end, _ in glossary_slices):
+                candidate_spans.append((s_start, s_end))
+        for g_start, g_end, whole_block in glossary_slices:
+            if any(g_start <= s and e <= g_end for s, e in candidate_spans):
+                continue
+            if not _has_difficulty_in_range(
+                difficulties, owners, block.text, g_start, g_end, whole_block=whole_block
+            ):
+                for span in _uncovered_spans_in_slice(
+                    block.text[g_start:g_end],
+                    block.text,
+                    g_start,
+                    g_end,
+                    difficulties,
+                    owners,
+                    whole_block=whole_block,
+                    known_names=known_names,
+                ):
+                    if span not in candidate_spans:
+                        candidate_spans.append(span)
+        if not candidate_spans:
+            continue
+
+        visible_text, origins = _analysis_visible_origins(block)
+        origin_set = set(origins)
+        occupied = _resolved_anchor_spans_for_block(difficulties, owners, block.text)
+        # Deduplicate and cap at 3 new synthesized hints per block.
+        added_for_block = 0
+        for s_start, s_end in candidate_spans:
+            if added_for_block >= 3:
+                break
+            if not (0 <= s_start < s_end <= len(block.text)):
+                continue
+            if (s_start, s_end) in occupied:
+                continue
+            if any(pos not in origin_set for pos in range(s_start, s_end)):
+                continue
+            quote = block.text[s_start:s_end]
+            if not quote.strip():
+                continue
+            visible_matches = _quote_spans(visible_text, quote)
+            source_matches = _quote_spans(block.text, quote)
+            if not visible_matches:
+                continue
+            point = (
+                RequiredPoint(
+                    "p1",
+                    f"Дать краткую контекстную словарную подсказку для «{quote}».",
+                ),
+            )
+            seq = 1
+            while f"auto-vocab-{item.source_block_id}-{seq}" in existing_ids:
+                seq += 1
+            diff_id = f"auto-vocab-{item.source_block_id}-{seq}"
+            if is_quoted:
+                if len(visible_matches) == 1 and len(source_matches) == 1:
+                    anchor = QuotedSourceAnchorResponse(item.source_block_id, quote)
+                elif visible_text == block.text:
+                    anchor = QuotedSourceAnchorResponse(
+                        item.source_block_id, quote, start=s_start, end=s_end
+                    )
+                else:
+                    # Repeated quote in a block whose visible text differs from source text:
+                    # skip rather than emit an offset that could conflict across source_offsets modes.
+                    continue
+                appended.append(
+                    QuotedDifficultyResponse(
+                        id=diff_id,
+                        anchors=(anchor,),
+                        owner_block_id=item.source_block_id,
+                        kind="vocabulary",
+                        priority="useful",
+                        help_kind="lexical_hint",
+                        required_points=point,
+                    )
+                )
+            else:
+                anchor = SourceAnchor(
+                    block_id=item.source_block_id,
+                    start=s_start,
+                    end=s_end,
+                    quote=quote,
+                )
+                appended.append(
+                    Difficulty(
+                        id=diff_id,
+                        anchors=(anchor,),
+                        owner_block_id=item.source_block_id,
+                        kind="vocabulary",
+                        priority="useful",
+                        help_kind="lexical_hint",
+                        required_points=point,
+                    )
+                )
+            existing_ids.add(diff_id)
+            occupied.add((s_start, s_end))
+            added_for_block += 1
+    if not appended:
+        return tuple(difficulties)
+    return (*difficulties, *appended)
+
+
+def normalize_pedagogical_response(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+    blocks: Sequence[DocumentBlock],
+    block_ids_by_alias: Mapping[str, str],
+    *,
+    reader_level: str | None = None,
+    english_help: bool = False,
+    known_names: Sequence[str] = (),
+) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
+    """Unified 5-step normalization pipeline for pedagogical/chapter analysis responses.
+
+    1. `normalize_difficulty_kinds` (all reader levels)
+    2. A2 treatment promotion/demotion (only `reader_level == "a2"` and `not english_help`)
+    3. `unify_verse_stanza_treatments` (all reader levels except `english_help`)
+    4. Switch `help_kind` on promoted/demoted model difficulties + A2 forward pruning
+    5. Materialize `auto-vocab` difficulties strictly on final `GLOSSARY_ONLY` spans (A2)
+    """
+    is_a2 = (reader_level or "").strip().lower() == "a2" and not english_help
+
+    # Step 1: Fix provably contradictory difficulty kinds before A2 rules inspect kind.
+    payload = normalize_difficulty_kinds(payload, blocks, block_ids_by_alias)
+    if is_a2:
+        payload = _drop_unevidenced_before_you_read(payload)
+
+    blocks_by_id = {block.id: block for block in blocks}
+    difficulties = _response_difficulties(payload)
+    covered_points = _covered_byr_points(payload)
+    original_items = tuple(payload.treatment_plan)
+    items: list[TreatmentPlanItemResponse] = list(original_items)
+    demoted_blocks: list[frozenset[str]] = []
+    was_demoted_flags: list[bool] = [False] * len(original_items)
+    meaningful_heading_ids: set[str] = set()
+    numbered_heading_ids: set[str] = set()
+    stoplist_spans_by_block: dict[str, tuple[tuple[int, int], ...]] = {}
+    changed = False
+
+    # Step 2: A2 dialogue & stoplist normalization (collecting candidate spans without materializing yet).
+    if is_a2:
+        for idx, item in enumerate(original_items):
+            block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+            if block is None:
+                continue
+            updated = item
+            demoted = None
+            owners = frozenset(part for part in (item.source_block_id, block.id) if part)
+            if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
+                updated = _force_block_treatment(updated, BlockTreatment.TRANSLATE)
+                meaningful_heading_ids.update(owners)
+                demoted = None
+            elif block.type is BlockType.HEADING:
+                updated = _force_block_treatment(updated, BlockTreatment.READ_AS_IS)
+                meaningful_heading_ids.update(owners)
+                numbered_heading_ids.update(owners)
+                demoted = None
+            else:
+                if block.type in _DIALOGUE_BLOCK_TYPES:
+                    updated, _ = _promote_dialogue_item(item, block, difficulties)
+                was_demoted = False
+                if block.type in _DEMOTABLE_BLOCK_TYPES:
+                    after_demote, demoted = _demote_elementary_reply(
+                        item, updated, block, difficulties, known_names=known_names
+                    )
+                    was_demoted = after_demote is not updated
+                    updated = after_demote
+                if not was_demoted and block.type in _DIALOGUE_BLOCK_TYPES:
+                    updated, stoplist_demoted, spans = _promote_a2_stoplist_item(
+                        updated, block, difficulties, owners, known_names=known_names
+                    )
+                    if stoplist_demoted is not None:
+                        demoted = stoplist_demoted
+                    if spans:
+                        stoplist_spans_by_block[block.id] = spans
+                was_demoted_flags[idx] = was_demoted
+            if updated is not item:
+                changed = True
+            items[idx] = updated
+            if demoted is not None:
+                demoted_blocks.append(demoted)
+
+    # Step 3: Unify verse/poem stanzas across all reader levels (except english_help).
+    if not english_help:
+        unified_items, verse_changed = unify_verse_stanza_treatments(
+            items, blocks, block_ids_by_alias, english_help=english_help,
+        )
+        if verse_changed:
+            items = list(unified_items)
+            changed = True
+            # Prune stale demotion state for any block lifted to full TRANSLATE by verse unification.
+            promoted_full_translate_owners: set[str] = set()
+            for idx, upd in enumerate(items):
+                all_translate = upd.treatment is BlockTreatment.TRANSLATE and (
+                    not upd.segments
+                    or all(seg.treatment is BlockTreatment.TRANSLATE for seg in upd.segments)
+                )
+                if all_translate:
+                    was_demoted_flags[idx] = False
+                    block = _block_for_plan_item(upd.source_block_id, blocks_by_id, block_ids_by_alias)
+                    promoted_full_translate_owners.add(upd.source_block_id)
+                    if block is not None:
+                        promoted_full_translate_owners.add(block.id)
+            if promoted_full_translate_owners and demoted_blocks:
+                demoted_blocks = [
+                    owners for owners in demoted_blocks
+                    if not (owners & promoted_full_translate_owners)
+                ]
+
+    # Step 4: Compute promoted blocks (from original -> post-step-3 items) and update model difficulties.
+    promoted_blocks: list[_PromotedBlock] = []
+    translate_ids: set[str] = set()
+    for idx, (orig, upd) in enumerate(zip(original_items, items, strict=True)):
+        block = _block_for_plan_item(orig.source_block_id, blocks_by_id, block_ids_by_alias)
+        if block is None:
+            continue
+        owners = frozenset(part for part in (orig.source_block_id, block.id) if part)
+        if upd.treatment is BlockTreatment.TRANSLATE:
+            translate_ids.update(owners)
+        if not was_demoted_flags[idx]:
+            promoted = _compute_promoted_block(orig, upd, block, owners)
+            if promoted is not None and not any(owners == d for d in demoted_blocks):
+                promoted_blocks.append(promoted)
+
+    pruned_removed_points: set[tuple[str, str]] = set()
+    point_id_remaps: dict[tuple[str, str], str] = {}
+    if is_a2:
+        switched_list = []
+        for difficulty in difficulties:
+            after_promo = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
+            if after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty):
+                # Never promote an auto-synthesized vocabulary hint into a TRANSLATE explanation.
+                for pt in difficulty.required_points:
+                    pruned_removed_points.add((difficulty.id, pt.id))
+                continue
+            switched_list.append(
+                _prune_forward_difficulty_references(
+                    _switch_demoted_hint(after_promo, demoted_blocks),
+                    blocks,
+                    block_ids_by_alias,
+                    point_id_remaps=point_id_remaps,
+                    removed_points=pruned_removed_points,
+                )
+            )
+        switched = tuple(switched_list)
+        kept = tuple(
+            difficulty for difficulty in switched
+            if not _is_unevidenced_trivial_grammar(
+                difficulty,
+                meaningful_heading_ids,
+                translate_ids,
+                covered_points,
+                numbered_heading_ids,
+            )
+        )
+    else:
+        kept_list = []
+        for difficulty in difficulties:
+            after_promo = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
+            if after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty):
+                for pt in difficulty.required_points:
+                    pruned_removed_points.add((difficulty.id, pt.id))
+                continue
+            kept_list.append(after_promo)
+        kept = tuple(kept_list)
+
+    # Step 5: Materialize auto-vocab difficulties strictly for final A2 GLOSSARY_ONLY blocks/segments.
+    if is_a2:
+        final_difficulties = _materialize_a2_glossary_difficulties(
+            payload,
+            items,
+            kept,
+            blocks_by_id,
+            block_ids_by_alias,
+            stoplist_spans_by_block,
+            known_names=known_names,
+        )
+    else:
+        final_difficulties = kept
+
+    if not changed and final_difficulties == tuple(difficulties):
+        return payload
+    plan = tuple(items)
+    remapped_difficulty_ids = {diff_id for diff_id, _ in point_id_remaps}
+    removed_points = pruned_removed_points | _removed_point_ids(
+        tuple(d for d in difficulties if d.id not in remapped_difficulty_ids),
+        final_difficulties,
+    )
+    return _replace_payload_difficulties(
+        payload,
+        final_difficulties,
+        treatment_plan=plan,
+        before_you_read_evidence=_evidence_without_removed_points(
+            _before_you_read_evidence(payload),
+            removed_points,
+            point_id_remaps,
+        ),
+    )
 
 
 def normalize_a2_dialogue_response(
@@ -4914,155 +5839,16 @@ def normalize_a2_dialogue_response(
     english_help: bool = False,
     known_names: Sequence[str] = (),
 ) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
-    """Promote non-elementary quoted A2 dialogue and keep a short elementary reply light.
-
-    Quoted dialogue stays light up to 15 words (or 8 words when it contains
-    dialect or an idiom) unless the quotes have a subordinator, question tag,
-    or long dash clause, or the remark uses an uncovered non-basic speech verb.
-    A model TRANSLATE on an elementary reply of at most eight words, with a
-    basic speech verb and at most two phrases, drops to GLOSSARY_ONLY when it
-    has a vocabulary difficulty and to READ_AS_IS otherwise. A2 without English
-    help clears before_you_read when nothing cites it. Promoting a block to
-    TRANSLATE retargets unbacked lexical hints on that block to explanation. A
-    meaningful chapter heading becomes TRANSLATE and loses an unevidenced
-    grammar note. A short READ_AS_IS line with a listed B1+ word or phrase
-    becomes GLOSSARY_ONLY when it owns vocabulary, and TRANSLATE otherwise.
-    TRANSLATE drops an unevidenced grammar quote of sounding relieved, and the
-    same closed A1–A2 anchors when the note is a grammar or vocabulary
-    explanation. A numbered chapter heading is forced to READ_AS_IS and loses
-    an unevidenced grammar note. For A2 difficulties, anchors pointing to later
-    blocks and required points quoting later blocks (any single-word quote or
-    later-only dialect lemma gloss for speech_style, or multi-word quotes for
-    other difficulty kinds) are pruned, leaving at least one point. Evidence
-    that cites a removed point is dropped with it.
-    """
+    """Backward-compatible wrapper delegating to `normalize_pedagogical_response`."""
     if reader_level != "a2" or english_help:
         return payload
-    payload = _drop_unevidenced_before_you_read(payload)
-    blocks_by_id = {block.id: block for block in blocks}
-    difficulties = _response_difficulties(payload)
-    covered_points = _covered_byr_points(payload)
-    items: list[TreatmentPlanItemResponse] = []
-    promoted_blocks: list[_PromotedBlock] = []
-    demoted_blocks: list[frozenset[str]] = []
-    meaningful_heading_ids: set[str] = set()
-    numbered_heading_ids: set[str] = set()
-    translate_ids: set[str] = set()
-    changed = False
-    for item in payload.treatment_plan:
-        block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
-        if block is None:
-            items.append(item)
-            continue
-        updated = item
-        promoted: _PromotedBlock | None = None
-        demoted = None
-        owners = frozenset(part for part in (item.source_block_id, block.id) if part)
-        if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
-            had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY or any(
-                segment.treatment is BlockTreatment.GLOSSARY_ONLY for segment in item.segments
-            )
-            updated = _force_block_treatment(updated, BlockTreatment.TRANSLATE)
-            meaningful_heading_ids.update(owners)
-            promoted = (
-                _PromotedBlock(owners=owners, had_glossary=had_glossary)
-                if item.treatment is not BlockTreatment.TRANSLATE
-                else None
-            )
-            demoted = None
-        elif block.type is BlockType.HEADING:
-            updated = _force_block_treatment(updated, BlockTreatment.READ_AS_IS)
-            meaningful_heading_ids.update(owners)
-            numbered_heading_ids.update(owners)
-            promoted = None
-            demoted = None
-        else:
-            if block.type in _DIALOGUE_BLOCK_TYPES:
-                updated, _ = _promote_dialogue_item(item, block, difficulties)
-            was_demoted = False
-            if block.type in _DEMOTABLE_BLOCK_TYPES:
-                after_demote, demoted = _demote_elementary_reply(
-                    item, updated, block, difficulties, known_names=known_names
-                )
-                was_demoted = after_demote is not updated
-                updated = after_demote
-            if not was_demoted and block.type in _DIALOGUE_BLOCK_TYPES:
-                updated, stoplist_demoted = _promote_a2_stoplist_item(
-                    updated, block, difficulties, owners, known_names=known_names
-                )
-                if stoplist_demoted is not None:
-                    demoted = stoplist_demoted
-            if not was_demoted:
-                promoted = _compute_promoted_block(item, updated, block, owners)
-        if updated is not item:
-            changed = True
-        items.append(updated)
-        if updated.treatment is BlockTreatment.TRANSLATE:
-            translate_ids.update(owners)
-        if promoted is not None and demoted is None:
-            promoted_blocks.append(promoted)
-        if demoted is not None:
-            demoted_blocks.append(demoted)
-    pruned_removed_points: set[tuple[str, str]] = set()
-    point_id_remaps: dict[tuple[str, str], str] = {}
-    switched = tuple(
-        _prune_forward_difficulty_references(
-            _switch_demoted_hint(
-                _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
-                demoted_blocks,
-            ),
-            blocks,
-            block_ids_by_alias,
-            point_id_remaps=point_id_remaps,
-            removed_points=pruned_removed_points,
-        )
-        for difficulty in difficulties
-    )
-    kept = tuple(
-        difficulty for difficulty in switched
-        if not _is_unevidenced_trivial_grammar(
-            difficulty,
-            meaningful_heading_ids,
-            translate_ids,
-            covered_points,
-            numbered_heading_ids,
-        )
-    )
-    if not changed and kept == tuple(difficulties):
-        return payload
-    switched = kept
-    plan = tuple(items)
-    remapped_difficulty_ids = {diff_id for diff_id, _ in point_id_remaps}
-    removed_points = pruned_removed_points | _removed_point_ids(
-        tuple(d for d in difficulties if d.id not in remapped_difficulty_ids),
-        switched,
-    )
-    if isinstance(payload, PedagogicalAnalysisResponse):
-        return replace(
-            payload,
-            treatment_plan=plan,
-            difficulties=switched,
-            before_you_read_evidence=_evidence_without_removed_points(
-                payload.before_you_read_evidence,
-                removed_points,
-                point_id_remaps,
-            ),
-        )
-    content_plan = payload.content_plan
-    if content_plan is None:
-        return replace(payload, treatment_plan=plan)
-    return replace(
+    return normalize_pedagogical_response(
         payload,
-        treatment_plan=plan,
-        content_plan=replace(
-            content_plan,
-            difficulties=switched,
-            before_you_read_evidence=_evidence_without_removed_points(
-                content_plan.before_you_read_evidence,
-                removed_points,
-                point_id_remaps,
-            ),
-        ),
+        blocks,
+        block_ids_by_alias,
+        reader_level=reader_level,
+        english_help=english_help,
+        known_names=known_names,
     )
 
 
@@ -5588,6 +6374,33 @@ def _uncovered_a2_words(
     )
 
 
+def _single_b1_reporting_verb_span(
+    text: str,
+    span_start: int,
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+    span_end: int,
+    *,
+    whole_block: bool,
+) -> tuple[tuple[int, int], ...]:
+    for match in re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)?", text):
+        token = match.group(0).casefold()
+        if token in _SINGLE_B1_REPORTING_VERBS:
+            if _uncovered_a2_words(
+                (token,),
+                difficulties,
+                owners,
+                block_text,
+                span_start,
+                span_end,
+                whole_block=whole_block,
+            ):
+                return ((span_start + match.start(), span_start + match.end()),)
+            return ()
+    return ()
+
+
 def _read_as_is_stoplist_mode(
     text: str,
     block_text: str,
@@ -5598,9 +6411,9 @@ def _read_as_is_stoplist_mode(
     *,
     whole_block: bool,
     known_names: Sequence[str] = (),
-) -> BlockTreatment | None:
+) -> _StoplistDecision | None:
     if _has_a2_nonlexical_stoplist(text):
-        return BlockTreatment.TRANSLATE
+        return _StoplistDecision(BlockTreatment.TRANSLATE)
     words = expression_words(text)
     if not words:
         return None
@@ -5610,16 +6423,42 @@ def _read_as_is_stoplist_mode(
     ):
         if _owns_vocabulary_in_range(
             difficulties, owners, block_text, span_start, span_end, whole_block=whole_block
-        ) or _is_single_b1_reporting_verb_only(words):
-            return BlockTreatment.GLOSSARY_ONLY
-        return BlockTreatment.TRANSLATE
-    if _has_b1_phrasal_verb(text):
-        return BlockTreatment.GLOSSARY_ONLY
+        ):
+            return _StoplistDecision(BlockTreatment.GLOSSARY_ONLY)
+        if _is_single_b1_reporting_verb_only(words):
+            return _StoplistDecision(
+                BlockTreatment.GLOSSARY_ONLY,
+                _single_b1_reporting_verb_span(
+                    text,
+                    span_start,
+                    difficulties,
+                    owners,
+                    block_text,
+                    span_end,
+                    whole_block=whole_block,
+                ),
+            )
+        return _StoplistDecision(BlockTreatment.TRANSLATE)
+    phrasal_match = _A2_B1_PHRASAL_VERB_RE.search(text)
+    if phrasal_match is not None:
+        phrase = phrasal_match.group(0)
+        spans: tuple[tuple[int, int], ...] = ()
+        if _uncovered_a2_words(
+            (phrase.casefold(),),
+            difficulties,
+            owners,
+            block_text,
+            span_start,
+            span_end,
+            whole_block=whole_block,
+        ):
+            spans = ((span_start + phrasal_match.start(), span_start + phrasal_match.end()),)
+        return _StoplistDecision(BlockTreatment.GLOSSARY_ONLY, spans)
     if dominant_script(text) == "LATIN":
-        unknown = non_core_a2_words(text, known_names=known_names)
-        if unknown:
+        word_spans = non_core_a2_word_spans(text, known_names=known_names)
+        if word_spans:
             uncovered = _uncovered_a2_words(
-                unknown,
+                tuple(word for word, _, _ in word_spans),
                 difficulties,
                 owners,
                 block_text,
@@ -5628,11 +6467,15 @@ def _read_as_is_stoplist_mode(
                 whole_block=whole_block,
             )
             if uncovered:
-                return (
-                    BlockTreatment.TRANSLATE
-                    if len(uncovered) > 3
-                    else BlockTreatment.GLOSSARY_ONLY
+                if len(uncovered) > 3:
+                    return _StoplistDecision(BlockTreatment.TRANSLATE)
+                uncovered_set = set(uncovered)
+                target_spans = tuple(
+                    (span_start + local_s, span_start + local_e)
+                    for word, local_s, local_e in word_spans
+                    if word in uncovered_set
                 )
+                return _StoplistDecision(BlockTreatment.GLOSSARY_ONLY, target_spans)
     return None
 
 
@@ -5660,7 +6503,7 @@ def _promote_a2_stoplist_item(
     owners: frozenset[str],
     *,
     known_names: Sequence[str] = (),
-) -> tuple[TreatmentPlanItemResponse, frozenset[str] | None]:
+) -> tuple[TreatmentPlanItemResponse, frozenset[str] | None, tuple[tuple[int, int], ...]]:
     if item.segments:
         spans = block.segment_spans
         sentence_bounds = _sentence_bounds_by_index(block)
@@ -5671,6 +6514,7 @@ def _promote_a2_stoplist_item(
                     spans[segment.index - 1].sentence_index, []
                 ).append(segment)
         lifted_sentences: dict[int, BlockTreatment] = {}
+        collected_spans: list[tuple[int, int]] = []
         for sentence_index, segs in sentence_segments.items():
             modes = tuple(seg.treatment for seg in segs)
             if not modes:
@@ -5681,8 +6525,9 @@ def _promote_a2_stoplist_item(
             s_start, s_end = sentence_bounds[sentence_index]
             s_text = block.text[s_start:s_end]
             target: BlockTreatment | None = None
+            target_spans: tuple[tuple[int, int], ...] = ()
             if current_mode is BlockTreatment.READ_AS_IS:
-                target = _read_as_is_stoplist_mode(
+                decision = _read_as_is_stoplist_mode(
                     s_text,
                     block.text,
                     s_start,
@@ -5692,6 +6537,9 @@ def _promote_a2_stoplist_item(
                     whole_block=(len(sentence_segments) == 1),
                     known_names=known_names,
                 )
+                if decision is not None:
+                    target = decision.mode
+                    target_spans = decision.target_spans
             elif current_mode is BlockTreatment.GLOSSARY_ONLY:
                 if _glossary_only_needs_stoplist_translation(
                     s_text,
@@ -5705,8 +6553,10 @@ def _promote_a2_stoplist_item(
                     target = BlockTreatment.TRANSLATE
             if target is not None and target is not current_mode:
                 lifted_sentences[sentence_index] = target
+                if target is BlockTreatment.GLOSSARY_ONLY and target_spans:
+                    collected_spans.extend(target_spans)
         if not lifted_sentences:
-            return item, None
+            return item, None, ()
         new_segments = tuple(
             SegmentTreatmentResponse(
                 segment.index,
@@ -5726,7 +6576,7 @@ def _promote_a2_stoplist_item(
             and len(sentence_segments) == 1
             else None
         )
-        return updated, demoted
+        return updated, demoted, tuple(collected_spans)
 
     if item.treatment is BlockTreatment.READ_AS_IS:
         sentence_bounds = _sentence_bounds_by_index(block)
@@ -5736,11 +6586,12 @@ def _promote_a2_stoplist_item(
             else ((0, len(block.text)),)
         )
         triggered: list[BlockTreatment] = []
+        collected_spans: list[tuple[int, int]] = []
         if _has_a2_nonlexical_stoplist(block.text):
             triggered.append(BlockTreatment.TRANSLATE)
         else:
             for s_start, s_end in slices:
-                mode = _read_as_is_stoplist_mode(
+                decision = _read_as_is_stoplist_mode(
                     block.text[s_start:s_end],
                     block.text,
                     s_start,
@@ -5750,14 +6601,17 @@ def _promote_a2_stoplist_item(
                     whole_block=(len(slices) == 1),
                     known_names=known_names,
                 )
-                if mode is not None:
-                    triggered.append(mode)
+                if decision is not None:
+                    triggered.append(decision.mode)
+                    if decision.mode is BlockTreatment.GLOSSARY_ONLY and decision.target_spans:
+                        collected_spans.extend(decision.target_spans)
         if not triggered:
-            return item, None
+            return item, None, ()
         mode = strongest_treatment(triggered)
         updated = _force_block_treatment(item, mode)
         demoted = owners if mode is BlockTreatment.GLOSSARY_ONLY else None
-        return updated, demoted
+        final_spans = tuple(collected_spans) if mode is BlockTreatment.GLOSSARY_ONLY else ()
+        return updated, demoted, final_spans
 
     if item.treatment is BlockTreatment.GLOSSARY_ONLY:
         if _glossary_only_needs_stoplist_translation(
@@ -5769,9 +6623,9 @@ def _promote_a2_stoplist_item(
             owners,
             whole_block=True,
         ):
-            return _force_block_treatment(item, BlockTreatment.TRANSLATE), None
+            return _force_block_treatment(item, BlockTreatment.TRANSLATE), None, ()
 
-    return item, None
+    return item, None, ()
 
 
 def _compute_promoted_block(
@@ -5782,6 +6636,41 @@ def _compute_promoted_block(
 ) -> _PromotedBlock | None:
     if updated.treatment is not BlockTreatment.TRANSLATE:
         return None
+    if updated.segments:
+        orig_by_index = {segment.index: segment.treatment for segment in original.segments}
+        all_updated_translate = all(
+            segment.treatment is BlockTreatment.TRANSLATE for segment in updated.segments
+        )
+        if original.treatment is not BlockTreatment.TRANSLATE and all_updated_translate:
+            had_glossary = original.treatment is BlockTreatment.GLOSSARY_ONLY or any(
+                segment.treatment is BlockTreatment.GLOSSARY_ONLY
+                for segment in original.segments
+            )
+            return _PromotedBlock(
+                owners=owners,
+                had_glossary=had_glossary,
+                block_text=block.text,
+                promoted_ranges=None,
+            )
+        spans = block.segment_spans
+        promoted_ranges: list[tuple[int, int]] = []
+        had_glossary = False
+        for segment in updated.segments:
+            prev = orig_by_index.get(segment.index, original.treatment)
+            if prev is not BlockTreatment.TRANSLATE and segment.treatment is BlockTreatment.TRANSLATE:
+                if prev is BlockTreatment.GLOSSARY_ONLY:
+                    had_glossary = True
+                if 1 <= segment.index <= len(spans):
+                    span = spans[segment.index - 1]
+                    promoted_ranges.append((span.start, span.end))
+        if not promoted_ranges:
+            return None
+        return _PromotedBlock(
+            owners=owners,
+            had_glossary=had_glossary,
+            block_text=block.text,
+            promoted_ranges=tuple(promoted_ranges),
+        )
     if original.treatment is not BlockTreatment.TRANSLATE:
         had_glossary = original.treatment is BlockTreatment.GLOSSARY_ONLY or any(
             segment.treatment is BlockTreatment.GLOSSARY_ONLY
@@ -5793,28 +6682,7 @@ def _compute_promoted_block(
             block_text=block.text,
             promoted_ranges=None,
         )
-    if not original.segments or not updated.segments:
-        return None
-    orig_by_index = {segment.index: segment.treatment for segment in original.segments}
-    spans = block.segment_spans
-    promoted_ranges: list[tuple[int, int]] = []
-    had_glossary = False
-    for segment in updated.segments:
-        prev = orig_by_index.get(segment.index)
-        if prev is not None and prev is not BlockTreatment.TRANSLATE and segment.treatment is BlockTreatment.TRANSLATE:
-            if prev is BlockTreatment.GLOSSARY_ONLY:
-                had_glossary = True
-            if 1 <= segment.index <= len(spans):
-                span = spans[segment.index - 1]
-                promoted_ranges.append((span.start, span.end))
-    if not promoted_ranges:
-        return None
-    return _PromotedBlock(
-        owners=owners,
-        had_glossary=had_glossary,
-        block_text=block.text,
-        promoted_ranges=tuple(promoted_ranges),
-    )
+    return None
 
 
 def _is_meaningful_chapter_title(text: str) -> bool:

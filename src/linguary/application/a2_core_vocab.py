@@ -271,8 +271,8 @@ km cm mm kg pm
 
 # Basic interjections and discourse markers.
 _INTERJECTIONS: frozenset[str] = _words("""
-ah aha bye eh goodbye hello hey hi hm hmm hooray hurray
-oh oops ouch pardon please shh shoo sorry thanks thank
+ah aha bye eh er erm goodbye ha heh hello hey hi hm hmm hooray huh hurray
+mhm oh oops ouch ow pardon phew please psst shh shoo sorry thanks thank
 ugh uh um welcome well wow yay bravo
 """)
 
@@ -933,6 +933,39 @@ _TITLE_WORDS: frozenset[str] = frozenset({
     "mr", "mrs", "ms", "miss", "dr", "prof", "st", "sir", "madam",
 })
 
+#: Short English function words allowed in lowercase inside Title Case phrases.
+_TITLE_CASE_MINOR_WORDS: frozenset[str] = frozenset({
+    "a", "an", "and", "as", "at", "but", "by", "for", "from",
+    "in", "into", "nor", "of", "off", "on", "onto", "or",
+    "out", "over", "per", "so", "than", "the", "to", "up", "via", "with", "yet",
+})
+
+
+def _has_comma_between(text: str, left: re.Match[str], right: re.Match[str]) -> bool:
+    return "," in text[left.end():right.start()]
+
+
+def _trailing_by_attribution_start(
+    matches: tuple[re.Match[str], ...],
+    seg_start: int,
+    seg_end: int,
+) -> int | None:
+    """Return index of lowercase `by` when followed only by 1-3 capitalized author tokens."""
+    for pos in range(seg_end - 2, seg_start, -1):
+        raw = matches[pos].group(0)
+        if raw != "by":
+            continue
+        tail = matches[pos + 1:seg_end]
+        if not (1 <= len(tail) <= 3):
+            continue
+        if all(
+            token_match.group(0)[0].isupper()
+            and any(ch.isalpha() for ch in token_match.group(0))
+            for token_match in tail
+        ):
+            return pos
+    return None
+
 
 def _is_title_case_phrase_token(
     text: str,
@@ -940,9 +973,18 @@ def _is_title_case_phrase_token(
     idx: int,
     known_tokens: frozenset[str],
 ) -> bool:
-    """Return True if a mid-sentence capitalized token belongs to an all-Title-Case phrase."""
+    """Return True if a mid-sentence capitalized token belongs to a Title Case phrase.
+
+    Permits standard English Title Case lowercase minor words (e.g. `to`, `of`, `and`)
+    inside multi-word titles (`>= 3` capitalized tokens), while stopping at commas,
+    titled person phrases (`Mr. Dursley of ...`), and trailing `by <Author>` attributions.
+    """
     seg_start = idx
-    while seg_start > 0 and not _is_sentence_or_speech_start(text, matches[seg_start].start()):
+    while (
+        seg_start > 0
+        and not _is_sentence_or_speech_start(text, matches[seg_start].start())
+        and not _has_comma_between(text, matches[seg_start - 1], matches[seg_start])
+    ):
         seg_start -= 1
     if idx <= seg_start:
         return False
@@ -953,22 +995,47 @@ def _is_title_case_phrase_token(
     prev_norm = _normalize_token(prev_match.group(0))
     if prev_norm in _TITLE_WORDS or _is_known_name(prev_norm, known_tokens):
         return False
+    if _normalize_token(matches[seg_start].group(0)) in _TITLE_WORDS:
+        return False
     seg_end = idx + 1
-    while seg_end < len(matches) and not _is_sentence_or_speech_start(text, matches[seg_end].start()):
+    while (
+        seg_end < len(matches)
+        and not _is_sentence_or_speech_start(text, matches[seg_end].start())
+        and not _has_comma_between(text, matches[seg_end - 1], matches[seg_end])
+    ):
         seg_end += 1
-    for seg_match in matches[seg_start:seg_end]:
-        token = seg_match.group(0)
-        if len(token) > 1 and any(ch.isalpha() for ch in token) and not token[0].isupper():
+    by_pos = _trailing_by_attribution_start(matches, seg_start, seg_end)
+    if by_pos is not None:
+        if idx >= by_pos:
             return False
-    return True
+        seg_end = by_pos
+    has_minor_word = False
+    capitalized_count = 0
+    for pos in range(seg_start, seg_end):
+        token = matches[pos].group(0)
+        if not any(ch.isalpha() for ch in token):
+            continue
+        if token[0].isupper():
+            capitalized_count += 1
+            continue
+        if (
+            seg_start < pos < seg_end - 1
+            and _normalize_token(token) in _TITLE_CASE_MINOR_WORDS
+        ):
+            has_minor_word = True
+            continue
+        return False
+    if has_minor_word:
+        return capitalized_count >= 3
+    return capitalized_count >= 2
 
 
-def non_core_a2_words(
+def non_core_a2_word_spans(
     text: str,
     *,
     known_names: Sequence[str] = (),
-) -> tuple[str, ...]:
-    """Return unique words in `text` outside the CEFR A1-A2 core, in order of appearance.
+) -> tuple[tuple[str, int, int], ...]:
+    """Return unique `(canonical_word, start, end)` spans outside CEFR A1-A2 core.
 
     Skips numbers, uppercase Roman numerals, single-character letters, tokens from
     `known_names`, and capitalized tokens not starting a sentence or direct speech
@@ -976,7 +1043,7 @@ def non_core_a2_words(
     part by part.
     """
     known_tokens = _known_name_tokens(known_names)
-    found: list[str] = []
+    found: list[tuple[str, int, int]] = []
     seen: set[str] = set()
 
     matches = tuple(_TOKEN_RE.finditer(text))
@@ -999,7 +1066,7 @@ def non_core_a2_words(
                 reported = _canonical_reported_word(norm)
                 if reported not in seen:
                     seen.add(reported)
-                    found.append(reported)
+                    found.append((reported, match.start(), match.end()))
                 continue
             if norm in A2_CORE_VOCABULARY:
                 continue
@@ -1018,13 +1085,22 @@ def non_core_a2_words(
                 reported = _canonical_reported_word(norm)
                 if reported not in seen:
                     seen.add(reported)
-                    found.append(reported)
+                    found.append((reported, match.start(), match.end()))
             continue
 
         if not _is_core_normalized(norm):
             reported = _canonical_reported_word(norm)
             if reported not in seen:
                 seen.add(reported)
-                found.append(reported)
+                found.append((reported, match.start(), match.end()))
 
     return tuple(found)
+
+
+def non_core_a2_words(
+    text: str,
+    *,
+    known_names: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Return unique words in `text` outside the CEFR A1-A2 core, in order of appearance."""
+    return tuple(word for word, _, _ in non_core_a2_word_spans(text, known_names=known_names))

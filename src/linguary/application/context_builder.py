@@ -221,6 +221,7 @@ _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Верни treatment_plan: source_block_id и treatment для каждого видимого b1..bN ровно один раз.
 Верни segments с режимом каждого сегмента, только если режим различается внутри блока, иначе [].
 Разные режимы внутри одного блока допустимы. Разные режимы внутри одного предложения запрещены.
+Стихотворные строфы (последовательные стихотворные строки) обрабатывай единым языковым режимом: не смешивай TRANSLATE с READ_AS_IS/GLOSSARY_ONLY между строками одной строфы.
 Если длинный блок содержит 3 и более сегментов ([bN.1]..[bN.k]) и в нём есть хотя бы 2 простых прозрачных предложения рядом со сложными предложениями, дроби блок через segments, оставляя простые предложения в READ_AS_IS или GLOSSARY_ONLY, а сложные в TRANSLATE (treatment блока равен сильнейшему режиму его сегментов). Пример заполненного элемента treatment_plan с segments: {{"source_block_id":"b7","treatment":"TRANSLATE","segments":[{{"index":1,"treatment":"READ_AS_IS"}},{{"index":2,"treatment":"TRANSLATE"}},{{"index":3,"treatment":"GLOSSARY_ONLY"}},{{"index":4,"treatment":"TRANSLATE"}}]}}.
 Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).
 Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
@@ -234,9 +235,9 @@ speech_style — диалект, акцент, особенности речи; 
 В блоках без перевода (GLOSSARY_ONLY, READ_AS_IS) проверяй каждое знаменательное слово выше уровня читателя (включая редкие значения знакомых слов и официальные титулы), но не добавляй подсказки на базовые слова A1 и прозрачные интернационализмы.
 Поле reader_chapter_summary (краткий пересказ для блока напоминания «Previously in Chapter», без служебного заголовка в начале текста) возвращай только если это требуется правилами уровня читателя ниже.
 parody — в required_points назвать исходный текст. Для parody и wordplay-пародий имён, прозвищ и титулов обязательно назови в required_points исходное имя или текст-прототип.
-Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
+Точно выбирай kind трудности: обычное незнакомое слово, редкое значение знакомого слова и глагол способа речи/движения — всегда vocabulary (никогда не wordplay и не idiom); wordplay — только реальный каламбур, двойной смысл или игра звучания/написания; idiom — только многословное устойчивое выражение с переносным значением. Для grammar, wordplay, parody, cultural_reference и semantic_relation всегда используй help_kind="explanation".
 Различай priority: ставь critical только когда без объяснения читатель неверно поймёт сюжет, логику, игру слов, сарказм, культурную отсылку или ключевую грамматическую конструкцию; ставь useful для вспомогательной лексики, оттенков значения и неосновных пояснений.
-lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR. В блоках и сегментах GLOSSARY_ONLY для отдельного незнакомого слова или короткого выражения без грамматической ловушки выбирай help_kind="lexical_hint", а help_kind="explanation" оставляй для грамматики, идиом, игры слов и смысловых связей.
+lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR. В блоках и сегментах GLOSSARY_ONLY для отдельного незнакомого слова или короткого выражения без грамматической ловушки выбирай kind="vocabulary" и help_kind="lexical_hint", а help_kind="explanation" оставляй для грамматики, идиом, игры слов, пародий, культурных отсылок и смысловых связей.
 Для TRANSLATE и READ_AS_IS используй explanation. Перевод и цитата не заменяют объяснение.
 В required_points и заметках для читателя уровня A2 запрещены названия грамматических времён (Past Perfect, Present Perfect, «прошедшее предшествующее время» и т. п.): объясняй смысл простыми словами — что произошло раньше другого события или как действие связано с моментом речи.
 cultural_reference — приоритетная трудность с help_kind="explanation", в том числе внутри блоков TRANSLATE. Пример: Bonfire Night — «Ночь костров», 5 ноября, костры и фейерверки.
@@ -286,7 +287,10 @@ _CONTENT_PLAN_ANALYSIS_V5 = (
         'quote == text[start:end]. '
         'Не исправляй цитату; subject_anchor проверяется отдельно от anchors.',
     )
-    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
+    + '\nОбычное незнакомое слово и глагол речи/движения — всегда vocabulary (не wordplay и не idiom); '
+    'для grammar, wordplay, parody, cultural_reference и semantic_relation всегда используй help_kind=explanation. '
+    'Стихотворные строфы обрабатывай единым языковым режимом.\n'
+    + 'Внешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
 )
 _CONTENT_PLAN_PROCESSING_V3 = """
 Профиль content-plan-v3, инструкция learner-quality-v3.1.
@@ -333,7 +337,9 @@ _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5 = (
         'Сохраняй точные привязки и степень',
         'Сохраняй дословные цитаты и степень',
     )
-    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
+    + '\nОбычное незнакомое слово и глагол речи/движения — всегда vocabulary (не wordplay и не idiom); '
+    'для grammar, wordplay, parody, cultural_reference и semantic_relation всегда используй help_kind=explanation.\n'
+    + 'Внешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
 )
 
 _ENGLISH_HELP_CONTENT_PLAN_PROCESSING = """\

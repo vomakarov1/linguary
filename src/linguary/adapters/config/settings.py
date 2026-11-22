@@ -26,6 +26,16 @@ from linguary.domain.name_translation import NameTranslationStrategy
 #: Supported reasoning effort levels for reasoning-capable LLM endpoints.
 SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
 
+#: Share of `max_output_tokens` reserved for reasoning tokens when only `reasoning_effort`
+#: is configured (integer percent, used to size analysis fragments safely).
+_REASONING_EFFORT_RESERVE_PCT: dict[str, int] = {
+    "none": 0,
+    "minimal": 15,
+    "low": 35,
+    "medium": 55,
+    "high": 75,
+}
+
 #: Provider of the initial implementation: HTTP API compatible with OpenAI chat completions
 #: and structured outputs (ADR § 3). The same adapter serves compatible gateways and local
 #: servers, so they do not have separate provider names.
@@ -223,20 +233,39 @@ class LLMSettings:
         if self.output_price_per_mtok is not None and self.output_price_per_mtok < 0:
             raise SettingsError("цена выходных токенов не может быть отрицательной")
 
+    def _budget_after_reasoning(self, total_output_tokens: int) -> int:
+        if self.reasoning_max_tokens is not None:
+            return max(1, total_output_tokens - self.reasoning_max_tokens)
+        if self.reasoning_effort is not None:
+            reserve_pct = _REASONING_EFFORT_RESERVE_PCT[self.reasoning_effort]
+            return max(1, (total_output_tokens * (100 - reserve_pct)) // 100)
+        return total_output_tokens
+
     @property
     def effective_output_token_budget(self) -> int | None:
-        """Visible output token budget after reserving explicit reasoning_max_tokens."""
+        """Visible output token budget after reserving reasoning tokens or effort share."""
         if self.max_output_tokens is None:
             return None
-        if self.reasoning_max_tokens is not None:
-            return max(1, self.max_output_tokens - self.reasoning_max_tokens)
-        return self.max_output_tokens
+        return self._budget_after_reasoning(self.max_output_tokens)
+
+    def effective_output_token_budget_for(self, default_max_output_tokens: int) -> int:
+        """Visible output token budget using `default_max_output_tokens` when unset."""
+        total = (
+            self.max_output_tokens
+            if self.max_output_tokens is not None
+            else default_max_output_tokens
+        )
+        return self._budget_after_reasoning(total)
 
     @property
     def effective_max_fragment_blocks(self) -> int:
         """Explicit limit or size calculated from available output tokens."""
         if self.max_fragment_blocks is not None:
             return self.max_fragment_blocks
+        if self.max_output_tokens is None and (
+            self.reasoning_effort is not None or self.reasoning_max_tokens is not None
+        ):
+            return fragment_blocks_for(self.effective_output_token_budget_for(32_768))
         return fragment_blocks_for(self.effective_output_token_budget)
 
     @property

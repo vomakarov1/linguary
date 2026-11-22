@@ -1655,7 +1655,7 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
     assert [segment.treatment for segment in normalized.treatment_plan[1].segments] == [
         BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY,
     ]
-    assert [item.help_kind for item in normalized.difficulties] == ['explanation', 'explanation']
+    assert [item.help_kind for item in normalized.difficulties] == ['explanation', 'lexical_hint']
     combined = ChapterAnalysisResponse(
         translation_instructions='Keep the voice.',
         chapter_summary='A speaker waits by the lane.',
@@ -1668,7 +1668,10 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
         combined, aliases, texts, visible_texts_by_alias=visible, blocks=(block, split_block),
     )
     assert validated is not None
-    assert [item.help_kind for item in validated.difficulties] == ['explanation', 'explanation']
+    assert {item.anchors[0].quote: item.help_kind for item in validated.difficulties} == {
+        'lane': 'explanation',
+        'slept': 'lexical_hint',
+    }
     fragment = FragmentAnalysis.of_response(
         combined,
         order=0,
@@ -2718,7 +2721,8 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
         BlockTreatment.TRANSLATE,
     ]
     kept = {item.id: item for item in normalized.difficulties}
-    assert set(kept) == {
+    model_kept = {k for k in kept if not k.startswith('auto-vocab-')}
+    assert model_kept == {
         'd-could',
         'd-could-grammar',
         'd-mixed',
@@ -2729,6 +2733,7 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
         'd-style-min',
         'd-style-one',
     }
+    assert 'auto-vocab-b1-1' in kept and kept['auto-vocab-b1-1'].help_kind == 'lexical_hint'
     assert [point.id for point in kept['d-style'].required_points] == [
         'p-yeh',
         'p-quoted-you',
@@ -3224,12 +3229,20 @@ def test_a2_trivial_anchors_keep_turn_back_dreadlocks_and_have_got_to():
     normalized = normalize_a2_dialogue_response(
         payload, blocks, aliases, reader_level='a2', english_help=False,
     )
-    assert {d.id for d in normalized.difficulties} == {
+    model_ids = {d.id for d in normalized.difficulties if not d.id.startswith('auto-vocab-')}
+    auto_ids = {d.id for d in normalized.difficulties if d.id.startswith('auto-vocab-')}
+    assert model_ids == {
         'd-turn-back',
         'd-dreadlocks',
         'd-got-to',
         'd-have-got-to',
     }
+    assert auto_ids == {f'auto-vocab-b{i}-1' for i in range(2, 8)}
+    assert all(
+        d.kind == 'vocabulary' and d.help_kind == 'lexical_hint'
+        for d in normalized.difficulties
+        if d.id in auto_ids
+    )
     assert [item.treatment for item in normalized.treatment_plan[1:]] == [
         BlockTreatment.GLOSSARY_ONLY,  # winked
         BlockTreatment.GLOSSARY_ONLY,  # chuckled

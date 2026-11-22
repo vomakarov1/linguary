@@ -592,3 +592,40 @@ def test_reasoning_settings_validation() -> None:
         LLMSettings(max_output_tokens=4096, reasoning_max_tokens=4096)
     with pytest.raises(SettingsError):
         LLMSettings(max_output_tokens=4096, reasoning_max_tokens=8192)
+
+
+@pytest.mark.parametrize(
+    ("effort", "max_tokens", "expected_budget"),
+    [
+        ("none", 32768, 32768),
+        ("minimal", 10000, 8500),
+        ("low", 32768, 21299),
+        ("medium", 10000, 4500),
+        ("high", 10000, 2500),
+    ],
+)
+def test_reasoning_effort_reserves_integer_output_budget_and_scales_fragments(
+    effort: str, max_tokens: int, expected_budget: int
+) -> None:
+    from linguary.application.analysis_merge import fragment_blocks_for
+
+    settings = LLMSettings(max_output_tokens=max_tokens, reasoning_effort=effort)
+    assert settings.effective_output_token_budget == expected_budget
+    assert settings.effective_output_token_budget_for(32768) == expected_budget
+    assert settings.effective_max_fragment_blocks == fragment_blocks_for(expected_budget)
+
+    default_budget_settings = LLMSettings(reasoning_effort=effort)
+    assert default_budget_settings.effective_output_token_budget is None
+    assert default_budget_settings.effective_output_token_budget_for(max_tokens) == expected_budget
+
+
+def test_reasoning_effort_budget_clamps_to_at_least_one_and_scales_default_fragments() -> None:
+    from linguary.application.analysis_merge import fragment_blocks_for
+
+    tiny = LLMSettings(max_output_tokens=1, reasoning_effort="high")
+    assert tiny.effective_output_token_budget == 1
+    assert tiny.effective_max_fragment_blocks == 1
+
+    unset_max = LLMSettings(reasoning_effort="high")
+    assert unset_max.effective_output_token_budget is None
+    assert unset_max.effective_max_fragment_blocks == fragment_blocks_for(8192)

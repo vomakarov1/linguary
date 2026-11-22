@@ -1405,12 +1405,12 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         )
     )
 
-    # Ch. 1 narrative attempt 1 triggers all five narrative validations in one pass:
+    # Ch. 1 narrative attempt 1 triggers all four blocking narrative validations in one pass
+    # (non-visual sound detail in visual_facts is sanitized deterministically rather than failing):
     # - chapter_summary in Russian (narrative_summary_language)
     # - scenes[].summary in English (scene_summary_language)
     # - conflicting assessment: sound + creative_adaptation (name_assessment_conflict)
     # - spoiler participant "Alexandra" on scene b1..b3 before first mention in b4 (spoiler_name_leak)
-    # - non-visual sound detail in visual_facts (non_visual_fact)
     ch1_nar_attempt1 = FakeReply.of_payload(
         _narrative_payload(
             block_count=6,
@@ -1790,13 +1790,13 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         assert "Послесветы" in ch1_nar_req1.input_text
         assert "непрозрачное=false" in ch1_nar_req1.input_text
 
-        # Ch. 1 narrative retry contains all five aggregated violation families.
+        # Ch. 1 narrative retry contains all four blocking violation families
+        # (non-visual visual_facts are sanitized deterministically rather than failing the chunk).
         ch1_nar_repair = ch1_nar_req2.repair_instructions[-1]
         assert "пересказ главы должен быть на языке оригинала (en)" in ch1_nar_repair
         assert "описание сцены должно быть на целевом языке (ru)" in ch1_nar_repair
         assert "несогласованная оценка перевода имени" in ch1_nar_repair
         assert "спойлер имени до первого упоминания в главе" in ch1_nar_repair
-        assert "визуальный факт содержит незрительное описание" in ch1_nar_repair
 
         # Ch. 1/2/3 pedagogical retries carry exact A2 summary violation diagnostics.
         assert "Present Simple с for + длительность" in ch1_ped_req2.repair_instructions[-1]
