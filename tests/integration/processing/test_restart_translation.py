@@ -42,7 +42,7 @@ async def make_partial_root(tmp_path):
         accepted = tuple(scope for scope in scopes if scope.status == "accepted")
         unfinished = tuple(scope for scope in scopes if scope.status not in {"accepted", "split"})
         assert len(accepted) == len(unfinished) == 1
-        assert root.reason == "limit"
+        assert root.reason == "scope_limit"
     return app, fake, document, run, task, root, accepted[0], unfinished[0]
 
 

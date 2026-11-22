@@ -22,7 +22,7 @@ async def test_restart_and_manual_retry_keep_scope_limit(tmp_path):
     assert completed[0].status == TaskStatus.FAILED
     with app.unit_of_work.transaction() as transaction:
         root, = transaction.work.list_roots('book-1', run_id=run.id)
-        assert root.calls_used == 3 and root.reason == 'limit'
+        assert root.calls_used == 3 and root.reason == 'scope_limit'
         root_id, root_key = root.id, root.root_key
     await app.aclose()
     later_fake = FakeLLMClient([translation_reply(2)])

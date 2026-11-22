@@ -12,7 +12,10 @@ nothing if they diverge.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, replace, asdict
 from contextvars import ContextVar
 from hashlib import sha256
@@ -21,19 +24,25 @@ from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
-from linguary.application.ports.llm import LLMClient, LLMContextCapacityError
+from linguary.application.ports.llm import (
+    LLMClient, LLMConfigurationError, LLMContextCapacityError, LLMProviderError,
+    LLMResponseFormatError, LLMTransportError,
+)
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.validators.pronunciation import (
     PronunciationSelection, PronunciationSkip, preserve_unavailable, resolve_pronunciation_anchor, verify_candidates,
 )
-from linguary.application.retry_policy import ResultValidationError, RetryPolicy, violation_of
+from linguary.application.retry_policy import (
+    ResultValidationError, RetryPolicy, _ERROR_TYPES, classify_error, violation_of,
+)
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
 from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_content_coverage, resolve_response_evidence, validate_content_coverage
+from linguary.domain.book_conditions import WorkStateError
 from linguary.domain.content_plan import ContentEvidence
 from linguary.domain import (
     BlockProcessingResult,
@@ -41,6 +50,7 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     DocumentSection,
+    ErrorType,
     GlossarySnapshot,
     TaskStatus,
     TaskType,
@@ -101,6 +111,7 @@ class TranslationCall:
         self._source_texts = source_texts
         self._validated_response = ContextVar(f"validated_response_{id(self)}", default=None)
         self._expected_bindings = ContextVar(f"expected_bindings_{id(self)}", default={})
+        self._accepted_call_ids: set[str] = set()
 
     async def request(
         self,
@@ -242,6 +253,7 @@ class TranslationCall:
                     mapped,
                     unit=unit,
                     target_language=target_language,
+                    # In-memory ids only. save() replaces them when chapter_num is set.
                     note_id_factory=note_ids,
                     truncated=response.truncated,
                     expectation=context.expectation,
@@ -249,6 +261,10 @@ class TranslationCall:
                         ()
                         if resolved_glossary is None
                         else resolved_glossary.mandatory_entries
+                    ),
+                    validation_policy='v1' if policy is None else policy.validation_policy,
+                    protected_quotes=() if unit is None else source_quote_fragments(
+                        item.block.text for item in unit.items
                     ),
                 )
                 conditions = None
@@ -345,17 +361,31 @@ class TranslationCall:
                         fragment_assistances=unresolved[r.block_id]) for r in results)
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
+            except asyncio.CancelledError:
+                if recovery is not None and physical_context is not None and self._unit_of_work is not None:
+                    try:
+                        with self._unit_of_work.transaction() as transaction:
+                            _finalize_cancelled_attempt(transaction.work, physical_context)
+                    except Exception:
+                        pass
+                raise
             except Exception as error:
                 if isinstance(error, RecoveryError):
                     raise
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
+                outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
                     violation = violation_of(error, context=physical_context)
                     with self._unit_of_work.transaction() as transaction:
-                        split = transaction.work.record_recovery_failure(
-                            physical_context.attempt_id,
-                            violation,
+                        attempt = _attempt(transaction.work, physical_context.attempt_id)
+                        outcome = _failure_outcome(
+                            error,
+                            state=None if attempt is None else attempt.state,
+                            saw_response=response is not None,
+                        )
+                        split = _record_recovery_failure(
+                            transaction.work, physical_context.attempt_id, violation, outcome,
                         )
                         if (
                             not split
@@ -367,20 +397,26 @@ class TranslationCall:
                             split = _can_split_truncated_scope(
                                 transaction.work, current_root, recovery[1], unit
                             )
+                    if outcome == 'unknown':
+                        raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                     if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None
+                elif outcome == 'unknown' and recovery is not None:
+                    raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                 if isinstance(error, LLMContextCapacityError):
                     can_retry = (policy is not None and context.has_optional_neighbours
-                        and capacity_retries < policy.capacity_retries_without_neighbours
-                        and attempts < self._retry_policy.max_attempts)
+                        and capacity_retries < policy.capacity_retries_without_neighbours)
                     if recovery is not None:
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
-                            count = transaction.work.scope_attempt_count(recovery[1])
-                            can_retry = (can_retry and root.calls_used < root.manifest['policy']['max_calls'] + root.extra_calls
-                                and count < root.manifest['policy']['max_scope_calls'])
-                            if not can_retry:
-                                transaction.work.stop_root(root.id, 'context_capacity')
+                            within_budget = False
+                            if root is not None:
+                                count = transaction.work.scope_attempt_count(recovery[1])
+                                within_budget = (root.calls_used < root.manifest['policy']['max_calls'] + root.extra_calls
+                                    and count < root.manifest['policy']['max_scope_calls'])
+                            can_retry = can_retry and within_budget
+                            if not can_retry and root is not None:
+                                _set_root_status(transaction.work, root, 'context_capacity', pause=False)
                     if not can_retry:
                         if recovery is not None:
                             raise RecoveryError('context_capacity', recovery[0], original_error=error) from error
@@ -397,12 +433,7 @@ class TranslationCall:
                 if not decision.should_retry:
                     if recovery is not None:
                         with self._unit_of_work.transaction() as transaction:
-                            root = transaction.work.get_root(recovery[0])
-                            count = transaction.work.scope_attempt_count(recovery[1])
-                            reason = ('conditions_unavailable' if isinstance(error, ConditionsError) else
-                                'limit' if (root.calls_used >= root.manifest['policy']['max_calls'] + root.extra_calls
-                                or count >= root.manifest['policy']['max_scope_calls']) else 'unsafe_partition')
-                            transaction.work.stop_root(root.id, reason)
+                            reason = _stop_or_pause_root(transaction.work, recovery, error)
                         raise RecoveryError(reason, recovery[0], original_error=error) from error
                     raise
                 if decision.backoff_seconds > 0 and self._sleep is not None:
@@ -455,19 +486,24 @@ class TranslationCall:
     def save(
         self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult],
         pronunciation_unavailable: bool = False, reconcile: bool = True,
+        chapter_num: int | None = None, transaction=None,
     ) -> bool:
         """Atomically replaces results of the specified blocks (ALG-04, PRD § 17).
 
         Returns `False` if there is no active run to write to, or if the run ID does not
         match. This discards stale results of calls started before returning to glossary review.
         A temporary pronunciation failure preserves accepted help; a checked empty result clears it.
+        `transaction` joins an already open unit of work. Final language-note ids are reserved
+        in that same transaction when `chapter_num` is set, and only after ownership checks pass.
         """
         response = self._validated_response.get()
         context = None if response is None else response.call_context
         saved = False
         block_ids = tuple(result.block_id for result in results)
         expected_bindings = self._expected_bindings.get()
-        with self._unit_of_work.transaction() as transaction:
+        opened_here = transaction is None
+        transaction_scope = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        with transaction_scope as transaction:
             run = transaction.runs.active_for_book(book_id)
             conditions = transaction.work.latest_conditions(book_id) if context else None
             pointers_match = True
@@ -514,6 +550,9 @@ class TranslationCall:
                 results = tuple(
                     _retain_saved_segments(result, previous_results.get(result.block_id))
                     for result in results
+                )
+                results = _with_allocated_note_ids(
+                    transaction, results, run_id=run_id, chapter_num=chapter_num,
                 )
                 text_changed = any(
                     previous_results.get(result.block_id) != result
@@ -572,7 +611,11 @@ class TranslationCall:
                     reconcile=reconcile,
                 )
                 saved = True
-        if not saved:
+        call_id = getattr(response, "call_id", None)
+        if saved and opened_here and call_id is not None:
+            self._accepted_call_ids.add(call_id)
+        already_accepted = call_id is not None and call_id in self._accepted_call_ids
+        if not saved and opened_here and not already_accepted:
             finalize_response(self._unit_of_work, response, 'stale')
         return saved
 
@@ -820,6 +863,172 @@ def _load_results_by_block_id(
         if stored is not None:
             loaded[block_id] = stored
     return loaded
+
+
+def _accepts_keyword(method, name: str) -> bool:
+    """Whether `method` can take `name` without a TypeError from older fakes."""
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
+def _attempt(work, attempt_id):
+    getter = getattr(work, "get_attempt", None)
+    if not callable(getter):
+        return None
+    return getter(attempt_id)
+
+
+def _failure_outcome(error: Exception, *, state: str | None, saw_response: bool) -> str:
+    """Classify a failed send without turning a known response into `unknown`."""
+    if state == "unknown":
+        return "unknown"
+    if isinstance(error, LLMTransportError):
+        if error.outcome == "not_sent":
+            return "not_sent"
+        if error.outcome == "unknown":
+            return "unknown"
+        return "known"
+    if isinstance(error, ConditionsError) or any(
+        isinstance(error, kind) for kind, _task_type in _ERROR_TYPES
+    ):
+        return "known"
+    sent_states = {"sent", "validated", "rejected", "failed", "accepted"}
+    if saw_response or state in sent_states:
+        return "unknown"
+    return "known"
+
+
+def _record_recovery_failure(work, attempt_id, violation, outcome: str) -> bool:
+    """Record the failure. A charged `not_sent` is stored as a known failure."""
+    attempt = _attempt(work, attempt_id)
+    state = None if attempt is None else attempt.state
+    if outcome == "not_sent":
+        if state == "cancelled":
+            return False
+        if state not in {None, "created"}:
+            outcome = "unknown" if state == "unknown" else "known"
+    recorder = work.record_recovery_failure
+    try:
+        if _accepts_keyword(recorder, "outcome"):
+            return recorder(attempt_id, violation, outcome=outcome)
+        return recorder(attempt_id, violation)
+    except WorkStateError:
+        return False
+
+
+def _finalize_cancelled_attempt(work, physical_context) -> None:
+    """Cancel a call that never left `created`; an in-flight send stays unknown."""
+    attempt_id = physical_context.attempt_id
+    attempt = _attempt(work, attempt_id)
+    state = None if attempt is None else attempt.state
+    if state == "created":
+        work.cancel_unsent_attempt(attempt_id)
+        return
+    if state in {"sent", "unknown"}:
+        violation = violation_of(
+            LLMTransportError("вызов отменён после отправки", outcome="unknown"),
+            context=physical_context,
+        )
+        _record_recovery_failure(work, attempt_id, violation, "unknown")
+
+
+def _set_root_status(work, root, reason: str, *, pause: bool) -> None:
+    generation = getattr(root, "generation", None)
+    if pause:
+        pause_root = getattr(work, "pause_root", None)
+        if callable(pause_root):
+            if _accepts_keyword(pause_root, "expected_generation"):
+                pause_root(root.id, reason, expected_generation=generation)
+            else:
+                pause_root(root.id, reason)
+            return
+    stop_root = work.stop_root
+    if _accepts_keyword(stop_root, "expected_generation"):
+        stop_root(root.id, reason, expected_generation=generation)
+    else:
+        stop_root(root.id, reason)
+
+
+def _pause_reason(error: Exception) -> str:
+    if isinstance(error, LLMProviderError) and not isinstance(error, LLMContextCapacityError):
+        return "provider_error"
+    if isinstance(error, LLMConfigurationError):
+        return "configuration_error"
+    kind = classify_error(error).type
+    if kind in {ErrorType.VALIDATION, ErrorType.MODEL_OUTPUT}:
+        return "validation_error"
+    if kind is ErrorType.CONFIGURATION:
+        return "configuration_error"
+    return "transient_error"
+
+
+def _terminal_reason(error: Exception, *, calls_exhausted: bool, scope_exhausted: bool) -> tuple[str, bool]:
+    """Stop reason, or a pause reason while the durable budget still remains."""
+    violation = getattr(error, "violation", None)
+    rule = getattr(violation, "rule_code", None)
+    if isinstance(error, ConditionsError):
+        return "conditions_unavailable", False
+    truncated = rule == "provider_truncated" or (
+        isinstance(error, LLMResponseFormatError) and error.truncated
+    )
+    if truncated:
+        return "output_truncated", False
+    if rule in {"provider_refusal", "provider_content_filter"}:
+        return "provider_refusal", False
+    if calls_exhausted:
+        return "limit", False
+    if scope_exhausted:
+        return "scope_limit", False
+    return _pause_reason(error), True
+
+
+def _stop_or_pause_root(work, recovery, error: Exception) -> str:
+    root = work.get_root(recovery[0])
+    if root is None:
+        return "conditions_unavailable"
+    if getattr(root, "status", None) == "stopped" and getattr(root, "reason", None) == "unknown_outcome":
+        return "unknown_outcome"
+    count = work.scope_attempt_count(recovery[1])
+    limit = root.manifest["policy"]["max_calls"] + root.extra_calls
+    reason, pause = _terminal_reason(
+        error,
+        calls_exhausted=root.calls_used >= limit,
+        scope_exhausted=count >= root.manifest["policy"]["max_scope_calls"],
+    )
+    _set_root_status(work, root, reason, pause=pause)
+    return reason
+
+
+def _with_allocated_note_ids(transaction, results, *, run_id: str, chapter_num: int | None):
+    """Replace temporary note ids after ownership checks, in the caller's transaction."""
+    if chapter_num is None:
+        return results
+    allocate = getattr(getattr(transaction, "results", None), "allocate_note_ids", None)
+    if not callable(allocate):
+        return results
+    notes = tuple(note for result in results for note in result.language_notes)
+    if not notes:
+        return results
+    issued = tuple(allocate(run_id, chapter_num, len(notes)))
+    if len(issued) != len(notes):
+        raise ValueError("note id allocation did not cover every note")
+    issued_ids = iter(issued)
+    return tuple(
+        replace(
+            result,
+            language_notes=tuple(
+                replace(note, id=next(issued_ids)) for note in result.language_notes
+            ),
+        ) if result.language_notes else result
+        for result in results
+    )
 
 
 def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
