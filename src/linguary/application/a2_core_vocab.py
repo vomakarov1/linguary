@@ -418,9 +418,9 @@ mate material math mathematics maths matter maximum mayor meal meaning measure
 meat mechanic medal media medicine medium meeting melon member memory menu mess
 message metal meter method metre microwave middle midnight might mile milk
 million mind mine minimum minister minus minute mirror miss mist mistake mix
-mobile model modern moment money monitor monkey monster month mood moon morning
+mobile model modern mom moment mommy money monitor monkey monster month mood moon morning
 most mother motor motorbike motorcycle motorway mountain mouse mouth move
-movement movie mud mug murder muscle museum mushroom music musician mystery
+movement movie mud mug mum mummy murder muscle museum mushroom music musician mystery
 nail name nap napkin nation nature navy neck necklace need needle neighbor
 neighbour neighborhood neighbourhood nest net network news newspaper nice niece
 night noise noodle noon north nose note notebook nothing notice noun novel
@@ -450,7 +450,7 @@ rat rate raw ray reach reader reading reason recipe record recorder recording re
 refrigerator region regret relation relative relaxation release relief religion
 remark reminder remote rent repair repeat reply report reporter request rescue
 research reservation reserve respect response rest restaurant result return
-review ride rider right ring rise risk river roast robot rock rocket role roll
+review ride rider right ring rise risk river road roast robot rock rocket role roll granny
 romance roof room root rope rose round route routine row royal rubber rude rug
 rule ruler run runner runway rush
 sadness safe safety sail sailor salad sale salon salt sand sandal sandwich sauce
@@ -940,15 +940,26 @@ def non_core_a2_words(
     found: list[str] = []
     seen: set[str] = set()
 
-    for match in _TOKEN_RE.finditer(text):
+    matches = tuple(_TOKEN_RE.finditer(text))
+    for idx, match in enumerate(matches):
         raw = match.group(0)
         norm = _normalize_token(raw)
         if _is_trivial_token(raw, norm):
             continue
         if _is_known_name(norm, known_tokens):
             continue
-        if raw[0].isupper() and not _is_sentence_or_speech_start(text, match.start()):
-            continue
+        if raw[0].isupper():
+            if not _is_sentence_or_speech_start(text, match.start()):
+                continue
+            if (
+                not raw.isupper()
+                and idx + 1 < len(matches)
+                and matches[idx + 1].group(0)[0].isupper()
+                and not matches[idx + 1].group(0).isupper()
+                and text[match.end():matches[idx + 1].start()] != ""
+                and text[match.end():matches[idx + 1].start()].isspace()
+            ):
+                continue
 
         if "-" in norm:
             if norm in _NON_CORE_OVERRIDE:

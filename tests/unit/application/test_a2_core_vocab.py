@@ -112,7 +112,7 @@ REQUIRED_NON_CORE_WORDS = frozenset({
 
 def test_vocabulary_size_and_normalization() -> None:
     assert isinstance(A2_CORE_VOCABULARY, frozenset)
-    assert 2_500 <= len(A2_CORE_VOCABULARY) <= 3_000
+    assert 2_500 <= len(A2_CORE_VOCABULARY) <= 3_100
     for word in A2_CORE_VOCABULARY:
         assert word
         assert word == word.lower()
@@ -206,10 +206,23 @@ def test_every_non_core_override_word_is_rejected() -> None:
         "special",
         "popular",
         "serious",
+        "road",
+        "mom",
+        "mommy",
+        "mum",
+        "mummy",
+        "granny",
     ],
 )
 def test_core_a2_direct_words(word: str) -> None:
     assert is_core_a2_word(word)
+
+
+def test_non_core_a2_words_skips_road_and_title_case_proper_names() -> None:
+    assert non_core_a2_words("The road looked quiet.") == ()
+    assert non_core_a2_words("Boa Constrictor, Brazil.") == ()
+    assert non_core_a2_words("Mary Hightower wrote a book.") == ()
+    assert non_core_a2_words("Major whoa.") == ("whoa",)
 
 
 @pytest.mark.parametrize(

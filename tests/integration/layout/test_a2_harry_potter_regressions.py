@@ -356,7 +356,17 @@ _LINES: tuple[_Line, ...] = (
         hint=("winked", "подмигнула", None),
     ),
     _Line("boa", "ch2", _BOA, BlockTreatment.READ_AS_IS),
-    _Line("piers", "ch3", _PIERS, BlockTreatment.READ_AS_IS),
+    _Line(
+        "piers",
+        "ch3",
+        _PIERS,
+        BlockTreatment.TRANSLATE,
+        "Гарри был рад, что школа закончилась, но спасения от шайки Дадли, которая "
+        "заявлялась в дом каждый день, не было. Пирз, Деннис, Малкольм и Гордон все "
+        "были крупными и глупыми, но поскольку Дадли был самым крупным и глупым из всех, "
+        "он был их вожаком. Остальные с радостью участвовали в любимой забаве Дадли — "
+        "охоте на Гарри.",
+    ),
 )
 
 _BY_KEY = {line.key: line for line in _LINES}
@@ -636,13 +646,14 @@ def _read_pages(path: Path) -> tuple[etree._Element, ...]:
 
 def _assemble(tmp_path: Path) -> _Case:
     document, blocks, section_ids = _document()
-    ordered = tuple(blocks[line.key] for line in _LINES)
+    story_lines = tuple(line for line in _LINES if line.section != "promo")
+    ordered = tuple(blocks[line.key] for line in story_lines)
     point = (RequiredPoint("p1", "Объяснить значение глагола речи."),)
     normalized = normalize_a2_dialogue_response(
         PedagogicalAnalysisResponse(
             treatment_plan=tuple(
-                TreatmentPlanItemResponse(block.id, _BY_KEY[key].original)
-                for key, block in blocks.items()
+                TreatmentPlanItemResponse(blocks[line.key].id, line.original)
+                for line in story_lines
             ),
             difficulties=(
                 QuotedDifficultyResponse(
@@ -678,8 +689,27 @@ def _assemble(tmp_path: Path) -> _Case:
         {block.id: block.id for block in ordered},
         reader_level="a2",
         english_help=False,
+        known_names=(
+            "Harry Potter",
+            "Dursley",
+            "Mr Dursley",
+            "Mrs Dursley",
+            "Dudley",
+            "Hagrid",
+            "Dumbledore",
+            "Petunia",
+            "Vernon",
+            "Piers",
+            "Sirius Black",
+            "McGonagall",
+            "Yvonne",
+            "Brazil",
+        ),
     )
-    modes = {item.source_block_id: item.treatment for item in normalized.treatment_plan}
+    modes = {
+        **{blocks[line.key].id: line.original for line in _LINES if line.section == "promo"},
+        **{item.source_block_id: item.treatment for item in normalized.treatment_plan},
+    }
     analyses = _analyses(section_ids, blocks, modes, _facts(blocks))
     results = {
         blocks[line.key].id: _result(blocks[line.key], line, modes[blocks[line.key].id])
@@ -3364,7 +3394,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
         narrative_summary="Summary.",
         cumulative_words_before=50_000,
     )
-    assert "78–85%" in ped_early.request.input_text
+    assert "70–82%" in ped_early.request.input_text
     assert "62–72%" in ped_late.request.input_text
     assert "used to" in ped_early.request.input_text
     sha_early = cb.pedagogical_input_sha256(
@@ -3385,7 +3415,9 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
         )
         is True
     )
-    assert scaled_chapter_note_limit(300, 6) == 12
+    assert scaled_chapter_note_limit(35, 8) == 8
+    assert scaled_chapter_note_limit(120, 8) == 14
+    assert scaled_chapter_note_limit(300, 6) == 18
     assert scaled_chapter_note_limit(300, 3) == 3
 
     # --- P5.T1: A2 thresholds 15/45, non-dialogue demotion, forward-quote pruning, pronoun speaker resolution ---

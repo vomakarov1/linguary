@@ -23,6 +23,7 @@ from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_V5_VERSIONS,
     A2_CONTENT_PLAN_V6_VERSIONS,
+    A2_CONTENT_PLAN_V7_VERSIONS,
     payload_digest,
 )
 from linguary.application.context_builder import (
@@ -404,14 +405,33 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
         },
     ]
 
-    # 1. Default configuration (max_fragment_blocks=None) analyzes all 121 textual blocks in 1 fragment.
+    # 1. Default configuration (max_fragment_blocks=None): narrative splits 121 dialogue blocks into
+    # 3 balanced fragments (41, 40, 40) to prevent 32K output truncation while passing intra-chapter
+    # glossary candidates forward; pedagogical keeps all 121 blocks in a single call.
+    default_nar_sizes = (41, 40, 40)
     default_client = StagedFakeLLMClient.replying(
         [
             FakeReply.of_payload(
                 _narrative_payload(
-                    block_count=121,
+                    block_count=default_nar_sizes[0],
                     chapter_summary=full_summary,
-                    glossary_candidates=candidates,
+                    glossary_candidates=candidates[:2],
+                )
+            ),
+            FakeReply.of_payload(
+                _narrative_payload(
+                    block_count=default_nar_sizes[1],
+                    chapter_summary=full_summary,
+                    continues_previous_scene=True,
+                    glossary_candidates=candidates[2:3],
+                )
+            ),
+            FakeReply.of_payload(
+                _narrative_payload(
+                    block_count=default_nar_sizes[2],
+                    chapter_summary=full_summary,
+                    continues_previous_scene=True,
+                    glossary_candidates=candidates[3:],
                 )
             ),
             FakeReply.of_payload(_pedagogical_payload(block_count=121, summary=full_summary)),
@@ -426,11 +446,22 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
         ]
         assert [req.stage for req in default_client.requests] == [
             LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+            LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+            LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
             LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
         ]
-        nar_req, ped_req = default_client.requests
-        assert nar_req.ordered_block_ids == tuple(b.id for b in tb)
+        nar_req1, nar_req2, nar_req3, ped_req = default_client.requests
+        nar_req = nar_req1
+        assert [len(r.ordered_block_ids) for r in (nar_req1, nar_req2, nar_req3)] == list(default_nar_sizes)
+        assert (*nar_req1.ordered_block_ids, *nar_req2.ordered_block_ids, *nar_req3.ordered_block_ids) == tuple(
+            b.id for b in tb
+        )
         assert ped_req.ordered_block_ids == tuple(b.id for b in tb)
+        # Intra-chapter glossary continuity: fragment 1 candidates are passed to fragments 2 and 3.
+        assert "Everlost" in nar_req2.input_text and "Междумирье" in nar_req2.input_text
+        assert "Mary Hightower" in nar_req3.input_text
+        # Narrative translation_instructions are forwarded into pedagogical input.
+        assert "Указания переводчику:" in ped_req.input_text
 
         conditions = default_app.book_conditions.require(BOOK_ID)
         frozen_templates = conditions.payload["prompt_templates"]
@@ -1204,6 +1235,7 @@ def _make_multi_section_app(
     *,
     concurrency: int = 1,
     seed_first_chapter: bool = False,
+    sequential_analysis: bool = True,
     max_attempts: int = 3,
 ) -> Application:
     """Build real SQLite-backed application populated with the multi-section Everlost document."""
@@ -1214,7 +1246,10 @@ def _make_multi_section_app(
             proxy_mode="direct",
             max_attempts=max_attempts,
         ),
-        checks=CheckSettings(seed_first_chapter=seed_first_chapter),
+        checks=CheckSettings(
+            seed_first_chapter=seed_first_chapter,
+            sequential_analysis=sequential_analysis,
+        ),
         worker=WorkerPoolSettings(concurrency=concurrency),
         reading=ReadingSettings(reader_level="a2", name_translation_strategy="meaning"),
         storage=StorageSettings(data_root=str(root)),
@@ -1792,24 +1827,25 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             # Demotion guard keeps short nonstandard "ain't" line in TRANSLATE.
             assert ch3_plan[ch3_blocks[3].id].treatment is BlockTreatment.TRANSLATE
 
-        # Book conditions version bump (context_builder=4, prompts=6) + backward compatibility for v5 snapshots.
+        # Book conditions version bump (context_builder=5, prompts=7) + backward compatibility for v6 and v5 snapshots.
         conditions = seq_app.book_conditions.require(BOOK_ID)
         assert conditions.payload["profile"] == "content-plan-v3"
-        assert conditions.payload["versions"] == A2_CONTENT_PLAN_V6_VERSIONS
-        assert conditions.payload["versions"]["context_builder"] == 4
-        assert conditions.payload["versions"]["prompts"] == 6
+        assert conditions.payload["versions"] == A2_CONTENT_PLAN_V7_VERSIONS
+        assert conditions.payload["versions"]["context_builder"] == 5
+        assert conditions.payload["versions"]["prompts"] == 7
         assert effective_content_plan_profile(conditions) == "content-plan-v3"
         seq_app.book_runtime.settings_for(conditions)
 
-        v5_payload = thaw(conditions.payload)
-        v5_payload["versions"] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
-        v5_conditions = replace(conditions, payload=v5_payload)
-        assert effective_content_plan_profile(v5_conditions) == "content-plan-v3"
-        seq_app.book_runtime.settings_for(v5_conditions)
+        for legacy_versions in (A2_CONTENT_PLAN_V6_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS):
+            legacy_payload = thaw(conditions.payload)
+            legacy_payload["versions"] = dict(legacy_versions)
+            legacy_conditions = replace(conditions, payload=legacy_payload)
+            assert effective_content_plan_profile(legacy_conditions) == "content-plan-v3"
+            seq_app.book_runtime.settings_for(legacy_conditions)
     finally:
         await seq_app.aclose()
 
-    # 2. Prewave parallel seeding (concurrency=2, seed_first_chapter=True):
+    # 2. Prewave parallel seeding (explicit sequential_analysis=False, concurrency=2, seed_first_chapter=True):
     # Wave 1 = PART ONE / Afterlights -> Wave 2 = Ch. 1 (seeded with Afterlights) -> Wave 3 = Ch. 2 & Ch. 3.
     prewave_client = ScopedStagedFakeLLMClient(
         {
@@ -1828,6 +1864,7 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         document,
         concurrency=2,
         seed_first_chapter=True,
+        sequential_analysis=False,
     )
     try:
         await prewave_app.analysis.start(BOOK_ID)
@@ -1869,3 +1906,53 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         assert "mossy stones" not in wave3_ped["ch-3"].input_text
     finally:
         await prewave_app.aclose()
+
+    # 3. Default sequential mode takes precedence over seed_first_chapter=True even with concurrency=4:
+    # PART ONE -> Ch. 1 -> Ch. 2 -> Ch. 3 strictly in reading order; Ch. 3 sees Ch. 2 Lief + topics;
+    # PART ONE Afterlights gets GLOSSARY_ONLY while PART ONE stays READ_AS_IS.
+    default_seq_client = ScopedStagedFakeLLMClient(
+        {
+            ("part-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [part1_narrative_reply],
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch1_nar_attempt2],
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch1_ped_attempt2],
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch2_nar_reply],
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch2_ped_attempt2],
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch3_nar_reply],
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch3_ped_attempt2],
+        }
+    )
+    default_seq_app = _make_multi_section_app(
+        tmp_path / "default-sequential-high-concurrency",
+        default_seq_client,
+        document,
+        concurrency=4,
+        seed_first_chapter=True,
+        sequential_analysis=True,
+    )
+    try:
+        await default_seq_app.analysis.start(BOOK_ID)
+        completed = await drain_tasks(default_seq_app)
+        assert all(task.status is TaskStatus.SUCCEEDED for task in completed), [
+            (task.scope_id, task.last_error) for task in completed
+        ]
+        assert [(req.scope_id, req.stage) for req in default_seq_client.requests] == [
+            ("part-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+        ]
+        ch3_seq_nar = default_seq_client.requests[5]
+        ch3_seq_ped = default_seq_client.requests[6]
+        assert "Lief" in ch3_seq_nar.input_text
+        assert "mossy stones" in ch3_seq_ped.input_text
+        with default_seq_app.unit_of_work.transaction() as tx:
+            part1_analysis = {a.section_id: a for a in tx.analyses.list_for_book(BOOK_ID)}["part-1"]
+            part1_modes = {item.block_id: item.treatment for item in part1_analysis.treatment_plan.items}
+            part1_blocks = textual_blocks(part_one)
+            assert part1_modes[part1_blocks[0].id] is BlockTreatment.READ_AS_IS
+            assert part1_modes[part1_blocks[1].id] is BlockTreatment.GLOSSARY_ONLY
+    finally:
+        await default_seq_app.aclose()
