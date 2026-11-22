@@ -2180,3 +2180,304 @@ async def test_assemble_staged_passes_resolved_blocks_and_mandatory_facts_for_pr
         assert speaker_facts[0].certainty == "explicit"
     finally:
         engine.dispose()
+
+
+async def test_meaningful_part_divider_extracts_candidates_in_prewave_and_mid_book_leaving_bare_dividers_zero_call(
+    tmp_path,
+) -> None:
+    """Meaningful part dividers extract glossary candidates in staged/single-pass, prewave, and mid-book, while bare dividers stay zero-call."""
+    import json
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.domain import AnalysisPassKind, LLMCallStage
+    from analysis_fakes import FakeLanguageDetector
+
+    titlepage = make_analysis_section(
+        section_id="titlepage",
+        title="Title Page",
+        order=0,
+        texts=("Everlost",),
+    )
+    bare_divider = make_analysis_section(
+        section_id="part-bare",
+        title="PART I",
+        order=1,
+        blocks=(
+            make_analysis_block(
+                section_id="part-bare", order=0, text="PART I", type=BlockType.HEADING
+            ),
+        ),
+    )
+    part1 = make_analysis_section(
+        section_id="part-1",
+        title="PART ONE",
+        order=2,
+        blocks=(
+            make_analysis_block(
+                section_id="part-1", order=0, text="PART ONE", type=BlockType.HEADING
+            ),
+            make_analysis_block(
+                section_id="part-1", order=1, text="Afterlights", type=BlockType.HEADING
+            ),
+        ),
+    )
+    ch1 = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=3,
+        texts=("Nick met the Afterlights near Duskmere.",),
+    )
+    part2 = make_analysis_section(
+        section_id="part-2",
+        title="PART TWO",
+        order=4,
+        blocks=(
+            make_analysis_block(
+                section_id="part-2", order=0, text="PART TWO", type=BlockType.PARAGRAPH
+            ),
+            make_analysis_block(
+                section_id="part-2", order=1, text="Skinjackers", type=BlockType.PARAGRAPH
+            ),
+        ),
+    )
+    ch2 = make_analysis_section(
+        section_id="section-2",
+        title="Chapter 2",
+        order=5,
+        texts=("Afterlights feared the Skinjackers outside Duskmere.",),
+    )
+    document = make_analysis_document((titlepage, bare_divider, part1, ch1, part2, ch2))
+    assert document.is_front_matter(bare_divider) is True
+    assert document.has_meaningful_part_title(bare_divider) is False
+    assert document.is_front_matter(part1) is True
+    assert document.has_meaningful_part_title(part1) is True
+    assert document.is_front_matter(part2) is True
+    assert document.has_meaningful_part_title(part2) is True
+
+    # 1. Staged mode: bare divider = 0 calls; meaningful divider = NARRATIVE only, cached, READ_AS_IS, clean fields
+    engine, uow = _staged_uow(tmp_path, document)
+    try:
+        context_builder = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="a2",
+                profile="content-plan-v3",
+            ),
+        )
+        part1_narrative_reply = FakeReply(
+            content=json.dumps(
+                {
+                    "translation_instructions": "Part divider note that should be cleared.",
+                    "chapter_summary": "PART ONE: Afterlights.",
+                    "glossary_candidates": [
+                        {
+                            "source_text": "Afterlights",
+                            "type": "term",
+                            "suggested_translation": "Послесветы",
+                            "confidence": 0.93,
+                            "model_flagged_review": True,
+                            "note": "неологизм",
+                            "description": "Дети, застрявшие между мирами.",
+                        }
+                    ],
+                    "context_facts": [],
+                    "scenes": [],
+                },
+                ensure_ascii=False,
+            )
+        )
+        staged_client = FakeLLMClient([part1_narrative_reply])
+        staged_scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=staged_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+
+        bare_res = await staged_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-bare"))
+        assert bare_res.attempts == 0
+        assert staged_client.call_count == 0
+        assert bare_res.analysis.glossary_candidates == ()
+
+        part1_res = await staged_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-1"))
+        assert part1_res.attempts == 1
+        assert [r.stage for r in staged_client.requests] == [LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE]
+        assert [c.source_text for c in part1_res.analysis.glossary_candidates] == ["Afterlights"]
+        assert part1_res.analysis.glossary_candidates[0].suggested_translation == "Послесветы"
+        assert part1_res.analysis.scenes == ()
+        assert part1_res.analysis.chapter_summary == ""
+        assert part1_res.analysis.translation_instructions == ""
+        assert part1_res.analysis.before_you_read == ()
+        assert all(
+            item.treatment is BlockTreatment.READ_AS_IS
+            for item in part1_res.analysis.treatment_plan.items
+        )
+        with uow.transaction() as tx:
+            assert tx.analyses.get_pass(BOOK_ID, "part-1", AnalysisPassKind.NARRATIVE) is not None
+            assert tx.analyses.get_pass(BOOK_ID, "part-1", AnalysisPassKind.PEDAGOGICAL) is None
+
+        # Cached re-run of meaningful part divider makes 0 LLM calls.
+        rerun_client = FakeLLMClient([])
+        rerun_scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=rerun_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        cached_res = await rerun_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-1"))
+        assert cached_res.attempts == 0
+        assert rerun_client.call_count == 0
+        assert [c.source_text for c in cached_res.analysis.glossary_candidates] == ["Afterlights"]
+    finally:
+        engine.dispose()
+
+    # 2. Single-pass mode (A2): skips validate_a2_summary & BYR/note quotas, keeps glossary_candidates, clears narrative/BYR fields.
+    uow_single = FakeUnitOfWork(document=document, book=make_book_record())
+    single_reply = analysis_reply(
+        aliases=("b1", "b2"),
+        chapter_summary="Недопустимый русский пересказ для A2.",
+        candidates=[
+            {
+                "source_text": "Afterlights",
+                "type": "term",
+                "suggested_translation": "Послесветы",
+                "confidence": 0.92,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    single_client = FakeLLMClient([single_reply])
+    single_scenario, _ = make_analyze_chapter(uow_single, single_client, reader_level="a2")
+    single_res = await single_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-1"))
+    assert single_res.attempts == 1
+    assert [c.source_text for c in single_res.analysis.glossary_candidates] == ["Afterlights"]
+    assert single_res.analysis.chapter_summary == ""
+    assert single_res.analysis.translation_instructions == ""
+    assert single_res.analysis.before_you_read == ()
+    assert all(
+        item.treatment is BlockTreatment.READ_AS_IS
+        for item in single_res.analysis.treatment_plan.items
+    )
+
+    # 3. Prewave under seed_first_chapter=True + parallel_batch:
+    # Wave 0 = [part-1]; Wave 1 = [titlepage, part-bare, section-1]; Wave 2 = [part-2, section-2].
+    uow_wave = FakeUnitOfWork(document=document, book=make_book_record())
+    conditions = SimpleNamespace(id="cond-prewave", payload={"checks": {"seed_first_chapter": True}})
+    uow_wave.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    reply_part1 = analysis_reply(
+        aliases=("b1", "b2"),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Afterlights",
+                "type": "term",
+                "suggested_translation": "Послесветы",
+                "confidence": 0.92,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_ch1 = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.91,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_part2 = analysis_reply(
+        aliases=("b1", "b2"),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Skinjackers",
+                "type": "term",
+                "suggested_translation": "Оборотни",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_ch2 = analysis_reply(aliases=("b1",), before_you_read=[], candidates=[])
+    wave_client = FakeLLMClient([reply_part1, reply_ch1, reply_part2, reply_ch2])
+    wave_analyze, _ = make_analyze_chapter(uow_wave, wave_client)
+    wave_analyze._max_concurrency = 2
+    wave_queue = FakeTaskQueue()
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=uow_wave,  # type: ignore[arg-type]
+        queue=wave_queue,  # type: ignore[arg-type]
+        analyze_chapter=wave_analyze,
+        seed_first_chapter=True,
+    )
+
+    await sequence.start(BOOK_ID)
+    assert [t.scope_id for t in wave_queue.tasks] == ["part-1"]
+
+    t_part1 = await wave_queue.claim_next_pending()
+    assert t_part1 is not None and t_part1.scope_id == "part-1"
+    await sequence.run_task(t_part1)
+    await wave_queue.save(t_part1.succeed())
+    assert [t.scope_id for t in wave_queue.tasks] == ["part-1", "titlepage", "part-bare", "section-1"]
+
+    for expected in ("titlepage", "part-bare"):
+        t_fm = await wave_queue.claim_next_pending()
+        assert t_fm is not None and t_fm.scope_id == expected
+        await sequence.run_task(t_fm)
+        await wave_queue.save(t_fm.succeed())
+    # Neither bare front matter nor bare part divider releases Wave 2 or calls LLM.
+    assert wave_client.call_count == 1
+    assert [t.scope_id for t in wave_queue.tasks] == ["part-1", "titlepage", "part-bare", "section-1"]
+
+    t_ch1 = await wave_queue.claim_next_pending()
+    assert t_ch1 is not None and t_ch1.scope_id == "section-1"
+    await sequence.run_task(t_ch1)
+    await wave_queue.save(t_ch1.succeed())
+    assert [t.scope_id for t in wave_queue.tasks] == [
+        "part-1",
+        "titlepage",
+        "part-bare",
+        "section-1",
+        "part-2",
+        "section-2",
+    ]
+    # Chapter 1 received Afterlights from prewave part-1.
+    assert "Послесветы" in wave_client.requests[1].input_text
+
+    for expected in ("part-2", "section-2"):
+        t_next = await wave_queue.claim_next_pending()
+        assert t_next is not None and t_next.scope_id == expected
+        await sequence.run_task(t_next)
+        await wave_queue.save(t_next.succeed())
+    # Wave 2 chapter 2 received both prewave Afterlights and seed chapter Duskmere.
+    assert "Послесветы" in wave_client.requests[3].input_text
+    assert "Даскмер" in wave_client.requests[3].input_text
+
+    # 4. Sequential run: mid-book part-2 candidates flow into section-2.
+    uow_seq = FakeUnitOfWork(document=document, book=make_book_record())
+    seq_client = FakeLLMClient([reply_part1, reply_ch1, reply_part2, reply_ch2])
+    seq_analyze, _ = make_analyze_chapter(uow_seq, seq_client)
+    for sec_id in ("titlepage", "part-bare", "part-1", "section-1", "part-2", "section-2"):
+        await seq_analyze(AnalyzeChapterCommand(book_id=BOOK_ID, section_id=sec_id))
+    assert seq_client.call_count == 4
+    assert "Послесветы" in seq_client.requests[1].input_text
+    assert "Оборотни" in seq_client.requests[3].input_text
+

@@ -217,6 +217,19 @@ class AnalyzeChapter:
                 self._save(command.book_id, analysis, task_id=command.task_id)
                 return AnalyzeChapterResult(analysis=analysis)
             if document.is_front_matter(section):
+                if _has_meaningful_part_title(document, section):
+                    analysis, attempts, usage = await self._analyze_part_divider(
+                        command=command,
+                        document=document,
+                        section=section,
+                        blocks=blocks,
+                        accumulated=accumulated,
+                        user_decisions=user_decisions,
+                        nonbinding_suggestions=nonbinding_suggestions,
+                        concepts=concepts or (),
+                    )
+                    self._save(command.book_id, analysis, task_id=command.task_id)
+                    return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
                 analysis = self._front_matter_analysis(section, blocks, id=self._id_factory())
                 self._save(command.book_id, analysis, task_id=command.task_id)
                 return AnalyzeChapterResult(analysis=analysis)
@@ -287,15 +300,97 @@ class AnalyzeChapter:
             if token_responses is not None:
                 self._llm_client._responses.reset(token_responses)
 
-    async def _analyze_staged(
+    async def _analyze_part_divider(
+        self,
+        *,
+        command: AnalyzeChapterCommand,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        blocks: Sequence[DocumentBlock],
+        accumulated: Sequence[GlossaryCandidate],
+        user_decisions: Sequence[TermConcept],
+        nonbinding_suggestions: Sequence[TermConcept],
+        concepts: Sequence[TermConcept],
+    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+        """Lightweight glossary-only analysis for part dividers with meaningful titles."""
+        analysis_id = self._id_factory()
+        base = self._front_matter_analysis(section, blocks, id=analysis_id)
+        if self._staged_analysis and self._context_builder._content_plan_profile == 'content-plan-v3':
+            narrative, _saved, _scenes, _facts, attempts, usage, _deps, _cond = (
+                await self._run_staged_narrative_pass(
+                    command,
+                    document,
+                    section,
+                    accumulated,
+                    user_decisions,
+                    nonbinding_suggestions,
+                    concepts,
+                )
+            )
+            return (
+                replace(
+                    base,
+                    glossary_candidates=self._candidates(narrative, analysis_id=analysis_id),
+                ),
+                attempts,
+                usage,
+            )
+        context = self._context_builder.for_chapter_analysis(
+            document=document,
+            section=section,
+            accumulated_candidates=accumulated,
+            user_decisions=user_decisions,
+            nonbinding_suggestions=nonbinding_suggestions,
+        )
+        context = replace(
+            context,
+            before_you_read_limit=None,
+            language_notes_per_chapter=None,
+            note_limits_by_block=None,
+            note_group_limits=(),
+            request=context.request.with_logging(
+                book_id=command.book_id,
+                stage=LLMCallStage.CHAPTER_ANALYSIS,
+                task_id=command.task_id,
+                scope_id=section.id,
+                ordered_block_ids=tuple(block.id for block in blocks),
+            ),
+        )
+        payload, attempts, usage = await self._request_analysis(
+            context,
+            blocks=blocks,
+            source_language=document.source_language,
+            concepts=concepts,
+            part_divider=True,
+        )
+        return (
+            replace(
+                base,
+                glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
+            ),
+            attempts,
+            usage,
+        )
+
+    async def _run_staged_narrative_pass(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
         accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
         suggestions: Sequence[TermConcept], concepts: Sequence[TermConcept],
-    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+    ) -> tuple[
+        NarrativeAnalysisResponse,
+        AnalysisPassResult,
+        tuple[Scene, ...],
+        tuple[ContextFact, ...],
+        int,
+        TokenUsage | None,
+        Mapping[str, object],
+        str | None,
+    ]:
         blocks = textual_blocks(section)
         aliases = {b.id: b.id for b in blocks}
         texts = {b.id: b.text for b in blocks}
         visible = {b.id: source_text_for_model(b) for b in blocks}
+        is_notes_only = section.is_notes_only or document.is_front_matter(section)
         with self._unit_of_work.transaction() as tx:
             work = getattr(tx, 'work', None)
             conditions = work.latest_conditions(command.book_id) if work else None
@@ -345,7 +440,7 @@ class AnalyzeChapter:
             saved = None
             narrative = None
         attempts = 0
-        usages = []
+        usages: list[TokenUsage | None] = []
         if saved is None or narrative is None:
             narrative_parts, count, usage = await self._run_staged_fragments(
                 command, document, section, accumulated, user_decisions, suggestions, concepts,
@@ -358,7 +453,7 @@ class AnalyzeChapter:
                 narrative_parts, section_blocks=section.ordered_blocks
             )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
-                ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
+                ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
                 blocks=blocks, source_offsets=True)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
@@ -369,9 +464,24 @@ class AnalyzeChapter:
             if saved.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
-                ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
+                ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
                 blocks=blocks, source_offsets=True)
+        return narrative, saved, scenes, facts, attempts, _total_usage(usages), dependencies, expected_conditions_id
+
+    async def _analyze_staged(
+        self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
+        accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
+        suggestions: Sequence[TermConcept], concepts: Sequence[TermConcept],
+    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+        blocks = textual_blocks(section)
+        aliases = {b.id: b.id for b in blocks}
+        narrative, saved, scenes, facts, attempts, narrative_usage, dependencies, expected_conditions_id = (
+            await self._run_staged_narrative_pass(
+                command, document, section, accumulated, user_decisions, suggestions, concepts,
+            )
+        )
+        usages: list[TokenUsage | None] = [narrative_usage]
         cumulative_words = _cumulative_words_before(document, section)
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
@@ -1075,19 +1185,25 @@ class AnalyzeChapter:
             else:
                 seed_active = bool(self._seed_first_chapter)
             seed_section = _first_content_section(document) if (parallel_batch and seed_active) else None
-            seed_section_id = (
-                seed_section.id
-                if seed_section is not None and seed_section.order < current_order
-                else None
-            )
+            seed_section_ids: set[str] = set()
+            if seed_section is not None:
+                if current_order >= seed_section.order:
+                    seed_section_ids.update(
+                        section.id
+                        for section in document.ordered_sections
+                        if section.order < seed_section.order
+                        and _is_meaningful_part_divider(document, section)
+                    )
+                if seed_section.order < current_order:
+                    seed_section_ids.add(seed_section.id)
             seed_candidates = (
                 tuple(
                     candidate
                     for analysis in analyses
-                    if analysis.section_id == seed_section_id
+                    if analysis.section_id in seed_section_ids
                     for candidate in analysis.glossary_candidates
                 )
-                if seed_section_id is not None
+                if seed_section_ids
                 else ()
             )
             if self._context_builder.name_translation_policy is not None:
@@ -1114,10 +1230,10 @@ class AnalyzeChapter:
                     tuple(
                         candidate
                         for analysis in analyses
-                        if analysis.section_id != seed_section_id
+                        if analysis.section_id not in seed_section_ids
                         for candidate in analysis.glossary_candidates
                     )
-                    if seed_section_id is not None
+                    if seed_section_ids
                     else all_candidates
                 )
                 known_keys = {glossary_key(c.source_text) for c in all_candidates}
@@ -1170,6 +1286,7 @@ class AnalyzeChapter:
         blocks: Sequence[DocumentBlock],
         source_language: str,
         concepts: Sequence[TermConcept] | None = None,
+        part_divider: bool = False,
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
         """Executes model call with retries per policy (ALG-05).
 
@@ -1200,46 +1317,50 @@ class AnalyzeChapter:
                 try:
                     if request.contract_version in {3, 5}:
                         response = replace(response, payload=prepare_analysis_payload(response.payload))
-                    response = replace(response, payload=self._normalize_a2_dialogue(
-                        response.payload, blocks, context.block_ids_by_alias,
-                    ))
-                    if self._context_builder._reader_level == "a2":
-                        validate_a2_summary(
-                            response.payload.chapter_summary,
-                            source_texts=tuple(block.text for block in blocks),
-                            source_language=source_language,
-                            language_detector=self._language_detector,
-                            require_parallel_russian=self._a2_summary_requires_parallel_russian(),
+                    if part_divider:
+                        _ensure_candidates_single_script(response.payload, context)
+                        self._resolved_content_plan.set(None)
+                    else:
+                        response = replace(response, payload=self._normalize_a2_dialogue(
+                            response.payload, blocks, context.block_ids_by_alias,
+                        ))
+                        if self._context_builder._reader_level == "a2":
+                            validate_a2_summary(
+                                response.payload.chapter_summary,
+                                source_texts=tuple(block.text for block in blocks),
+                                source_language=source_language,
+                                language_detector=self._language_detector,
+                                require_parallel_russian=self._a2_summary_requires_parallel_russian(),
+                            )
+                        if request.contract_version in {3, 5}:
+                            record_reader_warnings(self._unit_of_work, response,
+                                [('summary', response.payload.chapter_summary),
+                                 *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
+                                reader_level=self._context_builder._reader_level)
+                        _ensure_plan_covers_chapter(response.payload, context)
+                        plan_items_from_response(
+                            response.payload,
+                            block_ids_by_alias=context.block_ids_by_alias,
+                            blocks=blocks,
+                            require_all=True,
                         )
-                    if request.contract_version in {3, 5}:
-                        record_reader_warnings(self._unit_of_work, response,
-                            [('summary', response.payload.chapter_summary),
-                             *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
-                            reader_level=self._context_builder._reader_level)
-                    _ensure_plan_covers_chapter(response.payload, context)
-                    plan_items_from_response(
-                        response.payload,
-                        block_ids_by_alias=context.block_ids_by_alias,
-                        blocks=blocks,
-                        require_all=True,
-                    )
-                    _ensure_candidates_single_script(response.payload, context)
-                    plan = validate_content_plan(
-                        response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
-                        english_help=self._context_builder._english_help,
-                        before_you_read_limit=context.before_you_read_limit,
-                        language_notes_per_chapter=context.language_notes_per_chapter,
-                        note_limits_by_block=context.note_limits_by_block,
-                        note_group_limits=context.note_group_limits,
-                        visible_texts_by_alias=context.visible_texts_by_alias,
-                        blocks=blocks,
-                    )
-                    if request.contract_version in {3, 5}:
-                        if resolved_concepts is None:
-                            with self._unit_of_work.transaction() as transaction:
-                                resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
-                        validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
-                    self._resolved_content_plan.set(plan)
+                        _ensure_candidates_single_script(response.payload, context)
+                        plan = validate_content_plan(
+                            response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+                            english_help=self._context_builder._english_help,
+                            before_you_read_limit=context.before_you_read_limit,
+                            language_notes_per_chapter=context.language_notes_per_chapter,
+                            note_limits_by_block=context.note_limits_by_block,
+                            note_group_limits=context.note_group_limits,
+                            visible_texts_by_alias=context.visible_texts_by_alias,
+                            blocks=blocks,
+                        )
+                        if request.contract_version in {3, 5}:
+                            if resolved_concepts is None:
+                                with self._unit_of_work.transaction() as transaction:
+                                    resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
+                            validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
+                        self._resolved_content_plan.set(plan)
                 except (ApplicationError, DomainError) as error:
                     if not isinstance(error, ResultValidationError) or error.expectation is None:
                         raise ResultValidationError(
@@ -1311,7 +1432,7 @@ class AnalyzeChapter:
         )
 
     def _candidates(
-        self, payload: ChapterAnalysisResponse, *, analysis_id: str
+        self, payload: ChapterAnalysisResponse | NarrativeAnalysisResponse, *, analysis_id: str
     ) -> tuple[GlossaryCandidate, ...]:
         """Glossary candidates of the chapter with computed `requires_review` (DTO-01).
 
@@ -1523,6 +1644,14 @@ class ChapterAnalysisSequence:
         )
         if first_content is None:
             return [section.id for section in unanalyzed]
+        prewave_dividers = [
+            section.id
+            for section in unanalyzed
+            if section.order < first_content.order
+            and _is_meaningful_part_divider(document, section)
+        ]
+        if prewave_dividers:
+            return prewave_dividers
         return [
             section.id
             for section in unanalyzed
@@ -1543,18 +1672,30 @@ class ChapterAnalysisSequence:
             if document is None:
                 return False
             seed_section = _first_content_section(document)
-            if seed_section is None or finished_section_id != seed_section.id:
+            if seed_section is None:
                 return False
             analyzed = {
                 analysis.section_id
                 for analysis in transaction.analyses.list_for_book(book_id)
             }
-            if seed_section.id not in analyzed:
-                return False
-            return any(
-                section.id not in analyzed
+            if finished_section_id == seed_section.id:
+                if seed_section.id not in analyzed:
+                    return False
+                return any(
+                    section.id not in analyzed
+                    for section in document.ordered_sections
+                )
+            prewave_dividers = [
+                section
                 for section in document.ordered_sections
-            )
+                if section.order < seed_section.order
+                and _is_meaningful_part_divider(document, section)
+            ]
+            if any(section.id == finished_section_id for section in prewave_dividers):
+                if seed_section.id in analyzed:
+                    return False
+                return all(section.id in analyzed for section in prewave_dividers)
+            return False
 
     def _unanalyzed_section_ids(self, book_id: str) -> list[str]:
         """Chapters in reading order for which no analysis exists yet."""
@@ -1846,6 +1987,24 @@ def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...
                 for quote in quotes:
                     add(quote if len(quote) <= 80 else quote[:77].rstrip() + "...")
     return tuple(topics)
+
+
+def _has_meaningful_part_title(
+    document: CanonicalDocument, section: DocumentSection
+) -> bool:
+    checker = getattr(document, "has_meaningful_part_title", None)
+    return bool(checker(section)) if callable(checker) else False
+
+
+def _is_meaningful_part_divider(
+    document: CanonicalDocument, section: DocumentSection
+) -> bool:
+    is_front_matter = getattr(document, "is_front_matter", lambda _s: False)
+    return (
+        bool(is_front_matter(section))
+        and _has_meaningful_part_title(document, section)
+        and bool(textual_blocks(section))
+    )
 
 
 def _is_content_section(
