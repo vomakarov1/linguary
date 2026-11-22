@@ -16,6 +16,7 @@ and rejected requests are permanent. The provider API key is never exposed in er
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -39,6 +40,7 @@ from linguary.application.ports.llm import (
     LLMResponse,
     LLMResponseFormatError,
     LLMTransportError,
+    TransportOutcome,
 )
 from linguary.domain import TokenUsage
 from linguary.application.diagnostics import bounded_body
@@ -80,6 +82,12 @@ _CONTEXT_OVERFLOW_PHRASES = (
 #: Finish reason indicating generation cut off due to token limits.
 _LENGTH_FINISH_REASON = "length"
 
+#: Finish reason indicating the provider stopped generation with a content filter.
+_CONTENT_FILTER_FINISH_REASON = "content_filter"
+
+#: HTTP statuses whose body is a known, repeatable transient provider response.
+_KNOWN_TRANSIENT_STATUSES = frozenset({429, 500, 503})
+
 #: Number of response characters included in error details.
 _DETAIL_LIMIT = 300
 
@@ -119,6 +127,12 @@ class OpenAICompatibleLLMClient(LLMClient):
         """Executes request and returns parsed structured response."""
         try:
             document = await self._post(_body(request, settings=self._settings))
+            _raise_embedded_gateway_error(
+                document,
+                provider=self._settings.provider,
+                api_key=self._settings.api_key,
+                secrets=self._proxy_secrets,
+            )
         except LLMContextCapacityError as error:
             error.provider = self._settings.provider
             error.model = self._safe(self._settings.model)
@@ -135,14 +149,27 @@ class OpenAICompatibleLLMClient(LLMClient):
             choice = _choice(document)
             finish_reason = _finish_reason(choice)
             truncated = finish_reason == _LENGTH_FINISH_REASON
-            if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
-                message = choice.get('message')
-                if isinstance(message, dict) and message.get('refusal'):
-                    raise LLMResponseFormatError(
-                        'провайдер отказался исправлять главу', truncated=truncated,
-                        violation=Violation('provider_refusal', request.kind.value,
-                                            safe_message='Провайдер отказался исправлять главу'),
-                    )
+            message = choice.get('message')
+            if not isinstance(message, dict):
+                message = None
+            if message is not None and message.get('refusal'):
+                correction = request.kind in {
+                    LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+                }
+                raise LLMResponseFormatError(
+                    'провайдер отказался исправлять главу' if correction else 'провайдер отказался выполнить запрос',
+                    truncated=False,
+                    violation=Violation(
+                        'provider_refusal', request.kind.value,
+                        safe_message='Провайдер отказался исправлять главу' if correction else 'Провайдер отказался выполнить запрос',
+                    ),
+                )
+            if finish_reason == _CONTENT_FILTER_FINISH_REASON:
+                raise LLMResponseFormatError(
+                    'провайдер остановил ответ фильтром содержимого', truncated=False,
+                    violation=Violation('provider_content_filter', request.kind.value,
+                                        safe_message='Провайдер остановил ответ фильтром содержимого'),
+                )
             content = _content(
                 choice,
                 truncated=truncated,
@@ -218,22 +245,47 @@ class OpenAICompatibleLLMClient(LLMClient):
                     headers=_headers(self._settings),
                     timeout=self._settings.timeout_seconds,
                 )
-        except (httpx.TimeoutException, TimeoutError):
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
             raise LLMTransportError(
-                f"провайдер {self._settings.provider} не ответил за "
-                f"{self._settings.timeout_seconds:g} с"
+                _transport_failure_message(error, settings=self._settings, secrets=self._proxy_secrets),
+                outcome=_connect_outcome(self._settings.base_url, self._settings.proxy_mode),
             ) from None
-        except httpx.HTTPError as error:
+        except (
+            httpx.WriteTimeout, httpx.WriteError, httpx.ReadTimeout, httpx.ReadError,
+            httpx.RemoteProtocolError, httpx.CloseError, httpx.DecodingError,
+            httpx.TimeoutException, httpx.HTTPError, TimeoutError,
+        ) as error:
             raise LLMTransportError(
-                safe_detail(
-                    f"вызов провайдера {self._settings.provider} не удался: {self._safe(str(error))}",
-                    api_key=self._settings.api_key, secrets=self._proxy_secrets,
-                )
+                _transport_failure_message(error, settings=self._settings, secrets=self._proxy_secrets),
+                outcome='unknown',
             ) from None
         _raise_for_status(
             response, provider=self._settings.provider, api_key=self._settings.api_key, secrets=self._proxy_secrets
         )
         return _document(response, api_key=self._settings.api_key, secrets=self._proxy_secrets)
+
+
+def _connect_outcome(base_url: str, proxy_mode: str) -> TransportOutcome:
+    """Plain HTTP via a proxy is not proof that the request stayed unsent."""
+    if urlsplit(base_url).scheme == "http" and proxy_mode != "direct":
+        return "unknown"
+    return "not_sent"
+
+
+def _transport_failure_message(
+    error: Exception, *, settings: LLMSettings, secrets: tuple[str, ...]
+) -> str:
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        return (
+            f"провайдер {settings.provider} не ответил за "
+            f"{settings.timeout_seconds:g} с"
+        )
+    detail = safe_detail(str(error), api_key=settings.api_key, secrets=secrets)
+    return safe_detail(
+        f"вызов провайдера {settings.provider} не удался: {detail}",
+        api_key=settings.api_key,
+        secrets=secrets,
+    )
 
 
 def _endpoint(base_url: str) -> str:
@@ -344,14 +396,41 @@ def _raise_for_status(
             f"у провайдера {provider} не хватает средств на счёте: {detail}"
         )
     if status == _RATE_LIMIT_STATUS or status >= 500:
+        outcome: TransportOutcome = 'known_transient' if status in _KNOWN_TRANSIENT_STATUSES else 'unknown'
         raise LLMTransportError(
             f"провайдер {provider} временно недоступен: {detail}",
             retry_after_seconds=_retry_after(response),
+            outcome=outcome,
         )
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {detail}")
 
 
 OpenAICompatibleLLMClient._raise_for_status = staticmethod(_raise_for_status)
+
+
+def _gateway_status(error: Any) -> int:
+    """Numeric gateway code, or 400 so phrase and string overflow codes still match."""
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, str) and code.strip().isdigit():
+        code = int(code.strip())
+    if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
+        return code
+    return 400
+
+
+def _raise_embedded_gateway_error(
+    document: dict[str, Any], *, provider: str, api_key: str | None, secrets: tuple[str, ...]
+) -> None:
+    """HTTP 200 with an error object and no choices is classified by the gateway code."""
+    error = document.get("error")
+    choices = document.get("choices")
+    if (isinstance(choices, list) and choices) or not error:
+        return
+    status = _gateway_status(error)
+    _raise_for_status(
+        httpx.Response(status, json=document), provider=provider, api_key=api_key, secrets=secrets
+    )
+    raise LLMProviderError(f"провайдер {provider} отверг запрос: {status}")
 
 
 def _is_context_capacity_error(response: httpx.Response) -> bool:
@@ -371,11 +450,10 @@ def _is_context_capacity_error(response: httpx.Response) -> bool:
     code = error.get("code")
     if isinstance(code, str) and code in _CONTEXT_OVERFLOW_CODES:
         return True
-    if code is None:
-        message = error.get("message")
-        if isinstance(message, str):
-            lowered = message.lower()
-            return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
+    message = error.get("message")
+    if isinstance(message, str):
+        lowered = message.lower()
+        return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
     return False
 
 
@@ -392,7 +470,7 @@ def _retry_after(response: httpx.Response) -> float | None:
         seconds = float(raw)
     except ValueError:
         seconds = _seconds_until(raw)
-    if seconds is None or seconds != seconds or seconds < 0:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
 

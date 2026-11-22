@@ -7,11 +7,14 @@ task retry attempts on waiting. This decorator over `LLMClient` maintains an int
 
 Interval pacing is uniform without token bucket bursting: idle periods do not accumulate
 request credits, as providers evaluate rates using sliding windows and reject bursts anyway.
+Waiters share one FIFO queue and only its head sleeps. The admit time is the moment the head
+actually proceeds, so a provider cool-down cannot release the queue in one burst.
 
 A rate limit rejection carrying a `Retry-After` header delays the next available dispatch slot
 for all workers: the provider announced when it will accept requests again, so peer workers
-should not trigger the same rejection prematurely. The retry delay for the failed request itself
-is scheduled by the retry policy (`RetryPolicy`) using the same duration.
+should not trigger the same rejection prematurely. Non-finite, non-positive, and over-long
+values are ignored or capped. The retry delay for the failed request itself is scheduled by
+the retry policy (`RetryPolicy`) using the same duration.
 
 The schedule queue is guarded by a thread lock rather than an event loop lock: the limiter's
 lifecycle matches the application process and must not depend on which event loop or thread invokes it.
@@ -23,6 +26,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+import math
 import threading
 import time
 
@@ -41,26 +45,34 @@ type Sleep = Callable[[float], Awaitable[None]]
 _SECONDS_PER_MINUTE = 60
 
 
+def _retrieve_task_exception(task: asyncio.Task[object]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
 class LLMRateLimiter:
-    """Shared request reservations, concurrency cap, and independent provider cool-down delay."""
+    """FIFO admission, a concurrency cap, and an independent provider cool-down."""
 
     def __init__(
         self,
         requests_per_minute: int | None = None,
         *,
         max_concurrency: int | None = None,
+        max_hold_seconds: float = 120.0,
         clock: Clock | None = None,
         sleep: Sleep | None = None,
     ) -> None:
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
         self._lock = threading.Lock()
-        self._last_numeric_slot: float | None = None
-        self._last_unlimited_call: float | None = None
-        self._provider_blocked_until = 0.0
+        self._last_admitted: float | None = None
+        self._provider_blocked_until: float | None = None
+        self._max_hold_seconds = max_hold_seconds
         self._max_concurrency: int | None = None
         self._in_flight = 0
         self._concurrency_waiters: deque[list[object]] = deque()
+        self._pacing_waiters: deque[asyncio.Future[None]] = deque()
+        self._head_wake: asyncio.Future[None] | None = None
         self.set_limit(requests_per_minute)
         self.set_max_concurrency(max_concurrency)
 
@@ -82,6 +94,7 @@ class LLMRateLimiter:
         with self._lock:
             self._requests_per_minute = value
             self._interval = interval
+            self._wake_pacing_head_locked()
 
     def set_max_concurrency(self, value: int | None) -> None:
         if value is not None and (type(value) is not int or value < 1):
@@ -144,7 +157,13 @@ class LLMRateLimiter:
             if running_loop is waiter.get_loop():
                 waiter.set_result(None)
             else:
-                waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
+                try:
+                    waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
+                except RuntimeError:
+                    # The waiter's loop is already closed, so the handoff never ran.
+                    entry[1] = False
+                    self._in_flight -= 1
+                    continue
 
     @staticmethod
     def _resolve_waiter(waiter: asyncio.Future[None]) -> None:
@@ -152,34 +171,134 @@ class LLMRateLimiter:
             waiter.set_result(None)
 
     async def acquire(self) -> None:
+        loop = asyncio.get_running_loop()
+        ticket: asyncio.Future[None] = loop.create_future()
         with self._lock:
-            slot = None
-            if self._interval is not None:
-                times = [self._clock()]
-                for previous in (self._last_numeric_slot, self._last_unlimited_call):
-                    if previous is not None:
-                        times.append(previous + self._interval)
-                slot = max(times)
-                self._last_numeric_slot = slot
-        while True:
+            self._pacing_waiters.append(ticket)
+        try:
+            while True:
+                with self._lock:
+                    is_head = bool(self._pacing_waiters) and self._pacing_waiters[0] is ticket
+                    if is_head:
+                        now = self._clock()
+                        delay = self._pacing_deadline_locked(now) - now
+                        if delay <= 0:
+                            self._last_admitted = now
+                            self._pacing_waiters.popleft()
+                            self._head_wake = None
+                            self._signal_next_pacing_locked()
+                            return
+                        wake = loop.create_future()
+                        self._head_wake = wake
+                    else:
+                        wake = None
+                        delay = None
+                if not is_head:
+                    await ticket
+                    continue
+                assert wake is not None and delay is not None
+                await self._sleep_until_wake(delay, wake)
+                with self._lock:
+                    if self._head_wake is wake:
+                        self._head_wake = None
+        finally:
             with self._lock:
-                now = self._clock()
-                deadline = self._provider_blocked_until
-                if slot is not None:
-                    deadline = max(deadline, slot)
-                delay = deadline - now
-                if delay <= 0:
-                    if slot is None:
-                        self._last_unlimited_call = now
-                    return
-            await self._sleep(delay)
+                was_head = bool(self._pacing_waiters) and self._pacing_waiters[0] is ticket
+                try:
+                    self._pacing_waiters.remove(ticket)
+                except ValueError:
+                    was_head = False
+                if was_head:
+                    self._head_wake = None
+                    self._signal_next_pacing_locked()
+
+    def _pacing_deadline_locked(self, now: float) -> float:
+        if self._interval and self._last_admitted is not None:
+            earliest = self._last_admitted + self._interval
+        else:
+            earliest = now
+        blocked = now if self._provider_blocked_until is None else self._provider_blocked_until
+        return max(now, earliest, blocked)
+
+    async def _sleep_until_wake(self, delay: float, wake: asyncio.Future[None]) -> None:
+        """Sleep for ``delay`` unless ``wake`` fires first. Reaps the sleep task without swallowing cancellation."""
+        if wake.done():
+            return
+        sleep_task = asyncio.create_task(self._sleep(delay))
+        try:
+            await asyncio.wait(
+                {sleep_task, wake},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not sleep_task.done():
+                try:
+                    sleep_task.cancel()
+                except RuntimeError:
+                    sleep_task = None
+            if sleep_task is not None:
+                try:
+                    sleep_task.add_done_callback(_retrieve_task_exception)
+                except RuntimeError:
+                    pass
+        if sleep_task.done() and not sleep_task.cancelled():
+            error = sleep_task.exception()
+            if error is not None:
+                raise error
+
+    def _signal_next_pacing_locked(self) -> None:
+        while self._pacing_waiters:
+            head = self._pacing_waiters[0]
+            if self._deliver(head):
+                return
+            self._pacing_waiters.popleft()
+            if (self._head_wake is not None and not self._head_wake.done()
+                    and self._head_wake.get_loop() is head.get_loop()):
+                self._head_wake = None
+
+    def _wake_pacing_head_locked(self) -> None:
+        if self._head_wake is None:
+            return
+        if self._deliver(self._head_wake):
+            return
+        wake = self._head_wake
+        self._head_wake = None
+        if self._pacing_waiters and self._pacing_waiters[0].get_loop() is wake.get_loop():
+            self._pacing_waiters.popleft()
+        self._signal_next_pacing_locked()
+
+    def _deliver(self, waiter: asyncio.Future[None]) -> bool:
+        if waiter.done():
+            return True
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is waiter.get_loop():
+            waiter.set_result(None)
+            return True
+        try:
+            waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
+        except RuntimeError:
+            return False
+        return True
 
     def hold(self, seconds: float) -> None:
-        """Extends provider cool-down period without altering numerical reservation slots."""
+        """Extend the provider cool-down. Ignore non-numeric, non-finite, and non-positive delays.
+
+        The extension is capped by ``max_hold_seconds``. Queued waiters keep sleeping and
+        recheck when they wake, so the cool-down cannot admit more than the head.
+        """
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            return
+        if not math.isfinite(seconds) or seconds <= 0:
+            return
+        delay = min(float(seconds), self._max_hold_seconds)
         with self._lock:
-            self._provider_blocked_until = max(
-                self._provider_blocked_until, self._clock() + seconds
-            )
+            until = self._clock() + delay
+            blocked = self._provider_blocked_until
+            if blocked is None or until > blocked:
+                self._provider_blocked_until = until
 
 
 class RateLimitedLLMClient(LLMClient):

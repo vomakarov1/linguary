@@ -954,4 +954,291 @@ def test_cli_retry_and_restart_translation_warn_when_book_is_paused(
     assert unpaused_captured.err == ""
 
 
+def test_cli_restart_translation_requires_acknowledge_flag_for_unknown_outcome(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unknown-outcome restart is rejected until --acknowledge-unknown-outcome is passed."""
+    import asyncio
+    from dataclasses import asdict, replace
+    from uuid import uuid4
+
+    from linguary.adapters.config import load_settings
+    from linguary.application.book_conditions import payload_digest
+    from linguary.application.recovery import NOTES_POLICY, RecoveryPolicy, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.composition import build_application
+    from linguary.domain import (
+        BlockTreatment,
+        BookStatus,
+        ChapterAnalysis,
+        LLMSettingsSnapshot,
+        ProcessingRun,
+        ProcessingRunStatus,
+        TreatmentPlan,
+    )
+    from linguary.domain.processing import GlossarySnapshot
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+
+    confirmation = (
+        "требуется явное подтверждение перезапуска после неизвестного исхода "
+        "(возможна повторная оплата)"
+    )
+    config = _config(tmp_path, llm_model="fake-model", api_key="secret-cli-key")
+    book_id = "book-cli-unknown-outcome"
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "import",
+                str(SYNTHETIC_EPUB),
+                "--book-id",
+                book_id,
+            ]
+        )
+        == 0
+    )
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    assert main(["--config", str(config), "analyze", book_id, "--reader-level", "b1"]) == 0
+    capsys.readouterr()
+
+    root_id = str(uuid4())
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        with app.unit_of_work.transaction() as tx:
+            cond = tx.work.latest_conditions(book_id)
+            doc = tx.documents.get(book_id)
+            assert cond is not None and doc is not None
+            for existing_task in tx.tasks.list_for_book(book_id):
+                tx.tasks.delete(existing_task.id)
+            first_section = doc.ordered_sections[0]
+            blocks = tuple(block.id for block in first_section.ordered_blocks if block.text.strip())
+            analysis = ChapterAnalysis.create(
+                id=f"analysis-{first_section.id}",
+                section_id=first_section.id,
+                treatment_plan=TreatmentPlan.of_treatments(
+                    first_section.id,
+                    [(block_id, BlockTreatment.TRANSLATE) for block_id in blocks],
+                ),
+                glossary_candidates=(),
+                translation_instructions="Сохраняй смысл.",
+                chapter_summary="Summary.",
+                expected_block_ids=list(blocks),
+            )
+            tx.analyses.save(book_id, analysis)
+            run = ProcessingRun(
+                id="run-unknown-cli",
+                book_id=book_id,
+                status=ProcessingRunStatus.ACTIVE,
+                glossary_snapshot=GlossarySnapshot(),
+                llm_settings_snapshot=LLMSettingsSnapshot(
+                    provider="openai_compatible", model="fake-model"
+                ),
+            )
+            tx.runs.add(run)
+            policy = RecoveryPolicy(**asdict(app.settings.recovery))
+            manifest = root_manifest(
+                book_id=book_id,
+                conditions_id=cond.id,
+                glossary_sha=payload_digest(asdict(run.glossary_snapshot)),
+                analysis_sha=payload_digest(asdict(analysis)),
+                plan_sha=None,
+                ordered_blocks=blocks,
+                treatments=tuple("TRANSLATE" for _ in blocks),
+                boundaries=tuple((block_id,) for block_id in blocks),
+                atomic_intervals=tuple((block_id,) for block_id in blocks),
+                max_source_chars=4000,
+                policy=policy,
+                block_chars={block_id: 20 for block_id in blocks},
+            )
+            manifest.update(
+                notes_policy=NOTES_POLICY,
+                active_run_id=run.id,
+                historical_coverage=[],
+            )
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_id,
+                    book_id,
+                    cond.id,
+                    str(uuid4()),
+                    manifest,
+                    calls_used=policy.max_calls,
+                    status="stopped",
+                    reason="unknown_outcome",
+                    operation_kind="translation",
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            for block_id in blocks:
+                tx.work.add_scope(RecoveryScope(str(uuid4()), root_id, (block_id,)))
+            book_rec = tx.books.get(book_id)
+            tx.books.save(replace(book_rec, status=BookStatus.PROCESSING))
+    finally:
+        asyncio.run(app.aclose())
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "restart-translation",
+                book_id,
+                root_id,
+                "--expected-generation",
+                "0",
+            ]
+        )
+        == 1
+    )
+    rejected = capsys.readouterr()
+    assert confirmation in rejected.err
+    assert "Successor root:" not in rejected.out
+
+    checked = build_application(settings=load_settings(config_path=config))
+    try:
+        with checked.unit_of_work.transaction() as tx:
+            stored = tx.work.get_root(root_id)
+            assert stored is not None
+            assert stored.superseded_by is None
+            assert stored.reason == "unknown_outcome"
+    finally:
+        asyncio.run(checked.aclose())
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "restart-translation",
+                book_id,
+                root_id,
+                "--expected-generation",
+                "0",
+                "--acknowledge-unknown-outcome",
+            ]
+        )
+        == 0
+    )
+    acknowledged = capsys.readouterr()
+    assert f"Book: {book_id}" in acknowledged.out
+    successor_line = next(
+        line for line in acknowledged.out.splitlines() if line.startswith("Successor root:")
+    )
+    successor_id = successor_line.split(":", 1)[1].strip()
+    assert successor_id
+
+    verified = build_application(settings=load_settings(config_path=config))
+    try:
+        with verified.unit_of_work.transaction() as tx:
+            predecessor = tx.work.get_root(root_id)
+            successor = tx.work.get_root(successor_id)
+            assert predecessor is not None and successor is not None
+            assert predecessor.superseded_by == successor_id
+            audit = successor.compatibility
+            assert audit["had_unknown_outcome"] is True
+            assert audit["acknowledged_duplicate_billing_risk"] is True
+            assert audit["predecessor_root_id"] == root_id
+            assert audit["previous_reason"] == "unknown_outcome"
+    finally:
+        asyncio.run(verified.aclose())
+
+
+async def test_web_lifespan_waits_gracefully_before_cancelling_worker(monkeypatch) -> None:
+    """Shutdown lets the worker finish inside the grace window and cancels it only after that."""
+    import asyncio
+
+    from fastapi import status
+
+    from linguary.application.use_cases.extend_recovery_limit import (
+        ExtendRecoveryLimitConflict,
+        ExtendRecoveryLimitError,
+        ExtendRecoveryLimitNotFoundError,
+    )
+    from linguary.application.use_cases.restart_translation import (
+        RestartTranslationConflict,
+        RestartTranslationError,
+    )
+    from linguary.web import app as web_app
+    from linguary.web.app import _status_for, create_app
+
+    assert web_app.DEFAULT_SHUTDOWN_GRACE_SECONDS == 5.0
+    assert _status_for(RestartTranslationConflict("conflict")) == status.HTTP_409_CONFLICT
+    assert _status_for(RestartTranslationError("rejected")) == status.HTTP_409_CONFLICT
+    assert (
+        _status_for(ExtendRecoveryLimitConflict("conflict", "generation"))
+        == status.HTTP_409_CONFLICT
+    )
+    assert _status_for(ExtendRecoveryLimitError("rejected", "limit")) == status.HTTP_409_CONFLICT
+    assert _status_for(ExtendRecoveryLimitNotFoundError()) == status.HTTP_404_NOT_FOUND
+
+    grace = 0.25
+    monkeypatch.setattr(web_app, "DEFAULT_SHUTDOWN_GRACE_SECONDS", grace)
+    loop = asyncio.get_running_loop()
+
+    class _Probe:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+            self.shutdown_at: float | None = None
+            self.closed_at: float | None = None
+            self.system_settings = self
+
+        def begin_close(self) -> None:
+            self.shutdown_at = loop.time()
+            self.release.set()
+
+        async def aclose(self) -> None:
+            self.closed_at = loop.time()
+
+    async def _shutdown(worker, probe: _Probe) -> None:
+        monkeypatch.setattr(web_app, "run_worker", worker)
+        web = create_app(application=probe, run_background_worker=True)
+        lifespan = web.router.lifespan_context(web)
+        await lifespan.__aenter__()
+        await asyncio.wait_for(started.wait(), 1)
+        await asyncio.wait_for(lifespan.__aexit__(None, None, None), 2)
+
+    stubborn_started = asyncio.Event()
+    cancelled_after: list[float] = []
+    stubborn = _Probe()
+
+    async def stubborn_worker(_application: object) -> None:
+        stubborn_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert stubborn.shutdown_at is not None
+            cancelled_after.append(loop.time() - stubborn.shutdown_at)
+            raise
+
+    started = stubborn_started
+    await _shutdown(stubborn_worker, stubborn)
+    assert cancelled_after and cancelled_after[0] >= grace * 0.8
+    assert stubborn.shutdown_at is not None and stubborn.closed_at is not None
+    assert stubborn.closed_at - stubborn.shutdown_at >= cancelled_after[0]
+
+    cooperative_started = asyncio.Event()
+    cooperative_finished = asyncio.Event()
+    cooperative_cancelled = False
+    cooperative = _Probe()
+
+    async def cooperative_worker(application: _Probe) -> None:
+        nonlocal cooperative_cancelled
+        cooperative_started.set()
+        try:
+            await application.release.wait()
+            await asyncio.sleep(grace / 5)
+            cooperative_finished.set()
+        except asyncio.CancelledError:
+            cooperative_cancelled = True
+            raise
+
+    started = cooperative_started
+    await _shutdown(cooperative_worker, cooperative)
+    assert cooperative_finished.is_set()
+    assert cooperative_cancelled is False
+    assert cooperative.shutdown_at is not None and cooperative.closed_at is not None
+    assert cooperative.closed_at - cooperative.shutdown_at < grace
+
+
 

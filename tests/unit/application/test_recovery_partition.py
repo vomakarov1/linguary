@@ -1287,7 +1287,7 @@ async def test_provider_truncated_indivisible_atomic_interval_does_not_trigger_r
         )
 
     assert not isinstance(exc_info.value, block_processing_module.RecoverySplit)
-    assert exc_info.value.reason == "unsafe_partition"
+    assert exc_info.value.reason == "output_truncated"
     assert isinstance(exc_info.value.original_error, ResultValidationError)
     assert generate_calls == 1
 
@@ -1989,6 +1989,333 @@ def test_historical_validation_skips_new_blocking_dialogue_and_note_checks():
     )
     assert len(roots) == 2
     assert tuple(roots[0].manifest["historical_coverage"]) == (b1.id,)
+
+
+def test_cohesive_poem_quote_list_table_blocks_are_indivisible():
+    """Adjacent poems, quotes, lists, and tables stay one atomic interval.
+
+    Paragraphs and headings stay divisible. BlockType values are Poem/Quote/ListItem/Table,
+    not the lowercase names that used to miss every block.
+    """
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.application.recovery import Recovery
+    from linguary.domain import BlockTreatment, BlockType, GlossarySnapshot, TreatmentPlan
+    from linguary.domain.analysis import ChapterAnalysis
+
+    sequence = (
+        ("poem-a", BlockType.POEM),
+        ("poem-b", BlockType.POEM),
+        ("gap", BlockType.PARAGRAPH),
+        ("poem-c", BlockType.POEM),
+        ("quote-a", BlockType.QUOTE),
+        ("quote-b", BlockType.QUOTE),
+        ("list-a", BlockType.LIST_ITEM),
+        ("list-b", BlockType.LIST_ITEM),
+        ("table-a", BlockType.TABLE),
+        ("table-b", BlockType.TABLE),
+        ("head-a", BlockType.HEADING),
+        ("head-b", BlockType.HEADING),
+        ("para-a", BlockType.PARAGRAPH),
+        ("para-b", BlockType.PARAGRAPH),
+    )
+    ids = tuple(name for name, _block_type in sequence)
+    roots, scopes = [], []
+
+    class WorkStore:
+        def latest_conditions(self, book_id):
+            return SimpleNamespace(
+                id="00000000-0000-0000-0000-000000000001",
+                payload={"checks": {"language_notes_per_chapter": 2}, "versions": {"validators": 1}},
+            )
+
+        def add_root(self, root):
+            roots.append(root)
+
+        def list_scopes(self, root_id):
+            return tuple(scope for scope in scopes if scope.root_id == root_id)
+
+        def add_scope(self, scope):
+            scopes.append(scope)
+
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore())
+
+    blocks = tuple(
+        SimpleNamespace(id=name, text="line", parent_id=None, type=block_type, attributes={})
+        for name, block_type in sequence
+    )
+    treatment = TreatmentPlan.of_treatments(
+        "section", tuple((name, BlockTreatment.TRANSLATE) for name in ids)
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis",
+        section_id="section",
+        treatment_plan=treatment,
+        translation_instructions="Translate.",
+        chapter_summary="Scene.",
+        expected_block_ids=ids,
+    )
+    units = (
+        SimpleNamespace(
+            block_ids=ids,
+            items=tuple(SimpleNamespace(block=block) for block in blocks),
+        ),
+    )
+    work = SimpleNamespace(
+        document=SimpleNamespace(id="book"),
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        processed_block_ids=set(),
+    )
+    Recovery(Uow()).prepare_roots(work, units, max_source_chars=1000, validator=None)
+    atoms = tuple(tuple(group) for group in roots[0].manifest["atomic_intervals"])
+    assert atoms == (
+        ("poem-a", "poem-b"),
+        ("gap",),
+        ("poem-c",),
+        ("quote-a", "quote-b"),
+        ("list-a", "list-b"),
+        ("table-a", "table-b"),
+        ("head-a",),
+        ("head-b",),
+        ("para-a",),
+        ("para-b",),
+    )
+
+
+def test_validate_historical_uses_v1_validation_policy():
+    """Accepted history stays on validation policy v1 and does not retune validators."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from processing_fakes import (
+        SECTION_ID,
+        TARGET_LANGUAGE,
+        make_block,
+        make_block_result,
+        make_response,
+        make_unit,
+        make_validator,
+        note_ids,
+    )
+    from linguary.application.recovery import Recovery
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY, require_policy
+    from linguary.domain import (
+        BlockProcessingResult,
+        BlockTreatment,
+        BlockType,
+        GlossarySnapshot,
+        TranslationUnit,
+        TreatmentPlan,
+    )
+    from linguary.domain.analysis import ChapterAnalysis
+
+    source = "L1\nL2\nL3"
+    substituted = "С1\n\nС3"
+    poem = make_block(order=0, text=source, type=BlockType.POEM)
+    inner = make_validator()
+    live = make_response((make_block_result(poem, translated_text=substituted),))
+    live_unit = make_unit((poem,))
+    assert require_policy(CURRENT_TRANSLATION_POLICY).validation_policy == "v2"
+    with pytest.raises(ResultValidationError):
+        inner.validate(
+            live,
+            unit=live_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+            historical=True,
+            validation_policy="v2",
+        )
+    accepted = inner.validate(
+        live,
+        unit=live_unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+        historical=True,
+        validation_policy="v1",
+    )
+    assert accepted[0].translated_text == substituted
+
+    recorded: list[dict] = []
+
+    class RecordingValidator:
+        def validate(self, payload, **kwargs):
+            recorded.append(kwargs)
+            if kwargs.get("validation_policy") != "v1":
+                raise AssertionError(
+                    "historical validation must pass validation_policy='v1', "
+                    f"got {kwargs.get('validation_policy')!r}"
+                )
+            return inner.validate(payload, **kwargs)
+
+    saved = BlockProcessingResult(
+        block_id=poem.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=substituted,
+    )
+    treatment_plan = TreatmentPlan.of_treatments(SECTION_ID, ((poem.id, BlockTreatment.TRANSLATE),))
+    analysis = ChapterAnalysis.create(
+        id="analysis-hist-v1",
+        section_id=SECTION_ID,
+        treatment_plan=treatment_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(poem.id,),
+    )
+    conditions = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000001",
+        payload={
+            "schema_version": 1,
+            "versions": {"validators": 1},
+            "checks": {"language_notes_per_chapter": 4},
+        },
+    )
+    roots, scopes = [], []
+
+    class WorkStore:
+        def latest_conditions(self, _book_id):
+            return conditions
+
+        def add_root(self, root):
+            roots.append(root)
+
+        def list_scopes(self, root_id):
+            return tuple(scope for scope in scopes if scope.root_id == root_id)
+
+        def add_scope(self, scope):
+            scopes.append(scope)
+
+    class ResultsStore:
+        def get(self, _run_id, block_id):
+            return saved if block_id == poem.id else None
+
+    class FakeUow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore(), results=ResultsStore())
+
+    work = SimpleNamespace(
+        document=SimpleNamespace(id="book"),
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        processed_block_ids={poem.id},
+        target_language=TARGET_LANGUAGE,
+    )
+    units = (TranslationUnit.of_blocks(id="u-poem", blocks=(poem,), plan=treatment_plan),)
+    Recovery(FakeUow()).prepare_roots(
+        work,
+        units,
+        max_source_chars=1000,
+        validator=RecordingValidator(),
+    )
+    assert conditions.payload["versions"]["validators"] == 1
+    assert recorded and recorded[0]["validation_policy"] == "v1"
+    assert recorded[0]["historical"] is True
+    assert len(roots) == 1
+    assert tuple(roots[0].manifest["historical_coverage"]) == (poem.id,)
+
+
+def test_task_store_claim_retries_transient_sqlite_busy(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """claim_next_pending retries locked/busy, rolls back, and does not retry other errors."""
+    import sqlite3
+    from datetime import UTC, datetime
+    from sqlalchemy.engine import Connection
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+    import linguary.adapters.runtime.task_store as task_store_module
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.runtime.task_store import SqliteTaskStore
+    from linguary.application.ports.persistence import BookRecord, PersistenceError
+    from linguary.domain import BookMetadata, BookStatus, TaskIdentity, TaskStatus, TaskType
+
+    engine = create_database_engine(tmp_path / "task-store-busy.db")
+    Base.metadata.create_all(engine)
+    book_id = "book-busy"
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    with uow.transaction() as tx:
+        tx.books.add(
+            BookRecord(
+                id=book_id,
+                metadata=BookMetadata(title="Book", authors=("Author",)),
+                source_language="en",
+                target_language="ru",
+                status=BookStatus.PROCESSING,
+                source_epub_path="book.epub",
+                created_at=datetime.now(UTC),
+            )
+        )
+    store = SqliteTaskStore.for_engine(engine, id_factory=iter(["task-1", "task-2", "task-3"]).__next__)
+    identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
+    store.enqueue(identity)
+
+    sleeps: list[float] = []
+    rollbacks: list[int] = []
+    begins: list[str] = []
+    script = {"remaining": 3, "message": "database is busy"}
+    monkeypatch.setattr(
+        task_store_module,
+        "sleep",
+        lambda seconds: sleeps.append(round(seconds, 4)),
+        raising=False,
+    )
+    original_exec = Connection.exec_driver_sql
+    original_rollback = Session.rollback
+
+    def exec_driver_sql(self, statement, *args, **kwargs):
+        sql = str(statement)
+        if "BEGIN IMMEDIATE" in sql:
+            begins.append(sql)
+            if script["remaining"] > 0:
+                script["remaining"] -= 1
+                raise OperationalError(sql, {}, sqlite3.OperationalError(script["message"]))
+        return original_exec(self, statement, *args, **kwargs)
+
+    def rollback(self, *args, **kwargs):
+        rollbacks.append(1)
+        return original_rollback(self, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "exec_driver_sql", exec_driver_sql)
+    monkeypatch.setattr(Session, "rollback", rollback)
+    try:
+        claimed = store.claim_next_pending()
+        assert claimed is not None
+        assert claimed.id == "task-1"
+        assert claimed.status is TaskStatus.RUNNING
+        assert claimed.attempts == 1
+        assert sleeps == [0.005, 0.01, 0.015]
+        assert len(rollbacks) >= 3
+        assert begins.count("BEGIN IMMEDIATE") == 4
+
+        store.enqueue(TaskIdentity(book_id=book_id, task_type=TaskType.IMPORT_BOOK))
+        sleeps.clear()
+        rollbacks.clear()
+        begins.clear()
+        script["remaining"] = 20
+        script["message"] = "database is locked"
+        with pytest.raises(PersistenceError, match="база данных занята"):
+            store.claim_next_pending()
+        assert sleeps == [0.005, 0.01, 0.015, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02]
+        assert len(begins) == 10
+        assert len(rollbacks) >= 10
+
+        store.enqueue(TaskIdentity(book_id=book_id, task_type=TaskType.QUALITY_REVIEW))
+        sleeps.clear()
+        rollbacks.clear()
+        begins.clear()
+        script["remaining"] = 5
+        script["message"] = "disk I/O error"
+        with pytest.raises(OperationalError, match="disk I/O error"):
+            store.claim_next_pending()
+        assert sleeps == []
+        assert len(begins) == 1
+        assert len(rollbacks) >= 1
+    finally:
+        engine.dispose()
 
 
 

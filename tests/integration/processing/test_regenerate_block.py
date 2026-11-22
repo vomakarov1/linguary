@@ -311,7 +311,7 @@ async def test_result_for_a_neighbour_block_is_rejected(
     )
     regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=1)
 
-    with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
+    with pytest.raises(RecoveryError, match="validation_error") as rejected:
         await regenerate(
             RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids()[0])
         )
@@ -479,7 +479,7 @@ async def test_regeneration_atomically_replaces_evidence(unit_of_work, accept):
         assert current[0].content_evidence.evidence[0].body_excerpt == body
         assert current[1] == previous[1]
     else:
-        with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
+        with pytest.raises(RecoveryError, match="validation_error") as rejected:
             await regenerate(command)
         assert isinstance(rejected.value.original_error, ResultValidationError)
         assert len(client.requests) == 2
@@ -503,7 +503,7 @@ async def test_failed_regeneration_preserves_accepted_fragment_help(unit_of_work
         block_reply('b1', translated_text=UNTRANSLATED_TEXT),
     ]))
     regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=1)
-    with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
+    with pytest.raises(RecoveryError, match="validation_error") as rejected:
         await regenerate(RegenerateBlockCommand(book_id=BOOK_ID, block_id=owner))
     assert isinstance(rejected.value.original_error, ResultValidationError)
     assert stored_results(unit_of_work) == previous

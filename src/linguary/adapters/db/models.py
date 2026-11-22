@@ -455,6 +455,22 @@ class LanguageNoteRow(Base):
     note: Mapped[str] = mapped_column(Text)
 
 
+class NoteNumberCounterRow(Base):
+    """Highest language-note ordinal already issued for one run and chapter."""
+
+    __tablename__ = "note_number_counters"
+    __table_args__ = (
+        CheckConstraint("chapter_number >= 1", name="chapter_number_positive"),
+        CheckConstraint("last_ordinal >= 0", name="last_ordinal_nonnegative"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("processing_runs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    chapter_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class ResultWarningRow(Base):
     """Non-blocking warning for a block processing result."""
 
@@ -548,6 +564,7 @@ __all__ = [
     "ImportWarningRow",
     "LLMCallLogRow",
     "LanguageNoteRow",
+    "NoteNumberCounterRow",
     "ProcessingRunRow",
     "ProcessingTaskRow",
     "ResourceRow",

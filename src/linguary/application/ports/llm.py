@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.correction_dto import ChapterCorrectionResponse, ChapterCorrectionReviewResponse
@@ -57,17 +57,31 @@ class LLMConfigurationError(LLMError):
     """
 
 
+type TransportOutcome = Literal["not_sent", "known_transient", "unknown"]
+
+
 class LLMTransportError(LLMError):
     """Transient call failure: timeout, connection drop, rate limit, provider error.
 
     `retry_after_seconds` — how long the provider requested to wait before the next request
     (`Retry-After` header of `429` and `503` responses), if reported. Retrying earlier will
     receive the same rejection, so retry policy does not make pauses shorter.
+
+    `outcome` separates a request proven not to have been sent (`not_sent`), a known
+    transient provider response (`known_transient`), and a send whose result cannot be
+    proven (`unknown`). Existing constructors stay `known_transient`.
     """
 
-    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+        outcome: TransportOutcome = "known_transient",
+    ) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+        self.outcome = outcome
 
 
 class LLMProviderError(LLMError):
@@ -332,4 +346,5 @@ __all__ = [
     "LLMResponseFormatError",
     "LLMResponseKind",
     "LLMTransportError",
+    "TransportOutcome",
 ]

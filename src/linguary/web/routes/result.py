@@ -250,12 +250,39 @@ async def resolve_correction_candidate(request: Request, application: CurrentApp
     return response
 
 
+def _acknowledgement_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return isinstance(value, str) and value in {"true", "on", "1"}
+
+
+async def _retry_acknowledgement(request: Request) -> bool:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            body = await request.json()
+        except ValueError:
+            return False
+        if isinstance(body, dict):
+            return _acknowledgement_flag(body.get("acknowledge_unknown_outcome"))
+        return False
+    if content_type.startswith(
+        ("application/x-www-form-urlencoded", "multipart/form-data")
+    ):
+        form = await request.form()
+        return _acknowledgement_flag(form.get("acknowledge_unknown_outcome"))
+    return False
+
+
 @router.post("/tasks/{task_id}/retry", response_model=TaskResponse)
-def retry_task(
+async def retry_task(
     request: Request, application: CurrentApplication, task_id: str
 ) -> TaskResponse | RedirectResponse:
     """Re-enqueue a recoverable failed task."""
-    task = application.retry_task(RetryTaskCommand(task_id=task_id))
+    task = application.retry_task(RetryTaskCommand(
+        task_id=task_id,
+        acknowledge_unknown_outcome=await _retry_acknowledgement(request),
+    ))
     notify = getattr(application.worker_pool, "notify", None)
     if callable(notify):
         notify()

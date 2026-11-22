@@ -11,14 +11,16 @@ language (ALG-05). The expectation can be supplied from the outside — the use 
 blocks to the model as it chooses, and clarification instructions must use the same block names
 as the request.
 
-Check order is significant: response coverage is checked first, because subsequent validators
+Check order is significant: a provider truncation signal is rejected before structural
+checks. Response coverage is still checked before the remaining validators, because they
 access response blocks by group identifiers.
 """
 
 from __future__ import annotations
 
+import inspect
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 
 from linguary.application.llm_dto import (
@@ -44,7 +46,10 @@ from linguary.application.validators.mixed_script import (
 )
 from linguary.application.validators.paragraphs import paragraph_violation
 from linguary.application.validators.repetition import repetition_warning
-from linguary.application.validators.service_messages import service_message_violation
+from linguary.application.validators.service_messages import (
+    SERVICE_MESSAGE_MARKERS,
+    service_message_violation,
+)
 from linguary.application.validators.tails import normalized_tail
 from linguary.application.validators.treatment import (
     content_violation,
@@ -125,6 +130,9 @@ class TranslationResultValidator:
         expectation: ResultExpectation | None = None,
         mandatory_glossary: Sequence[GlossarySnapshotEntry] = (),
         historical: bool = False,
+        validation_policy: str = "v1",
+        protected_quotes: Sequence[str] = (),
+        excluded_service_texts: Mapping[str, frozenset[str]] | None = None,
     ) -> tuple[BlockProcessingResult, ...]:
         """Validates the model response and builds block processing results.
 
@@ -135,15 +143,21 @@ class TranslationResultValidator:
         `note_id_factory` generates learning note identifiers (`ln-ch03-001`): their
         numbering depends on the chapter and already stored notes, which is use case knowledge.
         """
+        expected = expectation or expectation_for_unit(
+            unit, target_language=target_language
+        )
+        # finish_reason=length wins over coverage and structure on the same payload.
+        if truncated:
+            truncation = truncation_diagnostic(payload, unit=unit, truncated=True)
+            if truncation is not None:
+                message, violation = truncation
+                raise ResultValidationError(message, expectation=expected, violation=violation)
         from linguary.domain.learning import validate_assistance_body
         for assistance in payload.fragment_assistances:
             try:
                 validate_assistance_body(assistance.kind, assistance.text)
             except DomainError as error:
-                raise ResultValidationError(str(error), expectation=expectation) from error
-        expected = expectation or expectation_for_unit(
-            unit, target_language=target_language
-        )
+                raise ResultValidationError(str(error), expectation=expected) from error
         # Цельный перевод снимает сегменты только по явному признаку и только
         # у ответа без segments. Пустые режимы ожидания сегменты не снимают.
         unit = _unit_for_whole_translation(unit, expected, payload)
@@ -169,7 +183,11 @@ class TranslationResultValidator:
         for block in payload.blocks:
             single = replace(payload, blocks=(block,))
             self._ensure_block(
-                paragraph_violation(single, unit=unit),
+                paragraph_violation(
+                    single,
+                    unit=unit,
+                    strict_line_preservation=validation_policy == "v2",
+                ),
                 expected,
                 block_id=block.source_block_id,
                 rule_code="paragraph_count_mismatch",
@@ -213,12 +231,39 @@ class TranslationResultValidator:
         for block in text_payload.blocks:
             single = replace(text_payload, blocks=(block,))
             self._ensure_block(
-                service_message_violation(single),
+                _service_message_violation(
+                    single,
+                    strict_fields=validation_policy == "v2",
+                    protected_quotes=protected_quotes,
+                    excluded_texts=excluded_service_texts,
+                    include_assistances=False,
+                ),
                 expected,
                 block_id=block.source_block_id,
                 rule_code="service_message_leak",
                 safe_message="В ответе обнаружено служебное сообщение модели",
             )
+        if validation_policy == "v2" and text_payload.fragment_assistances:
+            assist_payload = replace(text_payload, blocks=(), language_notes=())
+            assist_problem = _service_message_violation(
+                assist_payload,
+                strict_fields=True,
+                protected_quotes=protected_quotes,
+                excluded_texts=excluded_service_texts,
+                include_assistances=True,
+            )
+            if assist_problem is None and not _checker_accepts_assistances():
+                assist_problem = _fragment_assistance_service_message(
+                    text_payload,
+                    protected_quotes=protected_quotes,
+                    excluded_service_texts=excluded_service_texts,
+                )
+            if assist_problem is not None:
+                raise ResultValidationError(
+                    assist_problem,
+                    expectation=expected,
+                    violation=_assistance_service_violation(),
+                )
         for block in text_payload.blocks:
             single = replace(text_payload, blocks=(block,))
             self._ensure_block(
@@ -672,6 +717,61 @@ def _unit_for_whole_translation(
     if not changed:
         return unit
     return replace(unit, items=tuple(items))
+
+
+def _service_message_violation(payload: TranslationResultResponse, **kwargs: object) -> str | None:
+    """Pass only the keywords the current service-message checker accepts."""
+    parameters = inspect.signature(service_message_violation).parameters
+    if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
+        return service_message_violation(payload, **kwargs)
+    forwarded = {name: value for name, value in kwargs.items() if name in parameters}
+    return service_message_violation(payload, **forwarded)
+
+
+def _checker_accepts_assistances() -> bool:
+    parameters = inspect.signature(service_message_violation).parameters
+    return "include_assistances" in parameters or any(
+        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+    )
+
+
+def _fragment_assistance_service_message(
+    payload: TranslationResultResponse,
+    *,
+    protected_quotes: Sequence[str],
+    excluded_service_texts: Mapping[str, frozenset[str]] | None,
+) -> str | None:
+    """Service-message scan of English Help, not attributed to a neighbouring block."""
+    excluded: set[str] = set()
+    if excluded_service_texts is not None:
+        for texts in excluded_service_texts.values():
+            excluded.update(texts)
+    quotes = tuple(sorted({quote for quote in protected_quotes if quote}, key=len, reverse=True))
+    for assistance in payload.fragment_assistances:
+        text = assistance.text
+        if not isinstance(text, str) or not text.strip() or text in excluded:
+            continue
+        masked = text
+        for quote in quotes:
+            masked = masked.replace(quote, " ")
+        lowered = masked.lower()
+        marker = next((item for item in SERVICE_MESSAGE_MARKERS if item in lowered), None)
+        if marker is not None:
+            return (
+                f"помощь к трудности {assistance.difficulty_id} содержит служебное "
+                f"сообщение модели: {marker!r}"
+            )
+    return None
+
+
+def _assistance_service_violation() -> Violation:
+    """Assistance text has no block of its own until a difficulty owner is known."""
+    return Violation(
+        "service_message_leak",
+        "translation_unit",
+        scope="unit",
+        safe_message="В ответе обнаружено служебное сообщение модели",
+    )
 
 
 def expectation_for_unit(

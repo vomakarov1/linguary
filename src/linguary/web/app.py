@@ -50,6 +50,11 @@ from linguary.application.use_cases.export_book import (
     ExportBookError,
     ExportBookNotFoundError,
 )
+from linguary.application.use_cases.extend_recovery_limit import (
+    ExtendRecoveryLimitConflict,
+    ExtendRecoveryLimitError,
+    ExtendRecoveryLimitNotFoundError,
+)
 from linguary.application.use_cases.import_book import ImportBookError
 from linguary.application.use_cases.regenerate_block import (
     RegenerateBlockError,
@@ -57,6 +62,10 @@ from linguary.application.use_cases.regenerate_block import (
 )
 from linguary.application.use_cases.register_book import RegisterBookError
 from linguary.application.use_cases.reset_processing import ResetProcessingError
+from linguary.application.use_cases.restart_translation import (
+    RestartTranslationConflict,
+    RestartTranslationError,
+)
 from linguary.application.use_cases.retry_task import RetryTaskError, TaskNotFoundError
 from linguary.composition import Application, build_application, run_worker
 from linguary.domain.errors import (
@@ -81,6 +90,9 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: or directly from the user — via bookmark navigation or the address bar.
 _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
+#: How long shutdown waits for the background worker to finish before cancelling it.
+DEFAULT_SHUTDOWN_GRACE_SECONDS = 5.0
+
 #: Use case and domain failures mapped to HTTP status codes (API-01).
 #:
 #: `409` — action impossible in current book status: glossary edit after processing start,
@@ -96,6 +108,7 @@ _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (RegenerateBlockNotFoundError, status.HTTP_404_NOT_FOUND),
     (ExportBookNotFoundError, status.HTTP_404_NOT_FOUND),
     (ExportArtifactNotFoundError, status.HTTP_404_NOT_FOUND),
+    (ExtendRecoveryLimitNotFoundError, status.HTTP_404_NOT_FOUND),
     (UploadRejectedError, status.HTTP_400_BAD_REQUEST),
     (RegisterBookError, status.HTTP_400_BAD_REQUEST),
     (ProcessingPlanUnavailableError, status.HTTP_409_CONFLICT),
@@ -106,6 +119,10 @@ _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (RegenerateBlockError, status.HTTP_409_CONFLICT),
     (ResetProcessingError, status.HTTP_404_NOT_FOUND),
     (RetryTaskError, status.HTTP_409_CONFLICT),
+    (RestartTranslationConflict, status.HTTP_409_CONFLICT),
+    (RestartTranslationError, status.HTTP_409_CONFLICT),
+    (ExtendRecoveryLimitConflict, status.HTTP_409_CONFLICT),
+    (ExtendRecoveryLimitError, status.HTTP_409_CONFLICT),
     (ExportBookError, status.HTTP_409_CONFLICT),
     (ImportBookError, status.HTTP_409_CONFLICT),
 )
@@ -268,9 +285,15 @@ def _lifespan(
             built.begin_close()
             try:
                 if worker is not None:
-                    worker.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await worker
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(worker),
+                            timeout=DEFAULT_SHUTDOWN_GRACE_SECONDS,
+                        )
+                    except TimeoutError:
+                        worker.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await worker
             finally:
                 try:
                     await built.system_settings.aclose()

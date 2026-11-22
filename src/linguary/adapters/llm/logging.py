@@ -7,6 +7,7 @@ while preserving diagnostics for status codes, token cost, and errors (PRD § 24
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -14,7 +15,11 @@ from decimal import Decimal
 from hashlib import sha256
 from uuid import uuid4
 
-from linguary.application.diagnostics import bounded_body, diagnostics_for
+from linguary.application.diagnostics import (
+    _is_transient_lock_error,
+    bounded_body,
+    diagnostics_for,
+)
 from linguary.application.retry_policy import violation_of
 from linguary.application.ports.llm import (
     LLMClient,
@@ -24,7 +29,7 @@ from linguary.application.ports.llm import (
     LLMResponse,
     LLMResponseFormatError,
 )
-from linguary.application.ports.persistence import UnitOfWork
+from linguary.application.ports.persistence import PersistenceError, UnitOfWork
 from linguary.application.retry_policy import classify_error
 from linguary.domain import LLMCallLog, TokenUsage
 from linguary.domain.llm_log import TokenPricing
@@ -66,6 +71,17 @@ class LoggingLLMClient(LLMClient):
         started_at = self._now()
         try:
             response = await self.inner.generate(request)
+        except asyncio.CancelledError as error:
+            self._log(
+                request=request,
+                started_at=started_at,
+                provider=self.provider,
+                model=self.model,
+                success=False,
+                error=error,
+                outcome=error,
+            )
+            raise
         except LLMResponseFormatError as error:
             error.raw_content, error.body_meta = _bound_if_needed(
                 error.raw_content, error.body_meta, max_bytes=policy.max_body_bytes
@@ -212,6 +228,11 @@ class LoggingLLMClient(LLMClient):
             if isinstance(error, LLMResponseFormatError):
                 error.call_id = entry.id
                 error.call_context = context
+        except PersistenceError as caught:
+            if _is_transient_lock_error(caught):
+                raise
+            self._observation_failed = True
+            diagnostics.fail()
         except Exception:
             self._observation_failed = True
             diagnostics.fail()

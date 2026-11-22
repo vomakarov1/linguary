@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from web_scenario import (
@@ -29,6 +30,8 @@ from linguary.domain import (
     TaskStatus,
     TaskType,
 )
+from linguary.domain.book_conditions import thaw
+from linguary.domain.recovery import CallAttempt
 
 HTML_HEADERS = {"accept": "text/html"}
 
@@ -319,6 +322,41 @@ def test_failed_chapter_correction_remains_visible_and_can_be_retried(
     assert retry.json()["task_type"] == TaskType.CHAPTER_CORRECTION.value
     assert retry.json()["task_type_label"] == "Исправление главы"
     assert retry.json()["status"] == TaskStatus.PENDING.value
+
+
+def test_unknown_chapter_correction_retry_requires_acknowledgement(
+    client: TestClient, application: Application
+) -> None:
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+    task = store_task(
+        application,
+        task=replace(failed_task(scenario), task_type=TaskType.CHAPTER_CORRECTION),
+    )
+    with application.unit_of_work.transaction() as tx:
+        tx.work.add_attempt(CallAttempt(str(uuid4()), scenario.book_id, state="unknown", task_id=task.id))
+
+    detail = client.get(f"/books/{scenario.book_id}")
+    assert detail.status_code == 200
+    failure = detail.json()["progress"]["failures"][0]
+    assert failure["task_id"] == task.id
+    assert failure["is_retryable"] is False
+    page = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS)
+    assert page.status_code == 200
+    assert f'action="/tasks/{task.id}/retry"' in page.text
+    assert 'name="acknowledge_unknown_outcome"' in page.text
+    denied = client.post(f"/tasks/{task.id}/retry")
+    assert denied.status_code == 409, denied.text
+    with application.unit_of_work.transaction() as tx:
+        assert tx.tasks.get(task.id).status is TaskStatus.FAILED
+    allowed = client.post(
+        f"/tasks/{task.id}/retry",
+        json={"acknowledge_unknown_outcome": True},
+    )
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.json()["status"] == TaskStatus.PENDING.value
+    with application.unit_of_work.transaction() as tx:
+        stored = next(item for item in tx.work.list_task_attempts(task.id) if item.state == "unknown")
+        assert thaw(stored.outcome)["acknowledged_duplicate_billing_risk"] is True
 
 
 def test_permanent_failure_is_not_retryable(

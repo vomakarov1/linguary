@@ -32,7 +32,7 @@ from linguary.domain import (
 )
 from linguary.domain.book_conditions import BookConditions, WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
-from linguary.domain.correction import CorrectionCheck, correction_policy, correction_task_identity, CORRECTION_POLICY_VERSION_V2
+from linguary.domain.correction import CorrectionCheck, correction_policy, correction_task_identity, is_candidate_correction_policy
 
 
 def original_block_payload(block):
@@ -863,7 +863,7 @@ def invalidate_correction(tx, book_id, run_id, block_ids, *, reconcile: bool = T
     tx.work.delete_correction_checks(run_id, block_ids=block_ids)
     binding = tx.work.get_binding('run', run_id)
     policy = {} if binding is None else binding['payload_json'].get('correction', {})
-    if policy.get('policy_version') == CORRECTION_POLICY_VERSION_V2:
+    if is_candidate_correction_policy(policy.get('policy_version')):
         tx.work.stale_correction_candidates(run_id, block_ids=block_ids)
     if reconcile:
         reconcile_corrections(tx, book_id)

@@ -9,7 +9,8 @@ from linguary.application.ports.llm import LLMResponseKind, LLMResponseFormatErr
 from linguary.application.quality_budget import QualityRoute
 from linguary.application.use_cases.quality_review import StartQualityReview
 from linguary.composition import build_application, drain_tasks
-from linguary.domain import LLMCallStage, TaskStatus, TokenUsage
+from linguary.domain import LLMCallStage, TaskStatus, TaskType, TokenUsage
+from linguary.domain.correction import CORRECTION_POLICY_VERSION_V3
 from linguary.domain.book_conditions import WorkStateError
 from test_recovery_commit import prepare, analysis_reply, translation_reply
 
@@ -711,7 +712,15 @@ async def test_quality_review_populates_missing_after_reconciled_unknown_and_pre
             current_res = tx.results.list_for_run(run.id)[0]
             tx.results.replace_results(run.id, (replace(current_res, translated_text='Изменённый перевод до запуска.'),))
         finished3 = await drain_tasks(app)
-        assert len(finished3) == 1 and finished3[0].status == TaskStatus.SUCCEEDED
+        # Replacing the translation without invalidate_correction leaves model
+        # coverage missing, so startup recovery also runs chapter correction.
+        by_type = {task.task_type: task for task in finished3}
+        assert set(by_type) == {TaskType.QUALITY_REVIEW, TaskType.CHAPTER_CORRECTION}
+        review_task = by_type[TaskType.QUALITY_REVIEW]
+        correction_task = by_type[TaskType.CHAPTER_CORRECTION]
+        assert review_task.status is TaskStatus.SUCCEEDED
+        assert correction_task.status is TaskStatus.SUCCEEDED
+        assert correction_task.policy_version == CORRECTION_POLICY_VERSION_V3
         state3 = app.quality_review.get('book-1', review3_id)
         assert state3['state'] == 'stale'
         assert state3['reason'] == 'manifest_changed'
@@ -721,7 +730,7 @@ async def test_quality_review_populates_missing_after_reconciled_unknown_and_pre
             assert tx.work.review_progress(review3_id)['partial'] is True
             rev3_accounted = tx.work.get_review(review3_id)
 
-        await app.quality_review.run_task(finished3[0])
+        await app.quality_review.run_task(review_task)
         with app.unit_of_work.transaction() as tx:
             assert tx.work.get_review(review3_id) == rev3_accounted
     finally:

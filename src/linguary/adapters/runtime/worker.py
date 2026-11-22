@@ -86,15 +86,33 @@ class TaskWorkerPool:
         Batch run mode: used by CLI and tests where waiting for new tasks is unnecessary.
         """
         finished: list[ProcessingTask] = []
-        await asyncio.gather(
-            *(self._drain_worker(finished) for _ in range(self._concurrency))
-        )
+        workers = [
+            asyncio.create_task(self._drain_worker(finished))
+            for _ in range(self._concurrency)
+        ]
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
         return tuple(finished)
+
+    @property
+    def stop_requested(self) -> bool:
+        """True once shutdown has disallowed new task claims."""
+        return self._stop.is_set()
 
     async def run_forever(self) -> None:
         """Manages worker coroutines until stopped, then awaits their completion."""
         if self._running:
             raise RuntimeError("пул воркеров уже запущен")
+        # Shutdown during startup recovery arrives before this loop. Clearing it
+        # would ignore the stop and hold the grace window until cancellation.
+        if self._stop.is_set():
+            return
         self._loop = asyncio.get_running_loop()
         self._running = True
         self._stop.clear()

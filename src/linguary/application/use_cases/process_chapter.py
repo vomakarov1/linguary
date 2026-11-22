@@ -65,6 +65,7 @@ from linguary.domain import (
     GlossaryCandidate,
     LLMCallStage,
     ProcessingRun,
+    ProcessingRunStatus,
     ProcessingTask,
     TaskIdentity,
     TaskStatus,
@@ -109,6 +110,18 @@ class ProcessChapterResult:
     attempts: int = 0
     usage: TokenUsage | None = None
     discarded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RootOutcome:
+    """One root's isolated result. `error` does not cancel sibling tasks."""
+
+    result: ProcessChapterResult
+    error: Exception | None = None
+    superseded: bool = False
+
+
+_RETIRED_ROOT_REASONS = frozenset({"interrupted", "superseded", "conditions_unavailable"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +339,7 @@ class ProcessChapter:
                 conditions = transaction.work.get_conditions(root.conditions_id)
                 if conditions is None:
                     raise RecoveryError('conditions_unavailable', recovery[0])
-                physical_context = transaction.work.begin_recovery_attempt(
+                physical_context = transaction.work.begin_local_acceptance(
                     *recovery,
                     task_id=work.task_id,
                     run_id=work.run.id,
@@ -335,28 +348,24 @@ class ProcessChapter:
                     prompt_hash=sha256(b"read_as_is").hexdigest(),
                     policy_version=root.policy_version,
                 )
-                if physical_context is None:
-                    raise RecoveryError('limit', recovery[0])
-                transaction.work.transition_attempt(physical_context.attempt_id, 'sent', expected_state='created')
-                transaction.work.transition_attempt(
-                    physical_context.attempt_id,
-                    'validated',
-                    expected_state='sent',
-                    outcome={'schema_version': 1, 'provider': 'local', 'model': 'local', 'call_id': None},
-                )
                 expected = {
                     b_id: transaction.work.get_binding('result', f'{work.run.id}:{b_id}')
                     for b_id in unit.block_ids
                 }
-            response = LLMResponse(raw_content="", payload=None, provider="local", model="local", call_context=physical_context, call_id=None)
-            self._call._validated_response.set(response)
-            self._call._expected_bindings.set(expected)
-            saved = self._call.save(
-                book_id=work.document.id,
-                run_id=work.run.id,
-                results=results,
-                reconcile=False,
-            )
+                response = LLMResponse(
+                    raw_content="", payload=None, provider="local", model="local",
+                    call_context=physical_context, call_id=None,
+                )
+                self._call._validated_response.set(response)
+                self._call._expected_bindings.set(expected)
+                saved = self._call.save(
+                    book_id=work.document.id,
+                    run_id=work.run.id,
+                    results=results,
+                    reconcile=False,
+                    chapter_num=work.chapter_number,
+                    transaction=transaction,
+                )
             return replace(
                 result,
                 processed_units=result.processed_units + 1,
@@ -409,6 +418,7 @@ class ProcessChapter:
             run_id=work.run.id,
             results=call.results,
             reconcile=False,
+            chapter_num=work.chapter_number,
         )
         return replace(
             result,
@@ -433,45 +443,64 @@ class ProcessChapter:
             with note_id_lock:
                 return note_ids()
 
-        async def _process_single_root(root_id: str) -> ProcessChapterResult:
-            async with semaphore:
-                root_result = ProcessChapterResult(
-                    section_id=work.section.id,
-                    run_id=work.run.id,
-                )
-                while scopes := self._recovery.plan_unresolved(root_id):
-                    scope = scopes[0]
-                    unit = TranslationUnit.of_blocks(
-                        id=scope.id,
-                        blocks=tuple(blocks[block] for block in scope.ordered_blocks),
-                        plan=work.analysis.treatment_plan,
-                    )
-                    try:
-                        root_result = await self._process_unit(
-                            unit,
-                            work=work,
-                            note_ids=safe_note_ids,
-                            result=root_result,
-                            recovery=(root_id, scope.id),
-                            root=roots_by_id.get(root_id),
+        async def _process_single_root(root_id: str) -> _RootOutcome:
+            # A root error stays inside this task. Only cancellation of the coordinator
+            # cancels the siblings waiting in gather().
+            root_result = ProcessChapterResult(
+                section_id=work.section.id,
+                run_id=work.run.id,
+            )
+            try:
+                async with semaphore:
+                    while scopes := self._recovery.plan_unresolved(root_id):
+                        scope = scopes[0]
+                        unit = TranslationUnit.of_blocks(
+                            id=scope.id,
+                            blocks=tuple(blocks[block] for block in scope.ordered_blocks),
+                            plan=work.analysis.treatment_plan,
                         )
-                    except RecoverySplit:
-                        self._recovery.split(root_id, scope.id)
-                        continue
-                    if root_result.discarded:
-                        return root_result
-                self._recovery.assert_complete(root_id)
-                return root_result
+                        try:
+                            root_result = await self._process_unit(
+                                unit,
+                                work=work,
+                                note_ids=safe_note_ids,
+                                result=root_result,
+                                recovery=(root_id, scope.id),
+                                root=roots_by_id.get(root_id),
+                            )
+                        except RecoverySplit:
+                            self._recovery.split(root_id, scope.id)
+                            continue
+                        if root_result.discarded:
+                            if self._discarded_root_may_finish(root_id, work):
+                                return _RootOutcome(root_result, superseded=True)
+                            return _RootOutcome(
+                                root_result,
+                                error=RecoveryError('unsafe_partition', root_id),
+                            )
+                    self._recovery.assert_complete(root_id)
+                    return _RootOutcome(root_result)
+            except Exception as error:
+                retired = (
+                    isinstance(error, RecoveryError)
+                    and error.reason in _RETIRED_ROOT_REASONS
+                    and self._root_left_dispatcher(root_id, work)
+                )
+                return _RootOutcome(root_result, error=error, superseded=retired)
 
         tasks = [asyncio.create_task(_process_single_root(root_id)) for root_id in roots]
         try:
-            root_results = await asyncio.gather(*tasks)
+            outcomes = await asyncio.gather(*tasks)
         except BaseException:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        failure = next((item for item in outcomes if item.error is not None and not item.superseded), None)
+        if failure is not None:
+            raise failure.error
+        root_results = tuple(item.result for item in outcomes)
 
         processed_units = sum(r.processed_units for r in root_results)
         saved_blocks = sum(r.saved_blocks for r in root_results)
@@ -488,6 +517,43 @@ class ProcessChapter:
             usage=total_usage(usages),
             discarded=discarded,
         )
+
+    def _root_left_dispatcher(self, root_id: str, work: _ChapterWork) -> bool:
+        """True when restart superseded this root or removed it from the dispatcher."""
+        with self._unit_of_work.transaction() as transaction:
+            root = transaction.work.get_root(root_id)
+            if root is None or root.superseded_by is not None:
+                return True
+            if work.task_id is None:
+                return False
+            task = transaction.tasks.get(work.task_id)
+            if task is None or task.status is TaskStatus.SUPERSEDED:
+                return True
+            binding = transaction.work.get_binding('task', work.task_id)
+            if binding is None:
+                return False
+            refs = binding['payload_json'].get('operation_refs', ())
+            return not any(ref.get('root_id') == root_id for ref in refs)
+
+    def _discarded_root_may_finish(self, root_id: str, work: _ChapterWork) -> bool:
+        """A discarded save may finish only a retired root, a closed run, or complete coverage."""
+        with self._unit_of_work.transaction() as transaction:
+            root = transaction.work.get_root(root_id)
+            run = transaction.runs.get(work.run.id)
+            if root is None or root.superseded_by is not None:
+                return True
+            if run is None or run.status is not ProcessingRunStatus.ACTIVE:
+                return True
+            if work.task_id is not None:
+                task = transaction.tasks.get(work.task_id)
+                if task is None or task.status is TaskStatus.SUPERSEDED:
+                    return True
+                binding = transaction.work.get_binding('task', work.task_id)
+                if binding is not None:
+                    refs = binding['payload_json'].get('operation_refs', ())
+                    if not any(ref.get('root_id') == root_id for ref in refs):
+                        return True
+            return bool(transaction.work.root_coverage_complete(root_id, update_state=False))
 
     def _load(self, command: ProcessChapterCommand, *, transaction=None) -> _ChapterWork:
         """Loads the book, chapter analysis, and active run in a single transaction."""

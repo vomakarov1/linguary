@@ -27,6 +27,7 @@ from linguary.application.retry_policy import (
     RetryPolicyError,
     build_repair_instruction,
     classify_error,
+    violation_of,
 )
 from linguary.domain import (
     BlockOrderError,
@@ -714,3 +715,58 @@ def test_retry_policy_passes_violation_stage_and_rule_code() -> None:
     assert "- b3" in local_decision.repair_instruction
     assert "- b1" not in local_decision.repair_instruction
     assert "полный массив всех блоков" not in local_decision.repair_instruction
+
+
+def test_retry_policy_never_retries_unknown_transport_or_provider_refusal() -> None:
+    """Unknown sends, refusals, content filters, and unclassified errors are not auto-retried.
+
+    `classify_error` still maps an unrecognized exception to `TransientError`: the task stays
+    manually retryable. `decide` does not spend another paid attempt on it.
+    """
+    from linguary.domain.llm_log import Violation
+
+    retry_policy = policy(max_attempts=3)
+    unknown = LLMTransportError("исход отправки не доказан", outcome="unknown")
+    not_sent = LLMTransportError("соединение не установлено", outcome="not_sent")
+    known = LLMTransportError("429", outcome="known_transient")
+    refusal = LLMResponseFormatError(
+        "провайдер отказался выполнить запрос",
+        truncated=False,
+        violation=Violation(
+            "provider_refusal",
+            "translation_result",
+            safe_message="Провайдер отказался выполнить запрос",
+        ),
+    )
+    filtered = LLMResponseFormatError(
+        "провайдер остановил ответ фильтром содержимого",
+        truncated=False,
+        violation=Violation(
+            "provider_content_filter",
+            "translation_result",
+            safe_message="Провайдер остановил ответ фильтром содержимого",
+        ),
+    )
+    unclassified = RuntimeError("что-то пошло не так")
+
+    unknown_decision = retry_policy.decide(unknown, attempts=1)
+    assert unknown_decision.action is RetryAction.GIVE_UP
+    assert not unknown_decision.should_retry
+    assert unknown_decision.error.type is ErrorType.TRANSIENT
+
+    assert retry_policy.decide(refusal, attempts=1).action is RetryAction.GIVE_UP
+    assert retry_policy.decide(filtered, attempts=1).action is RetryAction.GIVE_UP
+    assert not retry_policy.decide(refusal, attempts=1).should_retry
+
+    assert classify_error(unclassified).type is ErrorType.TRANSIENT
+    unclassified_decision = retry_policy.decide(unclassified, attempts=1)
+    assert unclassified_decision.action is RetryAction.GIVE_UP
+    assert not unclassified_decision.should_retry
+    assert unclassified_decision.error.type is ErrorType.TRANSIENT
+
+    assert retry_policy.decide(not_sent, attempts=1).should_retry
+    assert retry_policy.decide(known, attempts=1).action is RetryAction.RETRY_AFTER_BACKOFF
+
+    assert violation_of(not_sent).rule_code == "transport_not_sent"
+    assert violation_of(known).rule_code == "transport_transient"
+    assert violation_of(unknown).rule_code == "transport_unknown"

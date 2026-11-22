@@ -8,6 +8,7 @@ from uuid import uuid4
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY, require_policy
 from linguary.domain.book_conditions import thaw
+from linguary.domain.document import BlockType
 from linguary.domain.recovery import RecoveryRoot, RecoveryScope
 
 
@@ -170,7 +171,8 @@ class Recovery:
         for left, right in zip(ordered, ordered[1:]):
             first, second = blocks[left], blocks[right]
             if ((first.parent_id is not None and first.parent_id == second.parent_id)
-                    or first.type == second.type and first.type.value in {'list_item', 'poem', 'quote', 'table'}):
+                    or first.type == second.type and first.type in {
+                        BlockType.LIST_ITEM, BlockType.POEM, BlockType.QUOTE, BlockType.TABLE}):
                 indivisible.append((left, right))
         intervals = dependency_intervals(ordered, None if operation_kind == 'regeneration' else work.analysis.content_plan, indivisible=indivisible)
         boundaries = tuple(unit.block_ids for unit in units)
@@ -288,6 +290,8 @@ class Recovery:
             target_language=work.target_language,
             note_id_factory=lambda: str(uuid4()),
             historical=True,
+            # Accepted results stay on v1. BookConditions.versions.validators is not a policy switch.
+            validation_policy='v1',
         )
         if work.analysis.content_plan is not None:
             plan = work.analysis.content_plan
@@ -341,6 +345,8 @@ class Recovery:
             scope = transaction.work.get_scope(scope_id)
             if root is None or scope is None or scope.root_id != root_id or root.superseded_by is not None:
                 raise RecoveryError('unsafe_partition', root_id)
+            if root.status not in {'pending', 'running'}:
+                raise RecoveryError(root.reason or 'interrupted', root_id)
             atoms = [tuple(group) for group in root.manifest['atomic_intervals'] if set(group) <= set(scope.ordered_blocks)]
             scopes = transaction.work.list_scopes(root_id)
             depth, parent = 0, scope
@@ -350,13 +356,15 @@ class Recovery:
             policy = root.manifest['policy']
             leaves = sum(item.status != 'split' for item in scopes)
             if len(atoms) < 2 or depth >= policy['max_depth'] or leaves + 1 > policy['max_leaves']:
-                transaction.work.stop_root(root_id, 'unsafe_partition')
+                transaction.work.stop_root(root_id, 'unsafe_partition', expected_generation=root.generation)
                 reason = 'unsafe_partition'
             else:
                 middle = len(atoms) // 2
                 children = tuple(tuple(block for atom in part for block in atom)
                     for part in (atoms[:middle], atoms[middle:]))
-                transaction.work.split_scope(scope_id, expected_generation=scope.generation, children=children)
+                transaction.work.split_scope(
+                    scope_id, expected_generation=scope.generation, children=children,
+                    expected_root_generation=root.generation)
                 reason = None
         if reason:
             raise RecoveryError(reason, root_id)

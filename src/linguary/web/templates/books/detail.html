@@ -138,7 +138,7 @@
   {% if data.progress.failures %}
     <h3>Ошибки</h3>
     {% for failure in data.progress.failures %}
-      {% if failure.is_retryable and data.recovery.reason not in ('unknown', 'limit') %}
+      {% if failure.is_retryable %}
         <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
           <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
           {% if failure.error_type == "ConfigurationError" %}
