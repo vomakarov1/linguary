@@ -151,6 +151,11 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="expected generation of the recovery root",
     )
+    restart_translation.add_argument(
+        "--acknowledge-unknown-outcome",
+        action="store_true",
+        help="confirm restart after an unknown provider outcome (possible duplicate charge)",
+    )
     restart_translation.set_defaults(handler=_restart_translation)
 
     worker = subparsers.add_parser(
@@ -406,6 +411,7 @@ def _restart_translation(args: argparse.Namespace) -> int:
                 book_id=args.book_id,
                 root_id=args.root_id,
                 expected_generation=args.expected_generation,
+                acknowledge_unknown_outcome=args.acknowledge_unknown_outcome,
             )
         )
         _warn_if_book_paused(application.unit_of_work, args.book_id)
