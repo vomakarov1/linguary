@@ -3296,10 +3296,10 @@ def test_pedagogical_a2_instructions_include_segments_example_stoplist_and_tense
     ped_a2 = _pedagogical_instructions("en", "ru", "a2", False)
     a2_guidance = _reader_level_treatment_guidance("a2")
 
-    # 1. Segment JSON example and >=4 segments / >=2 simple sentences split rule (keeping _SEGMENT_RULE).
+    # 1. Segment JSON example and >=3 segments / >=2 simple sentences split rule (keeping _SEGMENT_RULE).
     for text in (ped_raw, ped_a2, templates["pedagogical_analysis"], live_ctx.request.instructions):
         assert _SEGMENT_RULE in text
-        assert "4 и более сегментов" in text
+        assert "3 и более сегментов" in text
         assert "2 простых" in text
         assert '"segments":[{"index":1,"treatment":"READ_AS_IS"}' in text
         # 3. critical vs useful, lexical_hint in GLOSSARY_ONLY, and tense-name ban.
@@ -3853,6 +3853,154 @@ def test_non_staged_a2_summary_prompts_align_with_validate_a2_summary_rules() ->
         assert "точка с запятой «;»" in text
         assert "are lost" in text
         assert "At the end, a quote from [Author]'s book explains..." in text
+
+
+def test_v7_a2_summary_no_heading_prefix_byr_silence_note_budget_and_anchor_rules() -> None:
+    """Everlost v7 polish: ban summary heading prefix, drop A2 v3 BYR noise, tighten note budget & pedagogical rules."""
+    from linguary.application.context_builder import (
+        _FRAGMENT_SUMMARY_A2,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _WHOLE_CHAPTER_SUMMARY_A2,
+        _pedagogical_instructions,
+    )
+
+    no_heading_rule = (
+        "Не пиши в начале служебный заголовок вроде «Previously in Chapter:» — "
+        "начинай сразу с первого предложения пересказа."
+    )
+    templates_a2 = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    ped_a2 = _pedagogical_instructions("en", "ru", "a2", False)
+    whole_a2 = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment_a2 = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    for text in (
+        ped_a2,
+        templates_a2["pedagogical_analysis"],
+        _WHOLE_CHAPTER_SUMMARY_A2.format(source_language="en"),
+        _FRAGMENT_SUMMARY_A2.format(source_language="en"),
+        whole_a2,
+        fragment_a2,
+    ):
+        assert "(Previously in Chapter...):" not in text
+        assert no_heading_rule in text
+
+    section = make_analysis_section(
+        section_id="sec-v7",
+        title="Chapter 1",
+        order=0,
+        texts=("First block.", "Second block."),
+    )
+    document = make_analysis_document((section,))
+
+    # A2 + v3 (non-english-help): no contradictory BYR lines, explicit A2 empty BYR instruction.
+    a2_v3_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        language_notes_per_chapter=8,
+    )
+    a2_v3_ped = a2_v3_builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Summary.", before_you_read_limit=0,
+    )
+    a2_v3_single = a2_v3_builder.for_chapter_analysis(document=document, section=section)
+    for ctx in (a2_v3_ped, a2_v3_single):
+        assert "Соблюдай лимиты BYR и обязательных заметок" not in ctx.request.instructions
+        assert "Сначала используй существующий BYR" not in ctx.request.instructions
+        assert (
+            "Соблюдай лимиты обязательных заметок, указанные в запросе. "
+            "Для A2 верни before_you_read: [] и before_you_read_evidence: []."
+        ) in ctx.request.instructions
+        assert "В этом ответе не больше" not in ctx.request.input_text
+        assert "нельзя тратить все заметки только на TRANSLATE" in ctx.request.input_text
+        assert "GLOSSARY_ONLY и READ_AS_IS" in ctx.request.input_text
+        assert "не более половины лимита" in ctx.request.input_text
+
+    # B1/B2/C1 in v3 keep existing BYR instructions & limit line, plus get strengthened v3 note_budget_line.
+    for level in ("b1", "b2", "c1"):
+        lvl_ctx = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level=level,
+            language_notes_per_chapter=8,
+        ).for_chapter_pedagogical_analysis(document, section, narrative_summary="Summary.")
+        assert "Соблюдай лимиты BYR и обязательных заметок, указанные в запросе." in lvl_ctx.request.instructions
+        assert "Сначала используй существующий BYR" in lvl_ctx.request.instructions
+        assert "В этом ответе не больше" in lvl_ctx.request.input_text
+        assert "нельзя тратить все заметки только на TRANSLATE" in lvl_ctx.request.input_text
+        assert "GLOSSARY_ONLY и READ_AS_IS" in lvl_ctx.request.input_text
+
+    # Legacy v2 (even for A2) keeps old BYR behavior and simple note_budget_line unchanged.
+    a2_v2_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v2",
+        reader_level="a2",
+        language_notes_per_chapter=8,
+    ).for_chapter_analysis(document=document, section=section)
+    assert "Соблюдай лимиты BYR и обязательных заметок, указанные в запросе." in a2_v2_ctx.request.instructions
+    assert "Сначала используй существующий BYR" in a2_v2_ctx.request.instructions
+    assert "В этом ответе не больше" in a2_v2_ctx.request.input_text
+    assert "нельзя тратить все заметки только на TRANSLATE" not in a2_v2_ctx.request.input_text
+
+    # Pedagogical instructions: >=3 segments, parody/wordplay prototype, anchor coverage & dedup.
+    ped_raw = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2",
+    )
+    assert "3 и более сегментов" in ped_raw
+    assert "4 и более сегментов" not in ped_raw
+    assert "wordplay" in ped_raw
+    assert "исходное имя или текст-прототип" in ped_raw
+    assert "anchors обязан охватывать все слова, разбираемые в required_points" in ped_raw
+    assert "за пределами якоря" in ped_raw
+    assert "две трудности с одинаковым якорем в одном блоке" in ped_raw
+
+
+def test_v7_narrative_compact_instructions_and_fragment_speaker_facts_reminder() -> None:
+    """Narrative instructions enforce compact translation_instructions and full-fragment speaker facts."""
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    assert "3–8 общих правил на главу/фрагмент" in narrative
+    assert "пофразовый" in narrative
+    assert "подстрочник" in narrative
+    assert "в начале/конце фрагмента" in narrative
+    assert "остаётся неназванным" in narrative
+
+    section = make_analysis_section(
+        section_id="sec-v7-narr",
+        title="Chapter 2",
+        order=1,
+        texts=("First line.", "Second line.", "Third line.", "Fourth line."),
+    )
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+
+    whole_ctx = builder.for_chapter_narrative_analysis(document, section)
+    assert "равномерно с первого до последнего диалогового блока" not in whole_ctx.request.instructions
+
+    single_frag = plan_fragments(textual_blocks(section), max_blocks=10)[0]
+    single_frag_ctx = builder.for_chapter_narrative_analysis(
+        document, section, fragment=single_frag, fragment_count=1,
+    )
+    assert "равномерно с первого до последнего диалогового блока" not in single_frag_ctx.request.instructions
+
+    fragments = plan_fragments(textual_blocks(section), max_blocks=2)
+    assert len(fragments) == 2
+    for frag in fragments:
+        frag_ctx = builder.for_chapter_narrative_analysis(
+            document, section, fragment=frag, fragment_count=len(fragments),
+        )
+        assert "context_facts (speaker, pronoun_referent)" in frag_ctx.request.instructions
+        assert "равномерно с первого до последнего диалогового блока" in frag_ctx.request.instructions
+        assert "не пропуская начало нового фрагмента" in frag_ctx.request.instructions
 
 
 

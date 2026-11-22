@@ -869,13 +869,28 @@ _INSTRUCTION_INITIAL_BEFORE_DOT_RE = re.compile(r"(?:^|(?<!\w))[A-ZА-ЯЁ]\.$")
 _FRAGMENT_BOUNDARY_ARTIFACT_RE = re.compile(
     r"до\s+конца\s+фрагмента"
     r"|без\s+подстановки\s+имени\s+из\s+других\s+глав"
-    r"|в\s+этом\s+фрагменте\s+оста[её]тся\s+без\s+имени",
+    r"|в\s+этом\s+фрагменте\s+оста[её]тся\s+без\s+имени"
+    r"|в\s+начале\s+фрагмента"
+    r"|в\s+этом\s+фрагменте"
+    r"|в\s+текущем\s+фрагменте"
+    r"|данного\s+фрагмента"
+    r"|без\s+придуманного\s+имени",
     re.IGNORECASE,
 )
+_FRAGMENT_UNBOUNDED_UNNAMED_RE = re.compile(
+    r"оста[её]тся\s+(?:неназванн|без\s+имени)",
+    re.IGNORECASE,
+)
+_EXPLICIT_PLOT_BOUNDARY_RE = re.compile(r"\bдо\s+", re.IGNORECASE)
 
 
 def _is_fragment_boundary_artifact(text: str) -> bool:
-    return _FRAGMENT_BOUNDARY_ARTIFACT_RE.search(text) is not None
+    if _FRAGMENT_BOUNDARY_ARTIFACT_RE.search(text) is not None:
+        return True
+    return (
+        _FRAGMENT_UNBOUNDED_UNNAMED_RE.search(text) is not None
+        and _EXPLICIT_PLOT_BOUNDARY_RE.search(text) is None
+    )
 
 
 def _split_instruction_sentences(text: str) -> tuple[str, ...]:
@@ -1805,6 +1820,7 @@ _NARRATIVE_RULE_PRIORITY = (
     "spoiler_name_leak",
     "non_visual_fact",
     "speaker_subject_anchor",
+    "gender_plural_subject",
     "context_fact_conflict",
     "glossary_fact_conflict",
 )
@@ -2812,6 +2828,57 @@ def _collect_speaker_subject_anchor_issues(
     return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
 
 
+_GENDER_PLURAL_SUBJECT_RE = re.compile(
+    r"\b(?:brother|sister|mother|father|parents|friends|boys|girls|children|kids|men|women|siblings)"
+    r"\s+and\s+"
+    r"(?:brother|sister|mother|father|parents|friends|boys|girls|children|kids|men|women|siblings)\b",
+    re.IGNORECASE,
+)
+
+
+def _collect_gender_plural_subject_issues(
+    context_facts: Sequence[QuotedContextFactResponse],
+    resolved_facts: Sequence[
+        tuple[QuotedContextFactResponse, tuple[SourceAnchor, ...], SourceAnchor]
+    ],
+    aliases: Mapping[str, str],
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[list[str], list[str]]:
+    resolved_subject_by_fact_id = {
+        id(raw_fact): subject_anchor
+        for raw_fact, _, subject_anchor in resolved_facts
+    }
+    details: list[str] = []
+    block_ids: list[str] = []
+    for fact in context_facts:
+        if fact.kind != "gender":
+            continue
+        if (fact.value or "").strip().casefold() not in {"male", "female"}:
+            continue
+        resolved_subject = resolved_subject_by_fact_id.get(id(fact))
+        quote = (
+            resolved_subject.quote
+            if resolved_subject is not None
+            else fact.subject_anchor.quote
+        )
+        if _GENDER_PLURAL_SUBJECT_RE.search(quote) is None:
+            continue
+        block_id = (
+            resolved_subject.block_id
+            if resolved_subject is not None
+            else aliases.get(fact.subject_anchor.block_id)
+        )
+        label = (
+            aliases_by_block_id.get(block_id, fact.subject_anchor.block_id)
+            if block_id is not None
+            else fact.subject_anchor.block_id
+        )
+        details.append(f"{label}: «{_preview_quote(quote)}»")
+        if block_id is not None:
+            block_ids.append(block_id)
+    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
+
+
 def validate_narrative_response(
     payload: NarrativeAnalysisResponse,
     aliases: Mapping[str, str],
@@ -2919,6 +2986,22 @@ def validate_narrative_response(
                 "для факта speaker опора subject_anchor должна указывать на закавыченную реплику, "
                 f"а не на авторскую ремарку ({'; '.join(speaker_anchor_details)})",
                 tuple(speaker_anchor_blocks),
+            )
+        )
+
+    gender_plural_details, gender_plural_blocks = _collect_gender_plural_subject_issues(
+        payload.context_facts,
+        resolved_facts,
+        scoped_aliases,
+        scoped_aliases_by_block_id,
+    )
+    if gender_plural_details:
+        issues.append(
+            (
+                "gender_plural_subject",
+                "для kind=gender (male/female) subject_anchor должен указывать на одного персонажа, "
+                f"а не на группу через and ({'; '.join(gender_plural_details)})",
+                tuple(gender_plural_blocks),
             )
         )
 
@@ -3862,6 +3945,7 @@ def validate_content_plan(
         )
     note_owners = set()
     english_help_anchors = set()
+    seen_difficulty_anchors: dict[tuple[str, frozenset[tuple[str, int, int, str]]], str] = {}
     for difficulty in plan.difficulties:
         for anchor in difficulty.anchors:
             anchor.validate(texts)
@@ -3878,6 +3962,28 @@ def validate_content_plan(
                     block_ids=(anchor.block_id,),
                 )
             english_help_anchors.add(occurrence)
+        anchor_signature = frozenset(
+            (anchor.block_id, anchor.start, anchor.end, anchor.quote.strip())
+            for anchor in difficulty.anchors
+        )
+        if anchor_signature:
+            owner_key = (difficulty.owner_block_id, anchor_signature)
+            existing_id = seen_difficulty_anchors.get(owner_key)
+            if existing_id is not None:
+                label = aliases_by_block_id.get(
+                    difficulty.owner_block_id, difficulty.owner_block_id
+                )
+                msg = (
+                    "в одном блоке две трудности ссылаются на один и тот же якорь — "
+                    "объедини их или уточни якорь каждой трудности "
+                    f"({label}: {existing_id}, {difficulty.id})"
+                )
+                raise _analysis_error(
+                    msg,
+                    rule_code="duplicate_difficulty_anchor",
+                    block_ids=(difficulty.owner_block_id,),
+                )
+            seen_difficulty_anchors[owner_key] = difficulty.id
         covered = {
             e.point_id
             for e in plan.before_you_read_evidence
@@ -4199,6 +4305,25 @@ _SHORT_B1_PHRASES = (
     ("how", "very", "wrong"),
     ("suppose", "so"),
     ("kept", "what", "from"),
+    ("calm", "down"),
+    ("figure", "out"),
+    ("work", "out"),
+    ("turn", "out"),
+    ("give", "in"),
+    ("end", "up"),
+    ("break", "down"),
+    ("pass", "out"),
+    ("show", "up"),
+    ("hang", "on"),
+    ("hold", "on"),
+    ("make", "up"),
+    ("catch", "up"),
+    ("set", "off"),
+    ("bring", "up"),
+    ("carry", "on"),
+    ("come", "across"),
+    ("put", "up", "with"),
+    ("run", "out", "of"),
 )
 _A2_PRESENT_PERFECT_ADVERBS = (
     r"(?:not|never|ever|already|just|still|really|always|often|only|almost|"
@@ -4363,6 +4488,10 @@ _A2_IT_IS_TIME_RE = re.compile(
     r"\bit['’]s\s+(?:(?:about|high)\s+)?time\s+(?!to\b|for\b)(?:you|we|i|he|she|they|[a-z]+)\b",
     re.IGNORECASE,
 )
+_A2_QUOTED_SUBJECT_INVERSION_RE = re.compile(
+    r"""[”"’]\s*,?\s*was\s+all\s+(?:he|she|they|i|we|you|[a-z]+)\s+(?:said|asked|replied|answered|told|knew|saw|heard)\b""",
+    re.IGNORECASE,
+)
 _A2_NONLEXICAL_BACKING_KINDS = frozenset({"grammar", "idiom", "speech_style"})
 
 
@@ -4384,6 +4513,7 @@ def _has_a2_nonlexical_stoplist(text: str) -> bool:
         or _A2_NONSTANDARD_SPEECH_RE.search(text) is not None
         or _A2_STATE_CHANGE_IDIOM_RE.search(text) is not None
         or _A2_IT_IS_TIME_RE.search(text) is not None
+        or _A2_QUOTED_SUBJECT_INVERSION_RE.search(text) is not None
     ):
         return True
     if "?" not in text and _A2_INITIAL_WHAT_CLAUSE_RE.search(text) is not None:
@@ -4561,6 +4691,8 @@ def normalize_a2_dialogue_response(
             promoted_blocks.append(promoted)
         if demoted is not None:
             demoted_blocks.append(demoted)
+    pruned_removed_points: set[tuple[str, str]] = set()
+    point_id_remaps: dict[tuple[str, str], str] = {}
     switched = tuple(
         _prune_forward_difficulty_references(
             _switch_demoted_hint(
@@ -4569,6 +4701,8 @@ def normalize_a2_dialogue_response(
             ),
             blocks,
             block_ids_by_alias,
+            point_id_remaps=point_id_remaps,
+            removed_points=pruned_removed_points,
         )
         for difficulty in difficulties
     )
@@ -4586,14 +4720,20 @@ def normalize_a2_dialogue_response(
         return payload
     switched = kept
     plan = tuple(items)
-    removed_points = _removed_point_ids(difficulties, switched)
+    remapped_difficulty_ids = {diff_id for diff_id, _ in point_id_remaps}
+    removed_points = pruned_removed_points | _removed_point_ids(
+        tuple(d for d in difficulties if d.id not in remapped_difficulty_ids),
+        switched,
+    )
     if isinstance(payload, PedagogicalAnalysisResponse):
         return replace(
             payload,
             treatment_plan=plan,
             difficulties=switched,
             before_you_read_evidence=_evidence_without_removed_points(
-                payload.before_you_read_evidence, removed_points,
+                payload.before_you_read_evidence,
+                removed_points,
+                point_id_remaps,
             ),
         )
     content_plan = payload.content_plan
@@ -4606,7 +4746,9 @@ def normalize_a2_dialogue_response(
             content_plan,
             difficulties=switched,
             before_you_read_evidence=_evidence_without_removed_points(
-                content_plan.before_you_read_evidence, removed_points,
+                content_plan.before_you_read_evidence,
+                removed_points,
+                point_id_remaps,
             ),
         ),
     )
@@ -4637,13 +4779,22 @@ def _removed_point_ids(before, after) -> set[tuple[str, str]]:
     return removed
 
 
-def _evidence_without_removed_points(evidence, removed: set[tuple[str, str]]):
-    if not removed:
+def _evidence_without_removed_points(
+    evidence,
+    removed: set[tuple[str, str]],
+    point_id_remaps: Mapping[tuple[str, str], str] | None = None,
+):
+    if not removed and not point_id_remaps:
         return evidence
-    return tuple(
-        item for item in evidence
-        if (item.difficulty_id, item.point_id) not in removed
-    )
+    remaps = point_id_remaps or {}
+    updated = []
+    for item in evidence:
+        key = (item.difficulty_id, item.point_id)
+        if key in removed:
+            continue
+        new_point_id = remaps.get(key)
+        updated.append(replace(item, point_id=new_point_id) if new_point_id else item)
+    return tuple(updated)
 
 
 def _before_you_read_evidence(payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse):
@@ -5427,7 +5578,17 @@ def _is_unevidenced_trivial_grammar(
     )
 
 
-def _prune_forward_difficulty_references(difficulty, blocks, block_ids_by_alias):
+_STANDARD_POINT_ID_RE = re.compile(r"p\d+")
+
+
+def _prune_forward_difficulty_references(
+    difficulty,
+    blocks,
+    block_ids_by_alias,
+    *,
+    point_id_remaps: dict[tuple[str, str], str] | None = None,
+    removed_points: set[tuple[str, str]] | None = None,
+):
     """For A2 difficulties, prune forward anchors and forward-quoting points, keeping >= 1 point."""
     owner_index = _block_order_index(difficulty.owner_block_id, blocks, block_ids_by_alias)
     if owner_index is None:
@@ -5458,6 +5619,21 @@ def _prune_forward_difficulty_references(difficulty, blocks, block_ids_by_alias)
         if len(kept_points) != len(points):
             if not kept_points:
                 kept_points = (points[0],)
+            kept_original_ids = {point.id for point in kept_points}
+            if removed_points is not None:
+                for point in points:
+                    if point.id not in kept_original_ids:
+                        removed_points.add((updated.id, point.id))
+            if all(_STANDARD_POINT_ID_RE.fullmatch(point.id) for point in points):
+                renumbered: list = []
+                for idx, point in enumerate(kept_points, start=1):
+                    new_id = f"p{idx}"
+                    if point_id_remaps is not None and point.id != new_id:
+                        point_id_remaps[(updated.id, point.id)] = new_id
+                    renumbered.append(
+                        replace(point, id=new_id) if point.id != new_id else point
+                    )
+                kept_points = tuple(renumbered)
             updated = replace(updated, required_points=kept_points)
     return updated
 

@@ -15,6 +15,10 @@ _LEADING_EN_DASH = re.compile(r'^– ', re.MULTILINE)
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
+_A2_SUMMARY_HEADING_PREFIX_RE = re.compile(
+    r"^(?:previously\s+in\s+(?:the\s+)?chapter(?:\s+[\w-]+)?|chapter\s+[\w-]+\s+summary|summary)\s*[:—-]\s*",
+    re.IGNORECASE,
+)
 A2_SUMMARY_MAX_SENTENCES = 6
 A2_SUMMARY_WARNING_MAX_WORDS = 22
 A2_SUMMARY_HARD_MAX_SENTENCE_WORDS = 26
@@ -259,6 +263,14 @@ def validate_a2_summary(
             detail=(
                 f'текст не распознан как язык оригинала ({source_language}); '
                 'требуется ровно один абзац на языке оригинала без перевода на русский'
+            ),
+        )
+    if _A2_SUMMARY_HEADING_PREFIX_RE.match(paragraph):
+        raise ReaderTextError(
+            'a2_summary_disallowed_heading_prefix',
+            detail=(
+                'уберите служебный заголовок вроде «Previously in Chapter:» — '
+                'начинайте сразу с первого предложения пересказа'
             ),
         )
     if ';' in paragraph:

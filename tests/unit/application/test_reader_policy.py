@@ -564,3 +564,51 @@ def test_validate_a2_summary_rejects_semicolon_in_monolingual_mode_only():
         language_detector=LANGUAGE_DETECTOR,
         require_parallel_russian=True,
     )
+
+
+def test_validate_a2_summary_rejects_disallowed_heading_prefix_in_monolingual_mode_only():
+    bad_prefixes = (
+        "Previously in Chapter: Nick wakes up in Everlost.",
+        "Previously in Chapter 1: Nick wakes up in Everlost.",
+        "Previously in Chapter Two — Nick wakes up in Everlost.",
+        "Previously in the chapter - Nick wakes up in Everlost.",
+        "Chapter 3 Summary: Nick wakes up in Everlost.",
+        "Chapter three summary — Nick wakes up in Everlost.",
+        "Summary: Nick wakes up in Everlost.",
+        "summary - Nick wakes up in Everlost.",
+    )
+    for bad_summary in bad_prefixes:
+        with pytest.raises(
+            ReaderTextError, match='a2_summary_disallowed_heading_prefix'
+        ) as exc_info:
+            validate_a2_summary(
+                bad_summary,
+                source_texts=("Nick woke up in the woods.",),
+                source_language="en",
+                language_detector=LANGUAGE_DETECTOR,
+            )
+        assert exc_info.value.reason_code == 'a2_summary_disallowed_heading_prefix'
+        assert 'Previously in Chapter:' in (exc_info.value.detail or '')
+
+    # Clean A2 summaries without heading prefixes pass.
+    for good_summary in (
+        "Nick wakes up in Everlost and meets Allie.",
+        "Previously in the dark forest, Nick lost his silver coin.",
+        "The summary on the old sign helps Nick find the road.",
+    ):
+        validate_a2_summary(
+            good_summary,
+            source_texts=("Nick woke up in the woods.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+
+    # Legacy frozen two-paragraph mode keeps previous behavior and does not reject heading prefixes.
+    validate_a2_summary(
+        "Previously in Chapter 1: Nick wakes up in Everlost.\n\n"
+        "Ранее в главе 1: Ник просыпается в Эверлосте.",
+        source_texts=("Nick woke up in the woods.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        require_parallel_russian=True,
+    )

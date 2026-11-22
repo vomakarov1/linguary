@@ -407,8 +407,9 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
 
     # 1. Default configuration (max_fragment_blocks=None): narrative splits 121 dialogue blocks into
     # 3 balanced fragments (41, 40, 40) to prevent 32K output truncation while passing intra-chapter
-    # glossary candidates forward; pedagogical keeps all 121 blocks in a single call.
+    # glossary candidates forward; pedagogical splits 121 blocks into 2 balanced fragments (61, 60).
     default_nar_sizes = (41, 40, 40)
+    default_ped_sizes = (61, 60)
     default_client = StagedFakeLLMClient.replying(
         [
             FakeReply.of_payload(
@@ -434,7 +435,12 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
                     glossary_candidates=candidates[3:],
                 )
             ),
-            FakeReply.of_payload(_pedagogical_payload(block_count=121, summary=full_summary)),
+            FakeReply.of_payload(
+                _pedagogical_payload(block_count=default_ped_sizes[0], summary=full_summary)
+            ),
+            FakeReply.of_payload(
+                _pedagogical_payload(block_count=default_ped_sizes[1], summary=full_summary)
+            ),
         ]
     )
     default_app, _ = _make_everlost_app(tmp_path / "default", default_client)
@@ -449,14 +455,17 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
             LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
             LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
             LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
         ]
-        nar_req1, nar_req2, nar_req3, ped_req = default_client.requests
+        nar_req1, nar_req2, nar_req3, ped_req1, ped_req2 = default_client.requests
         nar_req = nar_req1
+        ped_req = ped_req1
         assert [len(r.ordered_block_ids) for r in (nar_req1, nar_req2, nar_req3)] == list(default_nar_sizes)
         assert (*nar_req1.ordered_block_ids, *nar_req2.ordered_block_ids, *nar_req3.ordered_block_ids) == tuple(
             b.id for b in tb
         )
-        assert ped_req.ordered_block_ids == tuple(b.id for b in tb)
+        assert [len(r.ordered_block_ids) for r in (ped_req1, ped_req2)] == list(default_ped_sizes)
+        assert (*ped_req1.ordered_block_ids, *ped_req2.ordered_block_ids) == tuple(b.id for b in tb)
         # Intra-chapter glossary continuity: fragment 1 candidates are passed to fragments 2 and 3.
         assert "Everlost" in nar_req2.input_text and "Междумирье" in nar_req2.input_text
         assert "Mary Hightower" in nar_req3.input_text
@@ -571,6 +580,63 @@ async def test_everlost_ch2_single_fragment_and_balanced_explicit_split(
             assert analysis.scenes[-1].end_block_id == tb[-1].id
     finally:
         await explicit_app.aclose()
+
+    # 3. A 60-block chapter stays in a single pedagogical call under default 32K budget.
+    short_tb = tb[:60]
+    short_section = replace(section, blocks=short_tb)
+    short_nar_sizes = (31, 29)
+    short_client = StagedFakeLLMClient.replying(
+        [
+            FakeReply.of_payload(
+                _narrative_payload(block_count=short_nar_sizes[0], chapter_summary=full_summary)
+            ),
+            FakeReply.of_payload(
+                _narrative_payload(
+                    block_count=short_nar_sizes[1],
+                    chapter_summary=full_summary,
+                    continues_previous_scene=True,
+                )
+            ),
+            FakeReply.of_payload(_pedagogical_payload(block_count=60, summary=full_summary)),
+        ]
+    )
+    short_app, _ = _make_everlost_app(tmp_path / "short_60", short_client, seed_book=False)
+    try:
+        short_doc = CanonicalDocument(
+            id=BOOK_ID,
+            metadata=BookMetadata(title="Everlost", authors=("Neal Shusterman",)),
+            source_language="en",
+            target_language="ru",
+            sections=(short_section,),
+        )
+        source = short_app.paths.source_epub(BOOK_ID)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"synthetic everlost epub")
+        with short_app.unit_of_work.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    id=BOOK_ID,
+                    metadata=short_doc.metadata,
+                    source_language="en",
+                    target_language="ru",
+                    status=BookStatus.IMPORTED,
+                    source_epub_path=str(source),
+                    created_at=CREATED_AT,
+                )
+            )
+            tx.documents.save(short_doc)
+        await short_app.analysis.start(BOOK_ID)
+        completed = await drain_tasks(short_app)
+        assert all(task.status is TaskStatus.SUCCEEDED for task in completed), [
+            task.last_error for task in completed
+        ]
+        ped_requests = [
+            req for req in short_client.requests if req.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        ]
+        assert len(ped_requests) == 1
+        assert ped_requests[0].ordered_block_ids == tuple(b.id for b in short_tb)
+    finally:
+        await short_app.aclose()
 
 
 async def test_everlost_a2_summary_and_validation_retry_end_to_end(

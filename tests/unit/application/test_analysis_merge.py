@@ -1766,7 +1766,7 @@ def test_repeated_quote_without_offset_drops_anchor_not_plan() -> None:
         id="mixed",
         anchors=(
             QuotedSourceAnchorResponse("b1", "Wait"),
-            QuotedSourceAnchorResponse("b1", "dark"),
+            QuotedSourceAnchorResponse("b1", "until"),
         ),
         owner_block_id="b1",
         kind="vocabulary",
@@ -1787,12 +1787,12 @@ def test_repeated_quote_without_offset_drops_anchor_not_plan() -> None:
     plan = content_plan_from_response(payload, aliases, texts, visible_texts_by_alias=visible)
     assert plan is not None
     quotes = {anchor.quote for difficulty in plan.difficulties for anchor in difficulty.anchors}
-    assert quotes == {"dark"}
+    assert quotes == {"dark", "until"}
     assert len(plan.difficulties) == 2
     assert {fact.subject_anchor.quote for fact in plan.context_facts} == {"dark"}
     validated = validate_content_plan(payload, aliases, texts, visible_texts_by_alias=visible)
     assert validated is not None
-    assert {anchor.quote for difficulty in validated.difficulties for anchor in difficulty.anchors} == {"dark"}
+    assert {anchor.quote for difficulty in validated.difficulties for anchor in difficulty.anchors} == {"dark", "until"}
 
 
 def _footnote_block(text: str, call: str, *, at: int | None = None):
@@ -3566,6 +3566,316 @@ def test_split_instruction_sentences_splits_after_terminal_punctuation_before_cl
         "1. Передавать «Wait.»",
         "2. Обращение на «вы» сохранять.",
     ]
+
+
+def test_prune_forward_difficulty_references_renumbers_standard_point_ids_and_remaps_evidence() -> None:
+    from linguary.application.analysis_merge import (
+        _prune_forward_difficulty_references,
+        normalize_a2_dialogue_response,
+    )
+    from linguary.application.llm_dto import (
+        HelpEvidenceResponse,
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="Nick stared at the silent road."),
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=1,
+            text="Later Allie found a hidden golden compass near the tall tower.",
+        ),
+    )
+    aliases = {"b1": blocks[0].id, "b2": blocks[1].id}
+
+    # 1. Direct _prune_forward_difficulty_references: p1 pruned -> p2 renumbered to p1.
+    diff_std = QuotedDifficultyResponse(
+        "d1",
+        (QuotedSourceAnchorResponse("b1", "silent road"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "explanation",
+        (
+            RequiredPoint("p1", 'Позже встречается фраза "hidden golden compass" про путь.'),
+            RequiredPoint("p2", "В этом блоке silent road означает тихую дорогу."),
+        ),
+    )
+    pruned_std = _prune_forward_difficulty_references(diff_std, blocks, aliases)
+    assert [(pt.id, pt.description) for pt in pruned_std.required_points] == [
+        ("p1", "В этом блоке silent road означает тихую дорогу."),
+    ]
+
+    # 2. Multiple surviving standard points: p1(fwd), p2(ok), p3(fwd), p4(ok) -> p1, p2.
+    diff_multi = QuotedDifficultyResponse(
+        "d2",
+        (QuotedSourceAnchorResponse("b1", "silent road"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "explanation",
+        (
+            RequiredPoint("p1", 'Спойлер "hidden golden compass" из следующего блока.'),
+            RequiredPoint("p2", "Первое локальное пояснение."),
+            RequiredPoint("p3", 'Ещё один спойлер "tall tower" из следующего блока.'),
+            RequiredPoint("p4", "Второе локальное пояснение."),
+        ),
+    )
+    pruned_multi = _prune_forward_difficulty_references(diff_multi, blocks, aliases)
+    assert [(pt.id, pt.description) for pt in pruned_multi.required_points] == [
+        ("p1", "Первое локальное пояснение."),
+        ("p2", "Второе локальное пояснение."),
+    ]
+
+    # 3. Non-standard point IDs are NOT renumbered.
+    diff_custom = QuotedDifficultyResponse(
+        "d3",
+        (QuotedSourceAnchorResponse("b1", "silent road"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "explanation",
+        (
+            RequiredPoint("pt-forward", 'Спойлер "hidden golden compass" из следующего блока.'),
+            RequiredPoint("pt-keep", "Локальное пояснение без спойлера."),
+        ),
+    )
+    pruned_custom = _prune_forward_difficulty_references(diff_custom, blocks, aliases)
+    assert [pt.id for pt in pruned_custom.required_points] == ["pt-keep"]
+
+    # 4. normalize_a2_dialogue_response drops evidence for pruned p1 and remaps kept p2 -> p1.
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(diff_std,),
+        before_you_read_evidence=(
+            HelpEvidenceResponse("d1", "p1", "before_you_read.explanation", "b1", 0, "Спойлерный пункт."),
+            HelpEvidenceResponse("d1", "p2", "before_you_read.explanation", "b1", 0, "Локальный пункт."),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level="a2", english_help=False,
+    )
+    assert [pt.id for pt in normalized.difficulties[0].required_points] == ["p1"]
+    assert [(ev.difficulty_id, ev.point_id, ev.body_excerpt) for ev in normalized.before_you_read_evidence] == [
+        ("d1", "p1", "Локальный пункт."),
+    ]
+
+
+def test_merged_instructions_filters_extended_fragment_boundary_artifacts() -> None:
+    expected = block_ids(2)
+    f0 = (
+        "Сохранять тревожный ритм. "
+        "В начале фрагмента мальчик ещё не назван. "
+        "В этом фрагменте не раскрывать место действия. "
+        "В текущем фрагменте герои держат дистанцию. "
+        "До конца данного фрагмента сохранять интригу."
+    )
+    f1 = (
+        "Передавать речь без придуманного имени. "
+        "Незнакомка остаётся неназванной. "
+        "Мальчик остается без имени. "
+        "Герой остаётся неназванным до конца фрагмента. "
+        "Девочка остаётся неназванной до сцены в лесу. "
+        "Мальчик остается без имени до знакомства с Элли."
+    )
+    merged_multi = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=f0),
+        make_fragment(1, blocks=expected[1:], translation_instructions=f1),
+        expected=expected,
+    )
+    assert merged_multi.translation_instructions.splitlines() == [
+        "1. Сохранять тревожный ритм.",
+        "2. Девочка остаётся неназванной до сцены в лесу.",
+        "3. Мальчик остается без имени до знакомства с Элли.",
+    ]
+
+    # Single fragment preserves all instructions intact.
+    single_expected = block_ids(1)
+    merged_single = merge(
+        make_fragment(0, blocks=single_expected, translation_instructions=f0),
+        expected=single_expected,
+    )
+    assert "В начале фрагмента" in merged_single.translation_instructions
+    assert "в этом фрагменте" in merged_single.translation_instructions.lower()
+
+
+def test_normalize_a2_promotes_b1_phrasal_verbs_and_quoted_subject_inversion() -> None:
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить фразовый глагол."),)
+    cases = [
+        # B1 phrasal verbs from A1 words -> TRANSLATE without vocab diff
+        ("“Calm down,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("Figure out the way.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("Hold on!", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("We run out of time.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("Put up with it.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        # B1 phrasal verb with vocabulary difficulty -> GLOSSARY_ONLY
+        ("“Calm down,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        # Quoted subject inversion -> TRANSLATE
+        ("“Here,” was all he said.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ('"Wait", was all she asked.', BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("‘No,’ was all Nick replied.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        # Negative controls stay READ_AS_IS
+        ("“Here,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("That was all he said.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+    ]
+    blocks = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=idx, text=text)
+        for idx, (text, _, _) in enumerate(cases)
+    )
+    aliases = {f"b{idx + 1}": b.id for idx, b in enumerate(blocks)}
+    plan_items = tuple(
+        TreatmentPlanItemResponse(f"b{idx + 1}", initial)
+        for idx, (_, initial, _) in enumerate(cases)
+    )
+    difficulties = (
+        QuotedDifficultyResponse(
+            "d-calm-vocab",
+            (QuotedSourceAnchorResponse("b6", "Calm down"),),
+            "b6",
+            "vocabulary",
+            "useful",
+            "lexical_hint",
+            point,
+        ),
+    )
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=plan_items,
+        difficulties=difficulties,
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload,
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+        known_names=("Nick",),
+    )
+    actual = [item.treatment for item in normalized.treatment_plan]
+    expected = [exp for _, _, exp in cases]
+    assert actual == expected
+
+
+def test_validate_content_plan_rejects_duplicate_difficulty_anchor_in_same_block() -> None:
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="Nick could barely calm down."),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="Allie watched him calm down."),
+    )
+    aliases = {"b1": blocks[0].id, "b2": blocks[1].id}
+    texts = {b.id: b.text for b in blocks}
+    visible = {alias: texts[bid] for alias, bid in aliases.items()}
+    plan_items = (
+        TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+    )
+
+    dup_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=plan_items,
+        content_plan=QuotedContentPlanResponse(
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d1",
+                    (QuotedSourceAnchorResponse("b1", "calm down"),),
+                    "b1",
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Лексическое значение."),),
+                ),
+                QuotedDifficultyResponse(
+                    "d2",
+                    (QuotedSourceAnchorResponse("b1", "calm down"),),
+                    "b1",
+                    "idiom",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Фразовый глагол."),),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as exc:
+        validate_content_plan(
+            dup_payload,
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+            blocks=blocks,
+        )
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == "duplicate_difficulty_anchor"
+    assert exc.value.violation.block_ids == (blocks[0].id,)
+
+    # Distinct anchors in same block AND same quote in different blocks pass validation.
+    ok_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=plan_items,
+        content_plan=QuotedContentPlanResponse(
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d1",
+                    (QuotedSourceAnchorResponse("b1", "barely"),),
+                    "b1",
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Значение barely."),),
+                ),
+                QuotedDifficultyResponse(
+                    "d2",
+                    (QuotedSourceAnchorResponse("b1", "calm down"),),
+                    "b1",
+                    "idiom",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Фразовый глагол."),),
+                ),
+                QuotedDifficultyResponse(
+                    "d3",
+                    (QuotedSourceAnchorResponse("b2", "calm down"),),
+                    "b2",
+                    "idiom",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p1", "Фразовый глагол во втором блоке."),),
+                ),
+            ),
+        ),
+    )
+    validated = validate_content_plan(
+        ok_payload,
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+        blocks=blocks,
+    )
+    assert validated is not None
+    assert len(validated.difficulties) == 3
+
 
 
 

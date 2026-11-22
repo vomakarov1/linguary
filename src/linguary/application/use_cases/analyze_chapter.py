@@ -454,6 +454,10 @@ class AnalyzeChapter:
         """Maximum blocks per narrative fragment scaled by output token budget."""
         return min(self._max_fragment_blocks, max(20, self._max_output_tokens // 650))
 
+    def _pedagogical_max_fragment_blocks(self) -> int:
+        """Maximum blocks per pedagogical fragment scaled by output token budget."""
+        return min(self._max_fragment_blocks, max(40, self._max_output_tokens // 400))
+
     async def _run_staged_narrative_pass(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
         accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
@@ -608,7 +612,7 @@ class AnalyzeChapter:
             context_facts=facts, glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated, user_decisions=user_decisions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
-            max_fragment_blocks=self._max_fragment_blocks,
+            max_fragment_blocks=self._pedagogical_max_fragment_blocks(),
             cumulative_words_before=cumulative_words,
             prior_chapter_topics=prior_chapter_topics)
         cached_pedagogical = self._cached_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash)
@@ -795,8 +799,10 @@ class AnalyzeChapter:
         else:
             fragments = plan_fragments(
                 textual_blocks(section),
-                max_blocks=self._max_fragment_blocks,
+                max_blocks=self._pedagogical_max_fragment_blocks(),
                 max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
+                block_overhead=120,
+                max_weight=DEFAULT_MAX_FRAGMENT_WEIGHT,
             )
         saved_fragment_passes: tuple[AnalysisPassResult, ...] = ()
         with self._unit_of_work.transaction() as tx:

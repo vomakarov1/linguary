@@ -1407,5 +1407,46 @@ def test_validate_narrative_speaker_subject_anchor_handles_straight_quotes_with_
     assert len(resolved) == 1
 
 
+def test_validate_narrative_rejects_gender_plural_subject_with_and():
+    aliases = {'b1': 'id-1', 'b2': 'id-2'}
+    texts = {
+        'id-1': 'The brother and sister ran toward the mother and father.',
+        'id-2': 'Her brother waited quietly by the gate.',
+    }
+    visible = {'b1': texts['id-1'], 'b2': texts['id-2']}
+    scenes = (
+        QuotedSceneResponse('b1', 'b2', 'Сцена с детьми.', participants=('brother', 'sister')),
+    )
+
+    for quote, gender_value in (
+        ('brother and sister', 'male'),
+        ('mother and father', 'female'),
+    ):
+        anchor = QuotedSourceAnchorResponse('b1', quote)
+        bad_fact = QuotedContextFactResponse('f-plural', 'gender', (anchor,), anchor, gender_value, 'explicit')
+        with pytest.raises(AnalysisMergeError) as exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', context_facts=(bad_fact,), scenes=scenes),
+                aliases, texts, visible, ordered_block_ids=('id-1', 'id-2'),
+            )
+        assert exc.value.violation is not None
+        assert exc.value.violation.rule_code == 'gender_plural_subject'
+        assert exc.value.violation.block_ids == ('id-1',)
+
+    # Single-character gender and non-male/female value on plural group are accepted.
+    single_anchor = QuotedSourceAnchorResponse('b2', 'brother')
+    plural_anchor = QuotedSourceAnchorResponse('b1', 'brother and sister')
+    good_facts = (
+        QuotedContextFactResponse('f-ok-single', 'gender', (single_anchor,), single_anchor, 'male', 'explicit'),
+        QuotedContextFactResponse('f-ok-unknown', 'gender', (plural_anchor,), plural_anchor, None, 'unknown'),
+    )
+    _, resolved = validate_narrative_response(
+        NarrativeAnalysisResponse('Keep voice.', 'Summary.', context_facts=good_facts, scenes=scenes),
+        aliases, texts, visible, ordered_block_ids=('id-1', 'id-2'),
+    )
+    assert len(resolved) == 2
+
+
+
 
 

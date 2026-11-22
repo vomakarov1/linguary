@@ -4980,5 +4980,64 @@ async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh
         await ac_v7(COMMAND)
 
 
+async def test_pedagogical_max_fragment_blocks_budget_and_balanced_split(stored_book, monkeypatch):
+    """Pedagogical scales max_blocks by max_output_tokens // 400 (floor 40) with overhead=120."""
+    _, uow, _ = stored_book
+    blocks_121 = tuple(
+        _block(
+            i,
+            f'“Keep walking along the gray stone path,” Allie told Nick quietly [{i + 1}].',
+        )
+        for i in range(121)
+    )
+    _store(uow, blocks_121)
+
+    class AutoClient:
+        def __init__(self):
+            self.pedagogical_sizes = []
+
+        async def generate(self, request):
+            aliases = tuple(f'b{i}' for i in range(1, len(request.ordered_block_ids) + 1))
+            if request.stage == NARRATIVE:
+                reply = narrative(aliases)
+            else:
+                self.pedagogical_sizes.append(len(aliases))
+                reply = pedagogical(aliases)
+            return await FakeLLMClient([reply]).generate(request)
+
+    ctx = builder('b2')
+    ped_sha_max_blocks: list[int] = []
+    original_ped_sha = ctx.pedagogical_input_sha256
+
+    def spy_ped_sha(*args, **kwargs):
+        ped_sha_max_blocks.append(kwargs.get('max_fragment_blocks', -1))
+        return original_ped_sha(*args, **kwargs)
+
+    monkeypatch.setattr(ctx, 'pedagogical_input_sha256', spy_ped_sha)
+
+    client = AutoClient()
+    ac_default = scenario(uow, client, context=ctx, max_fragment_blocks=160, max_output_tokens=32_768)
+    assert ac_default._pedagogical_max_fragment_blocks() == 81
+    assert scenario(uow, client, context=ctx, max_fragment_blocks=160, max_output_tokens=10_000)._pedagogical_max_fragment_blocks() == 40
+    assert scenario(uow, client, context=ctx, max_fragment_blocks=30, max_output_tokens=32_768)._pedagogical_max_fragment_blocks() == 30
+
+    result = await ac_default(COMMAND)
+    assert result.analysis.is_complete
+    assert ped_sha_max_blocks == [81]
+    assert client.pedagogical_sizes == [61, 60]
+
+    # A 60-block chapter remains a single pedagogical call under default 32_768 tokens.
+    blocks_60 = blocks_121[:60]
+    _store(uow, blocks_60)
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
+    client_60 = AutoClient()
+    ac_60 = scenario(uow, client_60, context=ctx, max_fragment_blocks=160, max_output_tokens=32_768)
+    result_60 = await ac_60(COMMAND)
+    assert result_60.analysis.is_complete
+    assert client_60.pedagogical_sizes == [60]
+
+
+
 
 
