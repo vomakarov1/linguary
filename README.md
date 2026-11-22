@@ -140,6 +140,12 @@ The configuration screen (`GET /system/config`) — and `uv run python -m lingua
 uv run pytest -v
 ```
 
+Line coverage of the `linguary` package is a separate command. It is not part of the ordinary run:
+
+```sh
+uv run pytest --cov=linguary --cov-fail-under=90
+```
+
 To skip tests marked `slow` (e.g., large EPUBs or real-LLM tests):
 
 ```sh
