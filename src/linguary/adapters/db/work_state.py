@@ -17,7 +17,7 @@ from linguary.domain.book_conditions import WorkStateError, identifier, nonnegat
 from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 from linguary.domain.quality_review import QualityReview, QualityReservation
 from linguary.domain.correction import (
-    CorrectionCheck, CorrectionCandidate, CorrectionDecision, CORRECTION_POLICY_VERSION_V2,
+    CorrectionCheck, CorrectionCandidate, CorrectionDecision, is_candidate_correction_policy,
 )
 from linguary.domain.content_plan import canonical_sha
 
@@ -198,7 +198,7 @@ class SqlAlchemyWorkRepository:
             if attempt_ids
             else {}
         )
-        is_v2 = binding['payload_json'].get('correction', {}).get('policy_version') == CORRECTION_POLICY_VERSION_V2
+        is_v2 = is_candidate_correction_policy(binding['payload_json'].get('correction', {}).get('policy_version'))
         groups_by_attempt = {}
         candidates_by_id = {}
         if is_v2 and checks:
@@ -336,7 +336,7 @@ class SqlAlchemyWorkRepository:
                     or attempt.book_id != candidate.book_id or attempt.run_id != candidate.run_id
                     or attempt.conditions_id != candidate.conditions_id
                     or attempt.context.get('stage') != 'chapter_correction'
-                    or attempt.context.get('policy_version') != CORRECTION_POLICY_VERSION_V2
+                    or not is_candidate_correction_policy(attempt.context.get('policy_version'))
                     or candidate.block_id not in attempt.context.get('ordered_block_ids', ())):
                 raise WorkStateError('кандидат не принадлежит предложению исправления')
             previous = self._session.scalar(select(CorrectionCandidateRow).where(
@@ -369,7 +369,7 @@ class SqlAlchemyWorkRepository:
                 or attempt.run_id != candidate.run_id or attempt.book_id != candidate.book_id
                 or attempt.conditions_id != candidate.conditions_id
                 or attempt.context.get('stage') != 'chapter_correction_review'
-                or attempt.context.get('policy_version') != CORRECTION_POLICY_VERSION_V2
+                or not is_candidate_correction_policy(attempt.context.get('policy_version'))
                 or candidate.block_id not in attempt.context.get('ordered_block_ids', ())):
             raise WorkStateError('вердикт проверки относится к изменившемуся кандидату')
         if state == 'auto_applied' and (candidate.payload.get('evidence_valid') is not True
@@ -932,7 +932,7 @@ class SqlAlchemyWorkRepository:
                 return None
             stage = attempt.context.get('stage')
             if stage == 'chapter_correction':
-                if (attempt.context.get('policy_version') == CORRECTION_POLICY_VERSION_V2
+                if (is_candidate_correction_policy(attempt.context.get('policy_version'))
                         and not self._candidate_successor(body, attempt)):
                     return None
                 artifact_revision_id = body.get('source_revision')
@@ -1055,7 +1055,7 @@ class SqlAlchemyWorkRepository:
                         artifact_revision_id=current.artifact_revision_id,
                         attempt_id=current.attempt_id) is None):
                 raise WorkStateError('исправление не является доказуемым преемником перевода')
-            if (attempt.context_json.get('policy_version') == CORRECTION_POLICY_VERSION_V2
+            if (is_candidate_correction_policy(attempt.context_json.get('policy_version'))
                     and not self._candidate_successor(body, self.get_attempt(attempt_id), require_current=True)):
                 raise WorkStateError('результат не подтверждён решением по кандидату')
         if attempt.root_id is not None:
@@ -1207,11 +1207,26 @@ class SqlAlchemyWorkRepository:
                     continue
                 payload['operation_refs'] = [ref for ref in refs if ref.get('root_id') != root_id]
                 binding.payload_json = payload
+                task_row = self._session.get(ProcessingTaskRow, binding.entity_id)
+                if task_row is None or task_row.status not in {'pending', 'running', 'failed'}:
+                    continue
                 if not payload['operation_refs']:
-                    self._session.execute(update(ProcessingTaskRow).where(
-                        ProcessingTaskRow.id == binding.entity_id,
-                        ProcessingTaskRow.status.in_(('pending', 'running', 'failed')),
-                    ).values(status='superseded', error_type=None, error_message=None, error_detail=None))
+                    task_row.status = 'superseded'
+                    task_row.error_type = task_row.error_message = task_row.error_detail = None
+                    continue
+                if task_row.status != 'failed':
+                    continue
+                remaining = [self._session.get(RecoveryRootRow, ref.get('root_id')) for ref in payload['operation_refs']]
+                retryable = any(item is not None and item.superseded_by is None and item.status in {'pending', 'running'}
+                                for item in remaining)
+                finished = bool(remaining) and all(
+                    item is not None and item.superseded_by is None and item.status == 'complete' for item in remaining)
+                if retryable:
+                    task_row.status = 'pending'
+                    task_row.error_type = task_row.error_message = task_row.error_detail = None
+                elif finished:
+                    task_row.status = 'succeeded'
+                    task_row.error_type = task_row.error_message = task_row.error_detail = None
             for scope in scopes:
                 self.add_scope(scope)
             SqlAlchemyTaskRepository(self._session).add(task)
@@ -1297,11 +1312,32 @@ class SqlAlchemyWorkRepository:
                 generation=RecoveryScopeRow.generation + 1))
         self._session.flush()
 
-    def stop_root(self, root_id, reason):
-        changed = self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root_id).values(status='stopped', reason=reason))
-        if changed.rowcount != 1:
+    def _next_ordinal(self, root_id):
+        return self._session.scalar(select(func.coalesce(func.max(LLMAttemptRow.ordinal), 0) + 1).where(
+            LLMAttemptRow.root_id == root_id))
+
+    def _fence_root(self, root_id, *, status, reason, expected_generation):
+        root = self._session.get(RecoveryRootRow, root_id)
+        if root is None:
             raise WorkStateError('исходная область отсутствует')
+        if root.superseded_by is not None or root.status == 'complete':
+            raise WorkStateError('generation_conflict')
+        if expected_generation is not None and root.generation != expected_generation:
+            raise WorkStateError('generation_conflict')
+        changed = self._session.execute(update(RecoveryRootRow).where(
+            RecoveryRootRow.id == root_id, RecoveryRootRow.generation == root.generation,
+            RecoveryRootRow.superseded_by.is_(None), RecoveryRootRow.status != 'complete',
+        ).values(status=status, reason=reason, generation=RecoveryRootRow.generation + 1))
+        if changed.rowcount != 1:
+            raise WorkStateError('generation_conflict')
+        self._session.refresh(root)
         self._session.flush()
+
+    def stop_root(self, root_id, reason, *, expected_generation=None):
+        self._fence_root(root_id, status='stopped', reason=reason, expected_generation=expected_generation)
+
+    def pause_root(self, root_id, reason, *, expected_generation):
+        self._fence_root(root_id, status='pending', reason=reason, expected_generation=expected_generation)
 
     def begin_recovery_attempt(self, root_id, scope_id, *, task_id, run_id, stage, assigned_model, prompt_hash, policy_version):
         from linguary.application.recovery import RecoveryError
@@ -1336,48 +1372,169 @@ class SqlAlchemyWorkRepository:
             if (task is None or task.book_id != root.book_id or task.status not in {'pending', 'running'}
                     or not (direct or dispatch)):
                 raise RecoveryError('conditions_unavailable', root_id)
-        count = self._session.scalar(select(__import__('sqlalchemy').func.count()).select_from(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope_id))
+        count = self.scope_attempt_count(scope_id)
         policy = root.manifest['policy']
         if count >= policy['max_scope_calls'] or root.calls_used >= policy['max_calls'] + root.extra_calls:
             self.stop_root(root_id, 'limit')
             return None
         claimed = self.claim_scope(scope_id, expected_generation=scope.generation)
-        changed = self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root_id,
-            RecoveryRootRow.generation == root.generation,
-            RecoveryRootRow.calls_used == root.calls_used,
-            RecoveryRootRow.status.in_(('pending', 'running')),
-        ).values(calls_used=RecoveryRootRow.calls_used + 1, status='running'))
-        if changed.rowcount != 1:
-            raise RecoveryError('interrupted', root_id)
+        ordinal = self._next_ordinal(root_id)
         context = CallContext(root.conditions_id, stage, scope_id, scope.ordered_blocks,
             str(uuid4()), claimed.generation, assigned_model, prompt_hash,
             run_id=run_id, task_id=task_id, root_id=root_id, policy_version=policy_version)
         attempt = CallAttempt(context.attempt_id, root.book_id, state='created',
-            generation=claimed.generation, ordinal=root.calls_used + 1, conditions_id=root.conditions_id,
+            generation=claimed.generation, ordinal=ordinal, conditions_id=root.conditions_id,
             task_id=task_id, run_id=run_id, root_id=root_id, scope_id=scope_id,
             context={**context.to_dict(), 'root_generation': root.generation})
         self.add_attempt(attempt)
         return context
 
-    def record_recovery_failure(self, attempt_id, violation):
+    def _require_live_root(self, root_id, scope_id, *, task_id, run_id, policy_version, expected_root_generation=None):
+        from linguary.application.recovery import RecoveryError
+        from linguary.application.translation_policy import require_policy
+        root = self.get_root(root_id)
+        scope = self.get_scope(scope_id)
+        if root is None or scope is None or scope.root_id != root_id:
+            raise RecoveryError('unsafe_partition', root_id)
+        require_policy(policy_version)
+        if root.policy_version != policy_version:
+            raise RecoveryError('conditions_unavailable', root_id)
+        if root.superseded_by is not None or root.status not in {'pending', 'running'}:
+            raise RecoveryError(root.reason or 'interrupted', root_id)
+        if expected_root_generation is not None and root.generation != expected_root_generation:
+            raise RecoveryError('interrupted', root_id)
+        if run_id is None:
+            raise RecoveryError('conditions_unavailable', root_id)
+        run = self._session.get(ProcessingRunRow, run_id)
+        conditions = self.latest_conditions(root.book_id)
+        if (conditions is None or conditions.id != root.conditions_id or run is None
+                or run.book_id != root.book_id or run.status != 'active'
+                or root.manifest.get('active_run_id') != run_id):
+            raise RecoveryError('conditions_unavailable', root_id)
+        if task_id is not None:
+            task = self._session.get(ProcessingTaskRow, task_id)
+            binding = self.get_binding('task', task_id)
+            refs = [] if binding is None else binding['payload_json'].get('operation_refs', [])
+            direct = task is not None and task.operation_id == root_id and task.policy_version == policy_version
+            dispatch = task is not None and task.operation_id.startswith('dispatch:') and task.policy_version == '' and {
+                'root_id': root_id, 'policy_version': policy_version} in refs
+            if (task is None or task.book_id != root.book_id or task.status not in {'pending', 'running'}
+                    or not (direct or dispatch)):
+                raise RecoveryError('conditions_unavailable', root_id)
+        return root, scope
+
+    def mark_attempt_sent(self, attempt_id, *, expected_root_generation: int):
+        from linguary.application.recovery import RecoveryError
+        attempt = self.get_attempt(attempt_id)
+        if attempt is None or attempt.root_id is None or attempt.scope_id is None or attempt.state != 'created':
+            raise RecoveryError('interrupted', None if attempt is None else attempt.root_id)
+        policy_version = attempt.context.get('policy_version')
+        root, scope = self._require_live_root(
+            attempt.root_id, attempt.scope_id, task_id=attempt.task_id, run_id=attempt.run_id,
+            policy_version=policy_version, expected_root_generation=expected_root_generation)
+        if (root.generation != attempt.context.get('root_generation') or scope.status != 'claimed'
+                or scope.generation != attempt.generation):
+            raise RecoveryError('interrupted', root.id)
+        policy = root.manifest['policy']
+        limit = policy['max_calls'] + root.extra_calls
+        active = self._session.scalar(select(func.count()).select_from(LLMAttemptRow).where(
+            LLMAttemptRow.scope_id == scope.id, LLMAttemptRow.state != 'cancelled',
+            LLMAttemptRow.id != attempt_id)) or 0
+        if root.calls_used >= limit:
+            raise RecoveryError('limit', root.id)
+        if active >= policy['max_scope_calls']:
+            raise RecoveryError('scope_limit', root.id)
+        changed = self._session.execute(update(RecoveryRootRow).where(
+            RecoveryRootRow.id == root.id, RecoveryRootRow.generation == expected_root_generation,
+            RecoveryRootRow.superseded_by.is_(None), RecoveryRootRow.calls_used == root.calls_used,
+            RecoveryRootRow.extra_calls == root.extra_calls,
+            RecoveryRootRow.status.in_(('pending', 'running')),
+            RecoveryRootRow.calls_used < limit,
+        ).values(calls_used=RecoveryRootRow.calls_used + 1, status='running', reason=None))
+        if changed.rowcount != 1:
+            raise RecoveryError('interrupted', root.id)
+        self._session.refresh(self._session.get(RecoveryRootRow, root.id))
+        moved = self._session.execute(update(LLMAttemptRow).where(
+            LLMAttemptRow.id == attempt_id, LLMAttemptRow.state == 'created',
+        ).values(state='sent'))
+        if moved.rowcount != 1:
+            raise RecoveryError('interrupted', root.id)
+        self._session.flush()
+        return self.get_attempt(attempt_id)
+
+    def begin_local_acceptance(self, root_id, scope_id, *, task_id, run_id, stage, assigned_model, prompt_hash, policy_version):
+        from linguary.application.recovery import RecoveryError
+        from linguary.domain.llm_log import CallContext
+        root, scope = self._require_live_root(
+            root_id, scope_id, task_id=task_id, run_id=run_id, policy_version=policy_version)
+        if scope.status != 'pending':
+            raise RecoveryError('interrupted', root_id)
+        claimed = self.claim_scope(scope_id, expected_generation=scope.generation)
+        context = CallContext(root.conditions_id, stage, scope_id, scope.ordered_blocks,
+            str(uuid4()), claimed.generation, assigned_model, prompt_hash,
+            run_id=run_id, task_id=task_id, root_id=root_id, policy_version=policy_version)
+        attempt = CallAttempt(context.attempt_id, root.book_id, state='validated',
+            generation=claimed.generation, ordinal=self._next_ordinal(root_id), conditions_id=root.conditions_id,
+            task_id=task_id, run_id=run_id, root_id=root_id, scope_id=scope_id,
+            context={**context.to_dict(), 'root_generation': root.generation})
+        self.add_attempt(attempt)
+        return context
+
+    def cancel_unsent_attempt(self, attempt_id):
+        attempt = self.get_attempt(attempt_id)
+        if attempt is None or attempt.state != 'created':
+            raise WorkStateError('состояние попытки изменилось')
+        changed = self._session.execute(update(LLMAttemptRow).where(
+            LLMAttemptRow.id == attempt_id, LLMAttemptRow.state == 'created',
+        ).values(state='cancelled'))
+        if changed.rowcount != 1:
+            raise WorkStateError('состояние попытки изменилось')
+        if attempt.scope_id is not None:
+            self._session.execute(update(RecoveryScopeRow).where(
+                RecoveryScopeRow.id == attempt.scope_id, RecoveryScopeRow.generation == attempt.generation,
+                RecoveryScopeRow.status == 'claimed',
+            ).values(status='pending', generation=RecoveryScopeRow.generation + 1))
+        self._session.flush()
+
+    def record_recovery_failure(self, attempt_id, violation, *, outcome="known"):
         from linguary.application.recovery import local_failure_signature
+        if outcome == 'not_sent':
+            self.cancel_unsent_attempt(attempt_id)
+            return False
         attempt = self.get_attempt(attempt_id)
         if attempt is None or attempt.scope_id is None:
             return False
         root = self.get_root(attempt.root_id)
         scope = self.get_scope(attempt.scope_id)
+        if root is None or scope is None:
+            return False
         if root.generation != attempt.context['root_generation'] or scope.generation != attempt.generation:
+            return False
+        if outcome == 'unknown' or attempt.state == 'unknown':
+            signature = local_failure_signature(violation, scope.ordered_blocks)
+            attempt_row = self._session.get(LLMAttemptRow, attempt_id)
+            scope_row = self._session.get(RecoveryScopeRow, scope.id)
+            root_row = self._session.get(RecoveryRootRow, root.id)
+            attempt_row.state = 'unknown'
+            attempt_row.outcome_json = {**thaw(attempt.outcome), 'failure_signature': signature,
+                'violation': violation.to_dict() if violation is not None else None}
+            scope_row.status = 'stopped'
+            scope_row.generation += 1
+            root_row.status = 'stopped'
+            root_row.reason = 'unknown_outcome'
+            root_row.generation += 1
+            self._session.flush()
             return False
         signature = local_failure_signature(violation, scope.ordered_blocks)
         outcome = {**thaw(attempt.outcome), 'failure_signature': signature,
                    'violation': violation.to_dict() if violation is not None else None}
-        state = 'failed' if attempt.state in {'sent', 'unknown', 'created'} else attempt.state
+        state = 'failed' if attempt.state in {'sent', 'created'} else attempt.state
         self._session.execute(update(LLMAttemptRow).where(LLMAttemptRow.id == attempt_id,
             LLMAttemptRow.state == attempt.state).values(state=state, outcome_json=outcome))
         self._session.execute(update(RecoveryScopeRow).where(RecoveryScopeRow.id == scope.id,
             RecoveryScopeRow.generation == attempt.generation, RecoveryScopeRow.status == 'claimed').values(status='pending'))
-        previous = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id)
-            .order_by(LLMAttemptRow.ordinal.desc()).limit(2)).all()
+        previous = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id,
+            LLMAttemptRow.state != 'cancelled').order_by(LLMAttemptRow.ordinal.desc()).limit(2)).all()
         self._session.flush()
         is_truncated = (
             violation is not None and violation.rule_code == "provider_truncated"
@@ -1412,14 +1569,20 @@ class SqlAlchemyWorkRepository:
             and leaves + 1 <= policy["max_leaves"]
         )
 
-    def split_scope(self, scope_id, *, expected_generation, children):
+    def split_scope(self, scope_id, *, expected_generation, children, expected_root_generation=None):
         scope = self.get_scope(scope_id)
         if scope is None or tuple(block for group in children for block in group) != scope.ordered_blocks:
             raise WorkStateError('разбиение не покрывает область точно один раз')
+        root = self._session.get(RecoveryRootRow, scope.root_id)
+        if (root is None or root.superseded_by is not None or root.status not in {'pending', 'running'}
+                or (expected_root_generation is not None and root.generation != expected_root_generation)):
+            raise WorkStateError('generation_conflict')
         changed = self._session.execute(update(RecoveryScopeRow).where(RecoveryScopeRow.id == scope_id,
-            RecoveryScopeRow.generation == expected_generation, RecoveryScopeRow.status == 'pending').values(status='split'))
+            RecoveryScopeRow.generation == expected_generation, RecoveryScopeRow.status == 'pending').values(
+                status='split', generation=RecoveryScopeRow.generation + 1))
         if changed.rowcount != 1:
             raise WorkStateError('область изменилась до разбиения')
+        self._session.refresh(self._session.get(RecoveryScopeRow, scope_id))
         for blocks in children:
             self.add_scope(RecoveryScope(str(uuid4()), scope.root_id, tuple(blocks), parent_id=scope.id))
 
@@ -1579,38 +1742,85 @@ class SqlAlchemyWorkRepository:
         self._session.flush()
 
     def reconcile_recovery_attempts(self):
+        # Generations are snapshotted first so a second live attempt is not stale after one root bump.
         rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.root_id.is_not(None),
             LLMAttemptRow.state.in_(('created', 'sent', 'unknown', 'validated')))).all()
+        claimed = self._session.scalars(select(RecoveryScopeRow).where(RecoveryScopeRow.status == 'claimed')).all()
+        root_generation = {}
+        scope_generation = {}
+        scope_status = {}
         for row in rows:
-            scope = self._session.get(RecoveryScopeRow, row.scope_id)
+            root = self._session.get(RecoveryRootRow, row.root_id)
+            scope = self._session.get(RecoveryScopeRow, row.scope_id) if row.scope_id is not None else None
+            if root is not None and root.id not in root_generation:
+                root_generation[root.id] = root.generation
+            if scope is not None and scope.id not in scope_generation:
+                scope_generation[scope.id] = scope.generation
+                scope_status[scope.id] = scope.status
+        for scope in claimed:
+            if scope.id not in scope_generation:
+                scope_generation[scope.id] = scope.generation
+                scope_status[scope.id] = scope.status
+            if scope.root_id not in root_generation:
+                root = self._session.get(RecoveryRootRow, scope.root_id)
+                if root is not None:
+                    root_generation[root.id] = root.generation
+        scope_updates = {}
+        root_bumps = set()
+        root_stops = set()
+        for row in rows:
+            outcome = row.outcome_json or {}
+            if row.state == 'unknown' and outcome.get('decision') in {'interrupted', 'stale'}:
+                continue
+            scope = self._session.get(RecoveryScopeRow, row.scope_id) if row.scope_id is not None else None
             root = self._session.get(RecoveryRootRow, row.root_id)
             if scope is None or root is None:
                 continue
-            if (scope.status == 'accepted' or scope.generation != row.generation
-                    or root.generation != row.context_json.get('root_generation')):
+            stale = (scope_status[scope.id] == 'accepted' or scope_generation[scope.id] != row.generation
+                     or root_generation[root.id] != (row.context_json or {}).get('root_generation'))
+            if stale:
                 if row.state == 'created':
                     row.state = 'cancelled'
                 elif row.state == 'validated':
                     row.state = 'rejected'
                 else:
                     row.state = 'unknown'
-                row.outcome_json = {**row.outcome_json, 'decision': 'interrupted'}
+                row.outcome_json = {**outcome, 'decision': 'interrupted'}
                 continue
             if row.state == 'created':
                 row.state = 'cancelled'
-                scope.status = 'pending'
+                scope_updates.setdefault(scope.id, 'pending')
+                root_bumps.add(root.id)
             else:
                 row.state = 'unknown' if row.state in {'sent', 'unknown'} else 'rejected'
-                root.status, root.reason = 'stopped', 'interrupted'
-                scope.status = 'stopped'
-            scope.generation += 1
-            root.generation += 1
-            row.outcome_json = {**row.outcome_json, 'decision': 'interrupted'}
+                scope_updates[scope.id] = 'stopped'
+                root_bumps.add(root.id)
+                root_stops.add(root.id)
+            row.outcome_json = {**(row.outcome_json or {}), 'decision': 'interrupted'}
+        for scope in claimed:
+            if scope.id in scope_updates:
+                continue
+            latest = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id)
+                .order_by(LLMAttemptRow.ordinal.desc()).limit(1)).first()
+            if latest is None or latest.state not in {'rejected', 'failed'}:
+                continue
+            scope_updates[scope.id] = 'pending'
+            root_bumps.add(scope.root_id)
+        for scope_id, status in scope_updates.items():
+            scope = self._session.get(RecoveryScopeRow, scope_id)
+            scope.status = status
+            scope.generation = scope_generation[scope_id] + 1
+        for root_id in root_bumps:
+            root = self._session.get(RecoveryRootRow, root_id)
+            root.generation = root_generation[root_id] + 1
+            if root_id in root_stops:
+                root.status = 'stopped'
+                root.reason = 'interrupted'
         self._session.flush()
 
     def scope_attempt_count(self, scope_id):
-        from sqlalchemy import func
-        return self._session.scalar(select(func.count()).select_from(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope_id))
+        return self._session.scalar(select(func.count()).select_from(LLMAttemptRow).where(
+            LLMAttemptRow.scope_id == scope_id, LLMAttemptRow.state != 'cancelled')) or 0
 
     def stale_reviews(self, book_id):
         self._session.execute(update(QualityReviewRow).where(QualityReviewRow.book_id == book_id,
