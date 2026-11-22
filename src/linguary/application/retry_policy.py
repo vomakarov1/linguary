@@ -231,15 +231,17 @@ class RetryPolicy:
         `attempts` — number of attempts made so far, including this one. Tracked by the call loop:
         `ProcessingTask.attempts` counts task executions rather than individual model calls.
 
-        Output truncation due to token limits is the sole model error that the policy never retries:
-        the exact same request will hit the same ceiling (`ports/llm.py`), and any remaining attempts
-        would be paid calls with predetermined outcomes.
+        Unknown transport outcomes, provider refusals, content filters, and unclassified
+        exceptions are not retried automatically. Output truncation is not retried either:
+        the same request hits the same ceiling (`ports/llm.py`).
         """
         if attempts < 1:
             raise RetryPolicyError("попытка вызова модели нумеруется с единицы")
         task_error = classify_error(error)
         assistant_response = raw_content or getattr(error, "raw_content", None)
         if _truncated_by_output_limit(error):
+            return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
+        if _give_up_without_automatic_retry(error):
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
         if not task_error.type.is_retried_automatically:
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
@@ -314,6 +316,16 @@ _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
     (BlockResultError, ErrorType.VALIDATION),
     (TreatmentPlanError, ErrorType.VALIDATION),
 )
+
+
+def _give_up_without_automatic_retry(error: Exception) -> bool:
+    """Unproven sends, provider blocks, and errors outside `_ERROR_TYPES` are not retried."""
+    if isinstance(error, LLMTransportError) and error.outcome == "unknown":
+        return True
+    violation = getattr(error, "violation", None)
+    if getattr(violation, "rule_code", None) in {"provider_refusal", "provider_content_filter"}:
+        return True
+    return not any(isinstance(error, error_type) for error_type, _task_type in _ERROR_TYPES)
 
 
 def classify_error(error: Exception) -> TaskError:
@@ -516,7 +528,12 @@ def violation_of(error, *, context=None):
     if isinstance(error, LLMResponseFormatError):
         rule = 'provider_truncated' if error.truncated else 'response_format'
     elif isinstance(error, LLMTransportError):
-        rule = 'transport_unknown'
+        if error.outcome == 'not_sent':
+            rule = 'transport_not_sent'
+        elif error.outcome == 'known_transient':
+            rule = 'transport_transient'
+        else:
+            rule = 'transport_unknown'
     elif isinstance(error, ResultValidationError):
         rule = 'domain_validation'
     else:

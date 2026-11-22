@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import re
 
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.ports.persistence import PersistenceError
 from linguary.application.errors import ApplicationError
 
 
@@ -50,6 +51,14 @@ def bounded_body(body, *, max_bytes=64 * 1024, secrets=()):
                     'stored_bytes': len(result.encode('utf-8'))}
 
 
+def _is_transient_lock_error(error: BaseException) -> bool:
+    """A temporary SQLite writer lock surfaced as `PersistenceError`."""
+    if not isinstance(error, PersistenceError):
+        return False
+    text = str(error).casefold()
+    return 'занята' in text or 'locked' in text or 'busy' in text
+
+
 class Diagnostics:
     """Metadata is mandatory; optional body failures never invent evidence."""
     def __init__(self, unit_of_work, *, policy=None, clock=None):
@@ -88,7 +97,9 @@ class Diagnostics:
     def finalize_attempt(self, *args, **kwargs):
         try:
             return self._finalize_attempt(*args, **kwargs)
-        except Exception:
+        except Exception as error:
+            if _is_transient_lock_error(error):
+                raise
             self.fail()
 
     def _finalize_attempt(self, attempt_id, decision, violation=None, body=None, *, call_id=None,
@@ -187,7 +198,9 @@ class Diagnostics:
         try:
             with self.uow.transaction() as transaction:
                 transaction.llm_calls.enforce_diagnostics_policy(self.policy, now or self.clock())
-        except Exception:
+        except Exception as error:
+            if _is_transient_lock_error(error):
+                raise
             self.fail()
 
     def _require_book(self, transaction, book_id):
