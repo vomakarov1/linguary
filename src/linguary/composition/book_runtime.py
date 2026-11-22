@@ -1,6 +1,6 @@
 """Resolve pinned work using saved parameters and locally available credentials."""
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, replace
 from hashlib import sha256
@@ -10,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
+from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
 from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS,
@@ -254,40 +255,99 @@ class ProvenanceClient:
             return
         self._mark_sent_unknown(attempt_id)
 
-    async def generate(self, request):
+    def _cancel_created_attempt(self, request):
+        context = request.call_context
+        if context is None or context.root_id is None:
+            return
         with self.service.uow.transaction() as transaction:
-            conditions = self.service.require(request.book_id, transaction=transaction)
-            if conditions.id != self.conditions_id:
-                raise ConditionsError('conditions_revision_conflict')
-            if request.call_context is not None and request.call_context.root_id is not None:
-                context = request.call_context
-                root = transaction.work.get_root(context.root_id)
-                scope = transaction.work.get_scope(context.scope_id)
-                attempt = self._require_operation_context(
-                    transaction, request, context, root=root, scope=scope
-                )
-                if attempt.state != 'created' or not self._has_operation_ownership(
-                    transaction, context, attempt, root=root, scope=scope
-                ):
-                    raise RecoveryError('interrupted', context.root_id)
-                root_generation = root.generation
-                rooted = True
-            else:
-                rooted = False
-                context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
-                    stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
-                    ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
-                    assigned_model=assigned_model_for(conditions.payload, request.stage),
-                    prompt_hash=sha256(request.instructions.encode()).hexdigest())
-                request = replace(request, call_context=context)
-                attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
-                    task_id=request.task_id, run_id=request.run_id, state='sent', ordinal=request.attempt,
-                    context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
-                             'route_id': conditions.payload['route']['route_id']})
-                transaction.work.add_attempt(attempt)
-        if rooted:
-            with self.service.uow.transaction() as transaction:
-                transaction.work.mark_attempt_sent(attempt.id, expected_root_generation=root_generation)
+            current = transaction.work.get_attempt(context.attempt_id)
+            if current is not None and current.state == 'created':
+                with suppress(WorkStateError):
+                    transaction.work.cancel_unsent_attempt(current.id)
+
+    def _ensure_observation_ready(self, request):
+        inner = self.inner
+        if getattr(inner, '_observation_failed', False):
+            self._cancel_created_attempt(request)
+            raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
+        if isinstance(inner, LoggingLLMClient) and request.book_id is not None and request.stage is not None:
+            try:
+                diagnostics_for(inner.unit_of_work).ensure_available()
+            except LLMConfigurationError:
+                self._cancel_created_attempt(request)
+                raise
+
+    async def generate(self, request):
+        self._ensure_observation_ready(request)
+        rooted_context = (
+            request.call_context
+            if request.call_context is not None and request.call_context.root_id is not None
+            else None
+        )
+        gate_error: Exception | None = None
+        root_generation: int | None = None
+        rooted = False
+        with self.service.uow.transaction() as transaction:
+            try:
+                conditions = self.service.require(request.book_id, transaction=transaction)
+                if conditions.id != self.conditions_id:
+                    raise ConditionsError('conditions_revision_conflict')
+                if rooted_context is not None:
+                    context = rooted_context
+                    root = transaction.work.get_root(context.root_id)
+                    scope = transaction.work.get_scope(context.scope_id)
+                    attempt = self._require_operation_context(
+                        transaction, request, context, root=root, scope=scope
+                    )
+                    if attempt.state != 'created' or not self._has_operation_ownership(
+                        transaction, context, attempt, root=root, scope=scope
+                    ):
+                        raise RecoveryError('interrupted', context.root_id)
+                    root_generation = root.generation
+                    rooted = True
+                    transaction.work.mark_attempt_sent(
+                        attempt.id, expected_root_generation=root_generation
+                    )
+                else:
+                    rooted = False
+                    context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
+                        stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
+                        ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
+                        assigned_model=assigned_model_for(conditions.payload, request.stage),
+                        prompt_hash=sha256(request.instructions.encode()).hexdigest())
+                    request = replace(request, call_context=context)
+                    attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
+                        task_id=request.task_id, run_id=request.run_id, state='sent', ordinal=request.attempt,
+                        context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
+                                 'route_id': conditions.payload['route']['route_id']})
+                    transaction.work.add_attempt(attempt)
+            except (RecoveryError, ConditionsError) as error:
+                if rooted_context is None:
+                    raise
+                current_attempt = transaction.work.get_attempt(rooted_context.attempt_id)
+                if current_attempt is not None and current_attempt.state == 'created':
+                    with suppress(WorkStateError):
+                        transaction.work.cancel_unsent_attempt(current_attempt.id)
+                if isinstance(error, RecoveryError) and error.reason in {'limit', 'scope_limit'}:
+                    current_root = transaction.work.get_root(rooted_context.root_id)
+                    if (
+                        current_root is not None
+                        and current_root.superseded_by is None
+                        and current_root.status in {'pending', 'running'}
+                    ):
+                        with suppress(WorkStateError):
+                            transaction.work.stop_root(
+                                current_root.id,
+                                error.reason,
+                                expected_generation=(
+                                    root_generation
+                                    if root_generation is not None
+                                    else current_root.generation
+                                ),
+                            )
+                gate_error = error
+        if gate_error is not None:
+            raise gate_error
         try:
             response = await self.inner.generate(request)
         except LLMTransportError as error:

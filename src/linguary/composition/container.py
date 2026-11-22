@@ -533,6 +533,9 @@ def build_application(
         with unit_of_work.transaction() as transaction:
             transaction.work.reconcile_recovery_attempts()
             transaction.work.reconcile_quality_attempts()
+            reconcile_correction = getattr(transaction.work, 'reconcile_correction_attempts', None)
+            if callable(reconcile_correction):
+                reconcile_correction()
         correction.reconcile()
 
     def maintain_work():
