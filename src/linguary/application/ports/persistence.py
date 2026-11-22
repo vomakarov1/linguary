@@ -241,6 +241,17 @@ class BlockResultRepository(Protocol):
         so retrieving all block results just for a count is unnecessary.
         """
 
+    def allocate_note_ids(
+        self, run_id: str, chapter_number: int, count: int
+    ) -> tuple[str, ...]:
+        """Reserve the next language-note ids for one run and chapter.
+
+        `count == 0` returns an empty tuple and does not change the counter.
+        A negative `count` or a `chapter_number` below 1 raises `ValueError`.
+        The increment runs in the caller's transaction. A missing counter is
+        seeded from note ids already stored for that run and chapter.
+        """
+
 
 class TaskRepository(Protocol):
     """Local resumable processing tasks."""

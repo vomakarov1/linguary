@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 import json
+import re
 
 from sqlalchemy import JSON, LargeBinary, cast, delete, func, or_, select, update
 from sqlalchemy.orm import Session
@@ -20,15 +21,18 @@ from sqlalchemy.dialects.sqlite import insert
 
 from linguary.adapters.db import mapping
 from linguary.adapters.db.models import (
+    ArtifactRevisionRow,
     BlockResultRow,
     BookRow,
     ChapterAnalysisRow,
     AnalysisPassResultRow,
+    CorrectionCandidateRow,
     DocumentBlockRow,
     GlossaryCandidateRow,
     ImportWarningRow,
     LanguageNoteRow,
     LLMCallLogRow,
+    NoteNumberCounterRow,
     ProcessingRunRow,
     ProcessingTaskRow,
     ResourceRow,
@@ -54,7 +58,11 @@ from linguary.domain import (
     TaskStatus,
     TermConcept,
     TaskError,
+    build_language_note_id,
 )
+
+#: Whole language-note id. A mention inside a longer string is not an issued id.
+_NOTE_ID = re.compile(r"^ln-ch(\d+)-(\d+)$")
 
 
 class SqlAlchemyBookRepository:
@@ -649,6 +657,64 @@ class SqlAlchemyBlockResultRepository:
             or 0
         )
 
+    def allocate_note_ids(
+        self, run_id: str, chapter_number: int, count: int
+    ) -> tuple[str, ...]:
+        """Reserve the next language-note ids for one run and chapter.
+
+        The caller already holds `BEGIN IMMEDIATE`. Seeding and the increment
+        stay in that transaction so two writers cannot take the same ordinal.
+        """
+        if count == 0:
+            return ()
+        if count < 0 or chapter_number < 1:
+            raise ValueError(
+                "chapter_number must be positive and count must be non-negative"
+            )
+        row = self._session.get(NoteNumberCounterRow, (run_id, chapter_number))
+        if row is None:
+            base = self._seeded_note_ordinal(run_id, chapter_number)
+            self._session.add(
+                NoteNumberCounterRow(
+                    run_id=run_id,
+                    chapter_number=chapter_number,
+                    last_ordinal=base + count,
+                )
+            )
+        else:
+            # An existing row is authoritative. Later out-of-band note ids do not move it.
+            base = row.last_ordinal
+            row.last_ordinal = base + count
+        self._session.flush()
+        return tuple(
+            build_language_note_id(chapter_number=chapter_number, ordinal=base + i)
+            for i in range(1, count + 1)
+        )
+
+    def _seeded_note_ordinal(self, run_id: str, chapter_number: int) -> int:
+        """Highest issued ordinal for this run and chapter, or zero when none exist."""
+        base = 0
+        values = [
+            *self._session.scalars(
+                select(LanguageNoteRow.note_id).where(LanguageNoteRow.run_id == run_id)
+            ).all(),
+            *self._session.scalars(
+                select(CorrectionCandidateRow.payload_json).where(
+                    CorrectionCandidateRow.run_id == run_id
+                )
+            ).all(),
+            *self._session.scalars(
+                select(ArtifactRevisionRow.body_json).where(
+                    ArtifactRevisionRow.run_id == run_id
+                )
+            ).all(),
+        ]
+        for value in values:
+            for ordinal in _note_ordinals(value, chapter_number):
+                if ordinal > base:
+                    base = ordinal
+        return base
+
     def block_ids_for_run(self, run_id: str) -> frozenset[str]:
         """Return processed block IDs for a run without loading full block results."""
         return frozenset(
@@ -1141,6 +1207,30 @@ class SqlAlchemyLLMCallLogRepository:
 
     def _now(self):
         return self.clock() if self.clock is not None else datetime.now(UTC)
+
+
+def _note_ordinals(value: object, chapter_number: int):
+    """Yield ordinals whose whole string is `ln-ch<chapter>-<ordinal>` for this chapter."""
+    if isinstance(value, str):
+        match = _NOTE_ID.fullmatch(value)
+        if match is not None:
+            if int(match.group(1)) == chapter_number:
+                yield int(match.group(2))
+            return
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return
+        if parsed != value:
+            yield from _note_ordinals(parsed, chapter_number)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _note_ordinals(item, chapter_number)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _note_ordinals(item, chapter_number)
 
 
 def _by_block[RowT: (LanguageNoteRow, ResultWarningRow)](
