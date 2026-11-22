@@ -716,6 +716,8 @@ async def test_success_diagnostic_redacts_key_without_changing_payload() -> None
 @pytest.mark.parametrize('kind', ['transport', 'provider', 'format', 'success'])
 @pytest.mark.parametrize('mode', ['custom', 'auto'])
 async def test_proxy_diagnostics_redact_encoded_decoded_credentials(monkeypatch, kind, mode):
+    foreign = 'http://fixture-foreign:not-a-real-password@127.0.0.1:9'
+    monkeypatch.setenv('https_proxy', foreign)
     for key in list(os.environ):
         if 'proxy' in key.lower():
             monkeypatch.delenv(key, raising=False)
@@ -743,7 +745,7 @@ async def test_proxy_diagnostics_redact_encoded_decoded_credentials(monkeypatch,
                 await client.generate(LLMRequest.for_translation(instructions='Переводи', input_text='text'))
             output = str(caught.value) + (getattr(caught.value, 'raw_content', '') or '')
             assert caught.value.__cause__ is None
-        for value in (secret, 'alice', 'p%40ss', 'p@ss', 'YWxpY2U6cEBzcw=='):
+        for value in (secret, 'alice', 'p%40ss', 'p@ss', 'YWxpY2U6cEBzcw==', 'fixture-foreign', 'not-a-real-password'):
             assert value not in output
     finally:
         await client._http.aclose()
