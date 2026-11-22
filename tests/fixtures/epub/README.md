@@ -104,8 +104,8 @@ through `zipfile.ZipFile.testzip()`.
 uv run python tests/fixtures/epub/inspect_fixtures.py
 ```
 
-The script reads the files directly as zip-archives (`zipfile` + `lxml`) and does not rely on the project's importer —
+The script reads the files directly as zip-based archives (`zipfile` + `lxml`) and does not rely on the project's importer —
 it had not been written yet when this set was assembled.
 
 The test “every file in the set imports without `FATAL`” (PRD § 28.1) is not part of this package —
-it will be added by the package that writes the importer of EPUB.
+it will be added by the package that implements the importer of EPUB.

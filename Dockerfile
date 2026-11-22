@@ -22,7 +22,7 @@ WORKDIR /app
 # Copy the dependency manifests
 COPY pyproject.toml uv.lock ./
 
-# Install project dependencies without dev-packages and without keeping the cache
+# Install project dependencies without dev-only packages and without keeping the cache
 RUN uv sync --frozen --no-dev --no-install-project --no-cache
 
 # Copy the source tree and the alembic migrations
@@ -31,7 +31,7 @@ COPY alembic.ini ./
 COPY src src
 COPY README.md ./
 
-# Install the application package in editable mode without dev-packages
+# Install the application package in editable mode without dev-only packages
 RUN uv sync --frozen --no-dev --no-cache
 
 # Default environment settings for running inside the container
