@@ -2088,6 +2088,10 @@ def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...
     return _collect_explained_topics(parts)
 
 
+DEFAULT_PRIOR_CHAPTER_TOPICS_WINDOW = 5
+DEFAULT_MAX_PRIOR_CHAPTER_TOPICS = 60
+
+
 def _prior_chapter_topics(
     document: CanonicalDocument,
     section: DocumentSection,
@@ -2095,8 +2099,10 @@ def _prior_chapter_topics(
     *,
     parallel_batch: bool,
     seed_active: bool,
+    max_chapters: int = DEFAULT_PRIOR_CHAPTER_TOPICS_WINDOW,
+    max_topics: int = DEFAULT_MAX_PRIOR_CHAPTER_TOPICS,
 ) -> tuple[str, ...]:
-    """Collect deduplicated topics explained in earlier content chapters in reading order."""
+    """Collect bounded deduplicated topics explained in recent earlier content chapters."""
     ordered_sections = getattr(document, "ordered_sections", document.sections)
     if parallel_batch:
         if not seed_active:
@@ -2104,24 +2110,48 @@ def _prior_chapter_topics(
         seed_section = _first_content_section(document)
         if seed_section is None or seed_section.order >= section.order:
             return ()
-        eligible_ids = {seed_section.id}
+        eligible_sections = (seed_section,)
     else:
-        eligible_ids = {
-            other.id
+        eligible_sections = tuple(
+            other
             for other in ordered_sections
-            if other.order < section.order
-            and not document.is_front_matter(other)
-            and not getattr(other, "is_notes_only", False)
-        }
-    if not eligible_ids:
+            if other.order < section.order and _is_content_section(document, other)
+        )
+    if not eligible_sections:
         return ()
     analyses_by_section = {analysis.section_id: analysis for analysis in analyses}
     ordered_prior = tuple(
         analyses_by_section[other.id]
-        for other in ordered_sections
-        if other.id in eligible_ids and other.id in analyses_by_section
+        for other in eligible_sections
+        if other.id in analyses_by_section
     )
-    return _collect_explained_topics(ordered_prior)
+    if not ordered_prior:
+        return ()
+    if max_chapters > 0 and len(ordered_prior) > max_chapters:
+        ordered_prior = ordered_prior[-max_chapters:]
+    all_topics = _collect_explained_topics(ordered_prior)
+    if max_topics <= 0 or len(all_topics) <= max_topics:
+        return all_topics
+    kept_by_chapter: list[list[str]] = []
+    seen: set[str] = set()
+    remaining = max_topics
+    for analysis in reversed(ordered_prior):
+        if remaining <= 0:
+            break
+        chosen: list[str] = []
+        for topic in _collect_explained_topics((analysis,)):
+            if remaining <= 0:
+                break
+            key = topic.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(topic)
+            remaining -= 1
+        if chosen:
+            kept_by_chapter.append(chosen)
+    kept_by_chapter.reverse()
+    return tuple(topic for chapter_topics in kept_by_chapter for topic in chapter_topics)
 
 
 def _has_meaningful_part_title(

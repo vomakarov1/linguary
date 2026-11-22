@@ -1014,7 +1014,7 @@ def test_validate_narrative_does_not_false_flag_lowercase_or_article_role_partic
     role_visible = {alias: role_texts[bid] for alias, bid in role_aliases.items()}
     role_order = ('id-1', 'id-2')
 
-    for role_participant in ('the boy', 'boy', 'The boy', 'the giant'):
+    for role_participant in ('the boy', 'boy', 'The boy', 'Boy', 'the giant', 'Giant'):
         role_scenes = (
             QuotedSceneResponse('b1', 'b1', 'У двери.', participants=(role_participant,)),
             QuotedSceneResponse('b2', 'b2', 'Крик в коридоре.', participants=(role_participant, 'Uncle Vernon')),
@@ -1025,21 +1025,106 @@ def test_validate_narrative_does_not_false_flag_lowercase_or_article_role_partic
         )
         assert len(resolved) == 2
 
-    # Proper capitalized surname colliding with earlier lowercase word ('white' vs 'Mary White') still catches spoiler.
+    # Unintroduced role noun appearing only in a later block is still caught as a spoiler.
+    late_role_texts = {
+        'id-1': 'The corridor was silent and dark.',
+        'id-2': '‘Boy!’ shouted Uncle Vernon.',
+    }
+    late_role_visible = {alias: late_role_texts[bid] for alias, bid in role_aliases.items()}
+    late_role_scenes = (
+        QuotedSceneResponse('b1', 'b1', 'Тихий коридор.', participants=('Boy',)),
+        QuotedSceneResponse('b2', 'b2', 'Крик в коридоре.', participants=('Boy', 'Uncle Vernon')),
+    )
+    with pytest.raises(AnalysisMergeError) as late_role_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=late_role_scenes),
+            role_aliases, late_role_texts, late_role_visible, ordered_block_ids=role_order,
+        )
+    assert late_role_exc.value.violation.rule_code == 'spoiler_name_leak'
+
+    # Proper capitalized surname colliding with earlier lowercase word ('white' vs 'Mary White' or 'White') still catches spoiler.
     proper_texts = {
         'id-1': 'She wore a white dress in the hall.',
         'id-2': '‘I am Mary White,’ she said.',
     }
     proper_visible = {alias: proper_texts[bid] for alias, bid in role_aliases.items()}
-    proper_scenes = (
-        QuotedSceneResponse('b1', 'b1', 'В зале.', participants=('Mary White',)),
-        QuotedSceneResponse('b2', 'b2', 'Знакомство.', participants=('Mary White',)),
-    )
-    with pytest.raises(AnalysisMergeError) as proper_exc:
-        validate_narrative_response(
-            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=proper_scenes),
-            role_aliases, proper_texts, proper_visible, ordered_block_ids=role_order,
+    for proper_participant in ('Mary White', 'White'):
+        proper_scenes = (
+            QuotedSceneResponse('b1', 'b1', 'В зале.', participants=(proper_participant,)),
+            QuotedSceneResponse('b2', 'b2', 'Знакомство.', participants=(proper_participant,)),
         )
-    assert proper_exc.value.violation.rule_code == 'spoiler_name_leak'
+        with pytest.raises(AnalysisMergeError) as proper_exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=proper_scenes),
+                role_aliases, proper_texts, proper_visible, ordered_block_ids=role_order,
+            )
+        assert proper_exc.value.violation.rule_code == 'spoiler_name_leak'
+
+
+def test_validate_narrative_allows_short_part_divider_titles_with_real_langid_and_rejects_russian():
+    from linguary.adapters.validation import Py3LangidDetector
+
+    detector = Py3LangidDetector()
+    for divider_title in (
+        'PART TWO: Skinjackers',
+        'Part Two: The Chocolate Ogre',
+        'Afterlights',
+    ):
+        aliases = {'b1': 'part-b1'}
+        texts = {'part-b1': divider_title}
+        visible = {'b1': divider_title}
+        payload = NarrativeAnalysisResponse(
+            translation_instructions='Keep tone.',
+            chapter_summary=divider_title,
+            scenes=(),
+        )
+        # Accepted both as notes-only / part-divider and as a short chapter summary.
+        validate_narrative_response(
+            payload,
+            aliases,
+            texts,
+            visible,
+            ordered_block_ids=('part-b1',),
+            source_language='en',
+            target_language='ru',
+            language_detector=detector,
+            is_notes_only=True,
+        )
+        validate_narrative_response(
+            replace(
+                payload,
+                scenes=(QuotedSceneResponse('b1', 'b1', 'Название части.', participants=()),),
+            ),
+            aliases,
+            texts,
+            visible,
+            ordered_block_ids=('part-b1',),
+            source_language='en',
+            target_language='ru',
+            language_detector=detector,
+            is_notes_only=False,
+        )
+
+    # Russian or mixed-Cyrillic chapter_summary for an English divider is still rejected.
+    aliases = {'b1': 'part-b1'}
+    texts = {'part-b1': 'PART TWO: Skinjackers'}
+    visible = {'b1': 'PART TWO: Skinjackers'}
+    for bad_summary in ('Часть вторая: Скинджекеры', 'PART TWO: Послесветы'):
+        for notes_only in (True, False):
+            scenes = () if notes_only else (QuotedSceneResponse('b1', 'b1', 'Название части.'),)
+            with pytest.raises(AnalysisMergeError) as exc_info:
+                validate_narrative_response(
+                    NarrativeAnalysisResponse('Keep tone.', bad_summary, scenes=scenes),
+                    aliases,
+                    texts,
+                    visible,
+                    ordered_block_ids=('part-b1',),
+                    source_language='en',
+                    target_language='ru',
+                    language_detector=detector,
+                    is_notes_only=notes_only,
+                )
+            assert exc_info.value.violation.rule_code == 'narrative_summary_language'
+
 
 

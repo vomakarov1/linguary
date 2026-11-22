@@ -1709,9 +1709,13 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         # with непрозрачное=false even though neither Afterlights nor Lief appears in Ch. 3 text.
         assert "Afterlights" in ch3_nar_req.input_text
         assert "Alexandra" in ch3_nar_req.input_text
-        assert "Lief" in ch3_nar_req.input_text
-        assert "leaf" in ch3_nar_req.input_text
-        assert "непрозрачное=false" in ch3_nar_req.input_text
+        lief_lines = [
+            line for line in ch3_nar_req.input_text.splitlines() if "Lief" in line
+        ]
+        assert lief_lines
+        assert any(
+            "leaf" in line and "непрозрачное=false" in line for line in lief_lines
+        )
 
         # Ch. 3 pedagogical prompt receives deduplicated prior_chapter_topics from both Ch. 1 and Ch. 2.
         assert "Уже объяснено в предыдущих главах" in ch3_ped_req1.input_text
@@ -1859,5 +1863,9 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             assert "Alexandra" in wave3_nar[sid].input_text
             assert "Уже объяснено в предыдущих главах" in wave3_ped[sid].input_text
             assert "- silver mist" in wave3_ped[sid].input_text
+        # Wave-3 isolation: Ch. 2's candidates and topics do NOT leak into parallel Ch. 3.
+        assert "Lief" not in wave3_nar["ch-3"].input_text
+        assert "Lief" not in wave3_ped["ch-3"].input_text
+        assert "mossy stones" not in wave3_ped["ch-3"].input_text
     finally:
         await prewave_app.aclose()

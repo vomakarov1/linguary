@@ -1718,7 +1718,11 @@ def _collect_narrative_language_issues(
                         (),
                     )
                 )
-            elif language_detector is not None:
+            elif (
+                language_detector is not None
+                and not is_notes_only
+                and sum(ch.isalpha() for ch in summary) >= _SCENE_SUMMARY_DETECTOR_MIN_LETTERS
+            ):
                 prob = language_detector.probability_for_language(summary, source_language)
                 if prob is not None and prob < _NARRATIVE_LANGUAGE_MIN_PROBABILITY:
                     issues.append(
@@ -1902,6 +1906,140 @@ def _extract_block_spoiler_tokens(
 
 
 _LEADING_ROLE_ARTICLES = frozenset({"the", "a", "an"})
+_GENERIC_ROLE_PARTICIPANTS = frozenset(
+    {
+        "boy",
+        "girl",
+        "man",
+        "woman",
+        "child",
+        "kid",
+        "baby",
+        "stranger",
+        "driver",
+        "giant",
+        "guard",
+        "soldier",
+        "officer",
+        "clerk",
+        "waiter",
+        "waitress",
+        "teacher",
+        "doctor",
+        "nurse",
+        "captain",
+        "king",
+        "queen",
+        "prince",
+        "princess",
+        "servant",
+        "maid",
+        "butler",
+        "porter",
+        "conductor",
+        "pilot",
+        "sailor",
+        "farmer",
+        "baker",
+        "shopkeeper",
+        "merchant",
+        "priest",
+        "monk",
+        "witch",
+        "wizard",
+        "ghost",
+        "monster",
+        "narrator",
+        "speaker",
+        "voice",
+        "visitor",
+        "guest",
+        "passenger",
+        "neighbor",
+        "neighbour",
+        "friend",
+        "mother",
+        "father",
+        "brother",
+        "sister",
+        "son",
+        "daughter",
+        "husband",
+        "wife",
+        "grandmother",
+        "grandfather",
+        "aunt",
+        "uncle",
+        "cousin",
+        "boss",
+        "chief",
+        "leader",
+        "student",
+        "pupil",
+        "lawyer",
+        "judge",
+        "policeman",
+        "detective",
+        "thief",
+        "bandit",
+        "pirate",
+        "knight",
+        "hunter",
+        "keeper",
+        "owner",
+        "host",
+        "bartender",
+        "barman",
+        "cook",
+        "chef",
+        "dog",
+        "cat",
+        "horse",
+        "bird",
+        "wolf",
+        "owl",
+        "rat",
+        "toad",
+        "мальчик",
+        "девочка",
+        "мужчина",
+        "женщина",
+        "ребенок",
+        "незнакомец",
+        "незнакомка",
+        "водитель",
+        "великан",
+        "охранник",
+        "стражник",
+        "солдат",
+        "офицер",
+        "продавец",
+        "официант",
+        "учитель",
+        "доктор",
+        "врач",
+        "капитан",
+        "король",
+        "королева",
+        "слуга",
+        "повар",
+        "хозяин",
+        "хозяйка",
+        "гость",
+        "пассажир",
+        "сосед",
+        "соседка",
+        "друг",
+        "подруга",
+        "мать",
+        "отец",
+        "брат",
+        "сестра",
+        "сын",
+        "дочь",
+        "рассказчик",
+    }
+)
 
 
 def _prefers_capitalized_name_match(name: str) -> bool:
@@ -1917,7 +2055,15 @@ def _prefers_capitalized_name_match(name: str) -> bool:
     stem_tokens = [
         token for token in tokens if _strip_possessive_token(token) in stems
     ]
-    return bool(stem_tokens) and all(token[:1].isupper() for token in stem_tokens)
+    if not stem_tokens or not all(token[:1].isupper() for token in stem_tokens):
+        return False
+    if (
+        len(stems) == 1
+        and not _title_tokens(cleaned)
+        and next(iter(stems)) in _GENERIC_ROLE_PARTICIPANTS
+    ):
+        return False
+    return True
 
 
 def _first_name_block_index(
@@ -3797,17 +3943,33 @@ _A2_ACTIVE_CONTRACTION_PARTICIPLES = (
     r"caught|taught|thought|built|paid|stood|understood|won|grown|begun|"
     r"become|come|had|slept|felt|lost|gotten"
 )
+_A2_SAFE_USED_AFTER = (
+    r"used(?=\s+(?:to|it|this|that|these|those|them|him|her|me|us|you|"
+    r"my|your|his|its|our|their|the|an?|some|any|all|every|one|up)\b)"
+)
+_A2_SAFE_USED_AFTER_CONTRACTION = (
+    r"used(?=\s+(?:it|this|that|these|those|them|him|her|me|us|you|"
+    r"my|your|his|its|our|their|the|an?|some|any|all|every|one|up)\b)"
+)
+_A2_PRESENT_PERFECT_PARTICIPLE = (
+    rf"(?:{_A2_IRREGULAR_PARTICIPLES}|{_A2_SAFE_USED_AFTER}|"
+    rf"{_A2_PRESENT_PERFECT_EXCLUDED_ED}(?:died|lied|tied|[a-z]{{3,}}ed))"
+)
+_A2_INVERTED_PROPER_SUBJECT = (
+    r"(?-i:[A-Z][a-z.'’]+(?:\s+(?:and\s+)?[A-Z][a-z.'’]+){0,2})"
+)
 _A2_PRESENT_PERFECT_RE = re.compile(
     rf"(?:"
     rf"\b(?:have|has|haven['’]t|hasn['’]t|(?:i|you|we|they|who|what|there)['’]ve)"
     rf"\s+(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
-    rf"(?:{_A2_IRREGULAR_PARTICIPLES}|{_A2_PRESENT_PERFECT_EXCLUDED_ED}(?:died|lied|tied|[a-z]{{3,}}ed))\b"
-    rf"|\b(?:have|has|haven['’]t|hasn['’]t)\s+(?:i|you|we|they|he|she|it)\s+"
+    rf"{_A2_PRESENT_PERFECT_PARTICIPLE}\b"
+    rf"|\b(?:have|has|haven['’]t|hasn['’]t)\s+"
+    rf"(?:i|you|we|they|he|she|it|{_A2_INVERTED_PROPER_SUBJECT})\s+"
     rf"(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
-    rf"(?:{_A2_IRREGULAR_PARTICIPLES}|{_A2_PRESENT_PERFECT_EXCLUDED_ED}(?:died|lied|tied|[a-z]{{3,}}ed))\b"
+    rf"{_A2_PRESENT_PERFECT_PARTICIPLE}\b"
     rf"|\b(?:he|she|it|that|there|who|what)['’]s\s+"
     rf"(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
-    rf"(?:{_A2_ACTIVE_CONTRACTION_PARTICIPLES})\b"
+    rf"(?:{_A2_ACTIVE_CONTRACTION_PARTICIPLES}|{_A2_SAFE_USED_AFTER_CONTRACTION})\b"
     rf")",
     re.IGNORECASE,
 )
@@ -4735,7 +4897,7 @@ def _promote_a2_stoplist_item(
                     s_end,
                     difficulties,
                     owners,
-                    whole_block=True,
+                    whole_block=(len(slices) == 1),
                 )
                 if mode is not None:
                     triggered.append(mode)

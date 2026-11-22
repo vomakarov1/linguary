@@ -4198,3 +4198,114 @@ async def test_staged_analysis_allows_known_names_in_ch2_participants_and_reject
     finally:
         engine.dispose()
 
+
+def test_prior_chapter_topics_bounds_window_and_cap_and_handles_parallel_seed_modes() -> None:
+    """_prior_chapter_topics bounds sequential history by recent chapters + topic cap and respects parallel_batch/seed_active."""
+    from linguary.application.use_cases.analyze_chapter import (
+        DEFAULT_MAX_PRIOR_CHAPTER_TOPICS,
+        DEFAULT_PRIOR_CHAPTER_TOPICS_WINDOW,
+        _prior_chapter_topics,
+    )
+    from linguary.domain import BeforeYouReadEntry, ChapterAnalysis, TreatmentPlan
+
+    assert DEFAULT_PRIOR_CHAPTER_TOPICS_WINDOW == 5
+    assert DEFAULT_MAX_PRIOR_CHAPTER_TOPICS == 60
+
+    titlepage = make_analysis_section(
+        section_id='titlepage', title='Title Page', order=0, texts=('Novel Title',),
+    )
+    notes_only = make_analysis_section(
+        section_id='notes-1',
+        title='Notes',
+        order=1,
+        blocks=(
+            make_analysis_block(
+                section_id='notes-1', order=0, text='Footnote note.', type=BlockType.FOOTNOTE,
+            ),
+        ),
+    )
+    chapters = tuple(
+        make_analysis_section(
+            section_id=f'ch-{idx}',
+            title=f'Chapter {idx}',
+            order=idx + 1,
+            texts=(f'Chapter {idx} story paragraph.',),
+        )
+        for idx in range(1, 10)
+    )
+    document = make_analysis_document((titlepage, notes_only, *chapters))
+
+    def _analysis_for(sec, expressions: tuple[str, ...]) -> ChapterAnalysis:
+        blk = sec.blocks[0]
+        return ChapterAnalysis.create(
+            id=f'an-{sec.id}',
+            section_id=sec.id,
+            treatment_plan=TreatmentPlan.of_treatments(
+                sec.id, ((blk.id, BlockTreatment.TRANSLATE),)
+            ),
+            translation_instructions='Keep tone.',
+            chapter_summary='Summary.',
+            expected_block_ids=(blk.id,),
+            before_you_read=tuple(
+                BeforeYouReadEntry(expression=expr, explanation='объяснение')
+                for expr in expressions
+            ),
+        )
+
+    # 8 prior content chapters before ch-9, each with 15 unique topics + shared topic in ch-4 and ch-8.
+    analyses = [
+        _analysis_for(titlepage, ('front-matter-topic',)),
+        _analysis_for(notes_only, ('notes-only-topic',)),
+    ]
+    for idx in range(1, 9):
+        exprs = tuple(f'ch{idx}-topic-{j:02d}' for j in range(15))
+        if idx in (4, 8):
+            exprs = (*exprs, 'shared-recent-topic')
+        analyses.append(_analysis_for(chapters[idx - 1], exprs))
+
+    target = chapters[8]  # ch-9
+
+    # (a) Sequential mode: sliding window of 5 most recent prior content chapters (ch-4..ch-8)
+    # AND cap of 60 topics preferring most recent chapters (ch-5..ch-8 = 61 raw -> 60 kept, ch-4 dropped when capped).
+    seq_topics = _prior_chapter_topics(
+        document, target, analyses, parallel_batch=False, seed_active=False,
+    )
+    assert len(seq_topics) == DEFAULT_MAX_PRIOR_CHAPTER_TOPICS
+    assert 'front-matter-topic' not in seq_topics
+    assert 'notes-only-topic' not in seq_topics
+    # Older chapters beyond the 5-chapter window (ch-1..ch-3) are excluded.
+    for old_idx in (1, 2, 3):
+        assert not any(t.startswith(f'ch{old_idx}-') for t in seq_topics)
+    # Most recent chapter (ch-8) topics are all preserved, including deduplicated shared topic.
+    for j in range(15):
+        assert f'ch8-topic-{j:02d}' in seq_topics
+    assert 'shared-recent-topic' in seq_topics
+    assert seq_topics.count('shared-recent-topic') == 1
+    # Deterministic across repeated calls.
+    assert seq_topics == _prior_chapter_topics(
+        document, target, analyses, parallel_batch=False, seed_active=False,
+    )
+
+    # Verify sliding window specifically when under max_topics cap (1 topic per chapter across 8 prior chapters).
+    small_analyses = [
+        _analysis_for(titlepage, ('front-matter-topic',)),
+        _analysis_for(notes_only, ('notes-only-topic',)),
+        *(_analysis_for(chapters[idx - 1], (f'small-ch{idx}',)) for idx in range(1, 9)),
+    ]
+    windowed = _prior_chapter_topics(
+        document, target, small_analyses, parallel_batch=False, seed_active=False,
+    )
+    assert windowed == ('small-ch4', 'small-ch5', 'small-ch6', 'small-ch7', 'small-ch8')
+
+    # (b) Parallel batch mode: seed_active=True uses ONLY first content chapter (ch-1); seed_active=False returns ().
+    assert _prior_chapter_topics(
+        document, target, small_analyses, parallel_batch=True, seed_active=True,
+    ) == ('small-ch1',)
+    assert _prior_chapter_topics(
+        document, chapters[0], small_analyses, parallel_batch=True, seed_active=True,
+    ) == ()
+    assert _prior_chapter_topics(
+        document, target, small_analyses, parallel_batch=True, seed_active=False,
+    ) == ()
+
+

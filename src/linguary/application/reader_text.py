@@ -51,9 +51,11 @@ _A2_BASE_VERB_AUX_BEFORE = re.compile(
     re.IGNORECASE,
 )
 _A2_QUESTION_AUX_BEFORE = re.compile(
-    r"(?:^|[,;:]\s*|\b(?:and|but|or)\s+)"
-    r"(?:have|has|had|will|would|did|can|could|may|might|must|should|shall)"
-    r"(?:\s+(?:not|n't))?"
+    r"(?:^|[,;:]\s*|\b(?:and|but|or)\s+)[“\"']?"
+    r"(?:haven't|hasn't|hadn't|won't|wouldn't|didn't|don't|doesn't"
+    r"|can't|couldn't|mightn't|mustn't|shouldn't|shan't"
+    r"|have|has|had|will|would|did|can|could|may|might|must|should|shall)"
+    r"(?:\s+not)?"
     r"(?:\s+[A-Za-z']+){1,4}\s*$",
     re.IGNORECASE,
 )
@@ -71,6 +73,22 @@ _A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR = re.compile(
     r"|have|has|had|will|would|did|wait|waits|waited|waiting|lived|stayed|worked|known)\b"
     r"|(?:'ve|'d|'ll)\b)",
     re.IGNORECASE,
+)
+_A2_IRREGULAR_PAST = (
+    r"was|were|went|came|saw|had|did|made|took|gave|found|left|kept|met|felt|"
+    r"told|said|got|became|began|held|ran|sat|stood|slept|spoke|wrote|built|"
+    r"bought|brought|caught|taught|thought|knew|heard|lost|sent|spent|grew|"
+    r"flew|drew|drove|rode|rose|fell|broke|chose|ate|drank|sang|swam|won|hid"
+)
+_A2_THAT_SUBJECT_PAST_VERB = re.compile(
+    r"\b[Tt]hat\s+"
+    r"(?:"
+    r"[A-Z][A-Za-z'.]*(?:\s+(?:and\s+)?[A-Za-z'.]+){0,3}"
+    r"|(?:[Tt]he|[Aa]n?|[Mm]y|[Yy]our|[Hh]is|[Hh]er|[Ii]ts|[Oo]ur|[Tt]heir"
+    r"|[Tt]his|[Tt]hese|[Tt]hose|[Ss]ome|[Mm]any|[Aa]ll|[Bb]oth|[Ee]very|[Ee]ach"
+    r"|[Oo]ne|[Tt]wo|[Tt]hree)\s+[A-Za-z']+(?:\s+[A-Za-z']+){0,2}"
+    r")"
+    rf"\s+(?:[a-z]{{2,}}ed|{_A2_IRREGULAR_PAST})\b"
 )
 
 
@@ -163,7 +181,10 @@ def _has_ungrammatical_present_for(sentence: str) -> bool:
             if duration_match.start() < verb_match.end():
                 continue
             between = normalized[verb_match.end():duration_match.start()]
-            if not _A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR.search(between):
+            if not (
+                _A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR.search(between)
+                or _A2_THAT_SUBJECT_PAST_VERB.search(between)
+            ):
                 return True
     return False
 

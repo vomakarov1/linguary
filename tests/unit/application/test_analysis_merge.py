@@ -3128,4 +3128,133 @@ def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_g
     assert validated is not None
 
 
+def test_normalize_a2_unsegmented_multisentence_read_as_is_checks_vocab_per_sentence() -> None:
+    """Unsegmented multi-sentence READ_AS_IS must not let a vocab difficulty in sentence 2 mask an unbacked B1 word in sentence 1."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain import BlockSegment
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить слово."),)
+
+    s1 = "She felt nervous. "
+    s2 = "He looked gloomy."
+    text = s1 + s2
+    b_unbacked_s1 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=text),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(text), 1),
+        ),
+    )
+    b_backed_s1 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=1, text=text),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(text), 1),
+        ),
+    )
+
+    blocks = (b_unbacked_s1, b_backed_s1)
+    aliases = {"b1": b_unbacked_s1.id, "b2": b_backed_s1.id}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        ),
+        difficulties=(
+            # b1: vocabulary difficulty is ONLY on sentence 2 ("gloomy"), leaving sentence 1 ("nervous") unbacked.
+            QuotedDifficultyResponse(
+                "d-b1-s2",
+                (QuotedSourceAnchorResponse("b1", "gloomy"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            # b2: vocabulary difficulties cover BOTH sentence 1 ("nervous") and sentence 2 ("gloomy").
+            QuotedDifficultyResponse(
+                "d-b2-s1",
+                (QuotedSourceAnchorResponse("b2", "nervous"),),
+                "b2",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b2-s2",
+                (QuotedSourceAnchorResponse("b2", "gloomy"),),
+                "b2",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level="a2", english_help=False
+    )
+    assert normalized.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+    assert normalized.treatment_plan[1].treatment is BlockTreatment.GLOSSARY_ONLY
+
+
+def test_normalize_a2_present_perfect_catches_inverted_proper_nouns_and_safe_used() -> None:
+    """_A2_PRESENT_PERFECT_RE catches inverted proper-noun questions and safe `used` while avoiding `have used cars`."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse
+
+    positive_texts = (
+        "Has Harry seen the owl?",
+        "Have Nick and Allie been here?",
+        "Hasn't Mary arrived yet?",
+        "I have used it.",
+        "She has used this wand.",
+        "We've used the key.",
+        "He's used my map.",
+        "Have you used a wand?",
+        "Has Harry used it?",
+        "They have used her boat.",
+    )
+    negative_texts = (
+        "They have used cars.",
+        "We have used books on the shelf.",
+        "I have something hidden.",
+        "He's used to the dark.",
+    )
+    all_texts = (*positive_texts, *negative_texts)
+    blocks = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=i, text=t)
+        for i, t in enumerate(all_texts)
+    )
+    aliases = {f"b{i + 1}": b.id for i, b in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f"b{i + 1}", BlockTreatment.READ_AS_IS)
+            for i in range(len(blocks))
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level="a2", english_help=False
+    )
+    n_pos = len(positive_texts)
+    assert [
+        (all_texts[i], normalized.treatment_plan[i].treatment)
+        for i in range(n_pos)
+    ] == [(t, BlockTreatment.TRANSLATE) for t in positive_texts]
+    assert [
+        (all_texts[n_pos + i], normalized.treatment_plan[n_pos + i].treatment)
+        for i in range(len(negative_texts))
+    ] == [(t, BlockTreatment.READ_AS_IS) for t in negative_texts]
+
+
+
 
