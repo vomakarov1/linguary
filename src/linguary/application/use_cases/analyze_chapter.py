@@ -35,9 +35,11 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
+from linguary.application.a2_core_vocab import non_core_a2_words
 from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
     DEFAULT_MAX_FRAGMENT_CHARS,
+    DEFAULT_MAX_FRAGMENT_WEIGHT,
     ChapterFragment,
     FragmentAnalysis,
     before_you_read_entries,
@@ -74,7 +76,12 @@ from linguary.application.reader_text import (
     validate_a2_summary,
 )
 from linguary.application.glossary_review import candidates_with_decisions
-from linguary.application.llm_dto import ChapterAnalysisResponse, NarrativeAnalysisResponse, PedagogicalAnalysisResponse
+from linguary.application.llm_dto import (
+    ChapterAnalysisResponse,
+    GlossaryCandidateResponse,
+    NarrativeAnalysisResponse,
+    PedagogicalAnalysisResponse,
+)
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient, LLMRequest, LLMResponseFormatError
 from linguary.application.ports.language_detection import LanguageDetector
@@ -84,6 +91,7 @@ from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
 from linguary.domain.content_plan import ContentPlan, ContextFact, Scene, canonical_sha
 from linguary.domain.book_conditions import thaw
+from linguary.domain.document import _PART_DIVIDER_PATTERN
 from linguary.domain.errors import DomainError
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain import (
@@ -93,6 +101,7 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     DocumentSection,
     GlossaryCandidate,
@@ -116,6 +125,14 @@ type Sleep = Callable[[float], Awaitable[None]]
 
 #: Factory for IDs of persisted analysis records.
 type IdFactory = Callable[[], str]
+
+_UNSET = object()
+
+_A2_VOCAB_NAME_TYPES = frozenset({
+    ConceptType.PERSON,
+    ConceptType.PLACE,
+    ConceptType.ORGANIZATION,
+})
 
 
 class AnalyzeChapterError(ApplicationError):
@@ -164,6 +181,8 @@ class AnalyzeChapter:
         conditions_id: str | None = None,
         max_concurrency: int = 1,
         seed_first_chapter: bool = False,
+        sequential_analysis: bool = True,
+        max_output_tokens: int = 32_768,
         staged_analysis: bool = False,
     ) -> None:
         self._unit_of_work = unit_of_work
@@ -177,6 +196,8 @@ class AnalyzeChapter:
         self._conditions_id = conditions_id
         self._max_concurrency = max_concurrency
         self._seed_first_chapter = seed_first_chapter
+        self._sequential_analysis = bool(sequential_analysis)
+        self._max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else 32_768
         self._staged_analysis = staged_analysis
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
@@ -300,6 +321,35 @@ class AnalyzeChapter:
             if token_responses is not None:
                 self._llm_client._responses.reset(token_responses)
 
+    def _part_divider_treatment_plan(
+        self,
+        section: DocumentSection,
+        blocks: Sequence[DocumentBlock],
+        candidates: Sequence[GlossaryCandidate],
+    ) -> TreatmentPlan:
+        """Treatment plan for part dividers with meaningful titles (P7.T2)."""
+        if self._context_builder._english_help:
+            return TreatmentPlan.of_treatments(
+                section.id,
+                ((block.id, BlockTreatment.READ_AS_IS) for block in blocks),
+            )
+        is_a2 = self._is_a2_reader()
+        has_candidates = bool(candidates)
+        treatments: list[tuple[str, BlockTreatment]] = []
+        for block in blocks:
+            collapsed = " ".join(block.text.split())
+            remainder = _PART_DIVIDER_PATTERN.sub(" ", collapsed)
+            if not any(char.isalpha() for char in remainder):
+                treatment = BlockTreatment.READ_AS_IS
+            elif is_a2 and len(_WORD_TOKEN_RE.findall(remainder)) > 3:
+                treatment = BlockTreatment.TRANSLATE
+            elif has_candidates or (is_a2 and bool(non_core_a2_words(block.text))):
+                treatment = BlockTreatment.GLOSSARY_ONLY
+            else:
+                treatment = BlockTreatment.READ_AS_IS
+            treatments.append((block.id, treatment))
+        return TreatmentPlan.of_treatments(section.id, treatments)
+
     async def _analyze_part_divider(
         self,
         *,
@@ -327,10 +377,14 @@ class AnalyzeChapter:
                     concepts,
                 )
             )
+            candidates = self._candidates(narrative, analysis_id=analysis_id)
             return (
                 replace(
                     base,
-                    glossary_candidates=self._candidates(narrative, analysis_id=analysis_id),
+                    treatment_plan=self._part_divider_treatment_plan(
+                        section, blocks, candidates
+                    ),
+                    glossary_candidates=candidates,
                 ),
                 attempts,
                 usage,
@@ -363,14 +417,42 @@ class AnalyzeChapter:
             concepts=concepts,
             part_divider=True,
         )
+        candidates = self._candidates(payload, analysis_id=analysis_id)
         return (
             replace(
                 base,
-                glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
+                treatment_plan=self._part_divider_treatment_plan(
+                    section, blocks, candidates
+                ),
+                glossary_candidates=candidates,
             ),
             attempts,
             usage,
         )
+
+    def _should_enforce_v7_name_policy(
+        self,
+        command: AnalyzeChapterCommand,
+        *,
+        conditions: object = _UNSET,
+    ) -> bool:
+        """Whether cached narrative validation must enforce V7 name-translation policy checks."""
+        resolved_conditions = conditions
+        if resolved_conditions is _UNSET:
+            with self._unit_of_work.transaction() as tx:
+                work = getattr(tx, 'work', None)
+                resolved_conditions = work.latest_conditions(command.book_id) if work else None
+        if resolved_conditions is not None and isinstance(getattr(resolved_conditions, 'payload', None), Mapping):
+            versions = resolved_conditions.payload.get('versions')
+            if isinstance(versions, Mapping):
+                prompts_version = versions.get('prompts')
+                if isinstance(prompts_version, int) and prompts_version < 7:
+                    return False
+        return True
+
+    def _narrative_max_fragment_blocks(self) -> int:
+        """Maximum blocks per narrative fragment scaled by output token budget."""
+        return min(self._max_fragment_blocks, max(20, self._max_output_tokens // 650))
 
     async def _run_staged_narrative_pass(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
@@ -438,7 +520,7 @@ class AnalyzeChapter:
         narrative_hash = self._context_builder.narrative_input_sha256(document, section,
             accumulated, user_decisions, suggestions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.NARRATIVE),
-            max_fragment_blocks=self._max_fragment_blocks)
+            max_fragment_blocks=self._narrative_max_fragment_blocks())
         if previous_narrative is not None and previous_narrative.input_sha256 == narrative_hash:
             saved = previous_narrative
             narrative = cached_narrative
@@ -459,6 +541,11 @@ class AnalyzeChapter:
             narrative, scenes, facts = merge_narrative_fragments(
                 narrative_parts, section_blocks=section.ordered_blocks
             )
+            merged_name_policy = (
+                self._name_translation_policy
+                if self._should_enforce_v7_name_policy(command, conditions=conditions)
+                else None
+            )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -466,7 +553,8 @@ class AnalyzeChapter:
                 source_language=document.source_language,
                 target_language=document.target_language,
                 language_detector=self._language_detector,
-                known_names=known_names)
+                known_names=known_names,
+                name_translation_policy=merged_name_policy)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
@@ -474,6 +562,11 @@ class AnalyzeChapter:
         else:
             if saved.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
+            cached_name_policy = (
+                self._name_translation_policy
+                if self._should_enforce_v7_name_policy(command, conditions=conditions)
+                else None
+            )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -481,7 +574,8 @@ class AnalyzeChapter:
                 source_language=document.source_language,
                 target_language=document.target_language,
                 language_detector=self._language_detector,
-                known_names=known_names)
+                known_names=known_names,
+                name_translation_policy=cached_name_policy)
         return narrative, saved, scenes, facts, attempts, _total_usage(usages), dependencies, expected_conditions_id
 
     async def _analyze_staged(
@@ -499,8 +593,18 @@ class AnalyzeChapter:
         usages: list[TokenUsage | None] = [narrative_usage]
         cumulative_words = _cumulative_words_before(document, section)
         prior_chapter_topics = self._load_prior_chapter_topics(command, document, section)
+        pedagogical_known_names = _a2_vocab_known_names_with_narrative(
+            _a2_vocab_known_names_from_glossary(
+                accumulated,
+                user_decisions,
+                (*suggestions, *concepts),
+            ),
+            narrative,
+            scenes,
+        )
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
+            narrative_instructions=narrative.translation_instructions,
             context_facts=facts, glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated, user_decisions=user_decisions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
@@ -515,6 +619,7 @@ class AnalyzeChapter:
                 chapter_input_sha=pedagogical_hash,
                 expected_conditions_id=expected_conditions_id,
                 cumulative_words_before=cumulative_words,
+                known_names=pedagogical_known_names,
                 prior_chapter_topics=prior_chapter_topics)
             attempts += count
             usages.append(usage)
@@ -535,6 +640,7 @@ class AnalyzeChapter:
                                              accumulated, user_decisions,
                                              concepts=concepts,
                                              cumulative_words_before=cumulative_words,
+                                             known_names=pedagogical_known_names,
                                              prior_chapter_topics=prior_chapter_topics)
             self._save_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash,
                             pedagogical, expected_conditions_id)
@@ -546,6 +652,7 @@ class AnalyzeChapter:
                                              accumulated, user_decisions,
                                              concepts=concepts,
                                              cumulative_words_before=cumulative_words,
+                                             known_names=pedagogical_known_names,
                                              prior_chapter_topics=prior_chapter_topics)
         return analysis, attempts, _total_usage(usages)
 
@@ -556,11 +663,13 @@ class AnalyzeChapter:
         *,
         concepts: Sequence[TermConcept] = (),
         cumulative_words_before: int = 0,
+        known_names: Sequence[str] = (),
         prior_chapter_topics: Sequence[str] = (),
     ) -> ChapterAnalysis:
         blocks = textual_blocks(section)
         context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
             narrative_summary=narrative.chapter_summary,
+            narrative_instructions=narrative.translation_instructions,
             glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated,
             user_decisions=user_decisions,
@@ -572,7 +681,22 @@ class AnalyzeChapter:
             expectation=replace(context.expectation,
                 blocks=tuple(replace(e, block_id=b.id) for e, b in
                              zip(context.expectation.blocks, blocks, strict=True))))
-        pedagogical = self._normalize_a2_dialogue(pedagogical, blocks, context.block_ids_by_alias)
+        resolved_known_names = (
+            tuple(known_names)
+            if known_names
+            else _a2_vocab_known_names_with_narrative(
+                _a2_vocab_known_names_from_glossary(
+                    accumulated,
+                    user_decisions,
+                    concepts,
+                ),
+                narrative,
+                scenes,
+            )
+        )
+        pedagogical = self._normalize_a2_dialogue(
+            pedagogical, blocks, context.block_ids_by_alias, known_names=resolved_known_names,
+        )
         if self._is_a2_reader():
             validate_a2_summary(pedagogical.reader_chapter_summary or '',
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
@@ -628,13 +752,25 @@ class AnalyzeChapter:
         """Whether the configured reader level is A2 (case- and whitespace-insensitive)."""
         return (getattr(self._context_builder, '_reader_level', '') or '').strip().lower() == 'a2'
 
-    def _normalize_a2_dialogue(self, payload, blocks, block_ids_by_alias):
+    def _normalize_a2_dialogue(
+        self,
+        payload,
+        blocks,
+        block_ids_by_alias,
+        *,
+        known_names: Sequence[str] = (),
+    ):
         if not self._is_a2_reader() or self._context_builder._english_help:
             return payload
         if not isinstance(payload, (ChapterAnalysisResponse, PedagogicalAnalysisResponse)):
             return payload
         return normalize_a2_dialogue_response(
-            payload, blocks, block_ids_by_alias, reader_level='a2', english_help=False,
+            payload,
+            blocks,
+            block_ids_by_alias,
+            reader_level='a2',
+            english_help=False,
+            known_names=known_names,
         )
 
     async def _run_staged_fragments(
@@ -647,15 +783,51 @@ class AnalyzeChapter:
         known_names: Sequence[str] = (),
         prior_chapter_topics: Sequence[str] = (),
     ) -> tuple[list, int, TokenUsage | None]:
-        fragments = plan_fragments(
-            textual_blocks(section), max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
-        )
         is_narrative = pass_kind is AnalysisPassKind.NARRATIVE
+        if is_narrative:
+            fragments = plan_fragments(
+                textual_blocks(section),
+                max_blocks=self._narrative_max_fragment_blocks(),
+                max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
+                block_overhead=450,
+                max_weight=DEFAULT_MAX_FRAGMENT_WEIGHT,
+            )
+        else:
+            fragments = plan_fragments(
+                textual_blocks(section),
+                max_blocks=self._max_fragment_blocks,
+                max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
+            )
+        saved_fragment_passes: tuple[AnalysisPassResult, ...] = ()
+        with self._unit_of_work.transaction() as tx:
+            list_passes = getattr(tx.analyses, 'list_passes_for_section', None)
+            if callable(list_passes):
+                saved_passes = list_passes(command.book_id, section.id)
+                saved_fragment_passes = tuple(
+                    saved_pass
+                    for saved_pass in saved_passes
+                    if saved_pass.pass_kind is pass_kind and saved_pass.scope_key
+                )
         notes = chapter_note_limit(section, self._context_builder._language_notes_per_chapter)
-        queue = [(fragment,
-            0 if is_narrative else 10 // len(fragments) + (fragment.order < 10 % len(fragments)),
-            0 if is_narrative else notes // len(fragments) + (fragment.order < notes % len(fragments)))
-            for fragment in fragments]
+        queue: list[tuple[ChapterFragment, int, int]] = []
+        for fragment in fragments:
+            byr_quota = 0 if is_narrative else 10 // len(fragments) + (fragment.order < 10 % len(fragments))
+            note_quota = 0 if is_narrative else notes // len(fragments) + (fragment.order < notes % len(fragments))
+            recovered = _recover_cached_fragment_split(fragment, saved_fragment_passes)
+            if len(recovered) > 1:
+                byr_shares = _distribute_quota(byr_quota, recovered, len(fragment.blocks))
+                note_shares = _distribute_quota(note_quota, recovered, len(fragment.blocks))
+                for sub_fragment, sub_byr, sub_note in zip(
+                    recovered, byr_shares, note_shares, strict=True
+                ):
+                    queue.append((sub_fragment, sub_byr, sub_note))
+            else:
+                queue.append((fragment, byr_quota, note_quota))
+        ped_known_names = (
+            ()
+            if is_narrative
+            else _a2_vocab_known_names_with_narrative(known_names, narrative)
+        )
         parts, usages = [], []
         attempts = 0
         while queue:
@@ -688,6 +860,7 @@ class AnalyzeChapter:
                         summary=raw.chapter_summary,
                         instructions='\n'.join(instruction_lines),
                         expressions=(),
+                        candidates=_merge_fragment_candidates(parts),
                     )
                 context = self._context_builder.for_chapter_narrative_analysis(document, section,
                     accumulated, user_decisions, suggestions, fragment=fragment if total > 1 else None,
@@ -695,7 +868,9 @@ class AnalyzeChapter:
             else:
                 prior_topics = _prior_explained_topics(parts)
                 context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
-                    narrative_summary=narrative.chapter_summary, context_facts=facts,
+                    narrative_summary=narrative.chapter_summary,
+                    narrative_instructions=narrative.translation_instructions,
+                    context_facts=facts,
                     glossary_candidates=narrative.glossary_candidates,
                     accumulated_candidates=accumulated, user_decisions=user_decisions,
                     fragment=fragment if total > 1 else None, fragment_count=total,
@@ -734,9 +909,14 @@ class AnalyzeChapter:
                 if prior_part_names:
                     fragment_known_names = tuple(dict.fromkeys((*known_names, *prior_part_names)))
 
-            def validate(payload):
+            def validate(payload, *, from_cache: bool = False):
                 if is_narrative:
                     _ensure_candidates_single_script(payload, context)
+                    name_policy = (
+                        self._name_translation_policy
+                        if (not from_cache or self._should_enforce_v7_name_policy(command))
+                        else None
+                    )
                     return validate_narrative_response(payload, context.block_ids_by_alias,
                         {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
                         ordered_block_ids=fragment.block_ids,
@@ -746,7 +926,8 @@ class AnalyzeChapter:
                         source_language=document.source_language,
                         target_language=document.target_language,
                         language_detector=self._language_detector,
-                        known_names=fragment_known_names)
+                        known_names=fragment_known_names,
+                        name_translation_policy=name_policy)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._is_a2_reader():
@@ -791,7 +972,7 @@ class AnalyzeChapter:
                         chapter_input_sha256=chapter_input_sha,
                         scope_key=frag_scope_key,
                         instructions=context.request.instructions,
-                        input=context.request.input_text,
+                        input=_normalize_fragment_header_for_sha(context.request.input_text),
                         contract_version=context.request.contract_version,
                         before_you_read_limit=context.before_you_read_limit,
                         notes=context.language_notes_per_chapter,
@@ -811,13 +992,20 @@ class AnalyzeChapter:
                     self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_frag.attempt_id))
                 if not is_narrative:
                     payload = self._normalize_a2_dialogue(
-                        payload, fragment.blocks, context.block_ids_by_alias,
+                        payload,
+                        fragment.blocks,
+                        context.block_ids_by_alias,
+                        known_names=ped_known_names,
                     )
-                resolved = validate(payload)
+                resolved = validate(payload, from_cache=True)
             else:
                 try:
                     payload, resolved, count, usage = await self._request_staged(
-                        context, validate, blocks=fragment.blocks, normalize_dialogue=not is_narrative,
+                        context,
+                        validate,
+                        blocks=fragment.blocks,
+                        normalize_dialogue=not is_narrative,
+                        known_names=ped_known_names,
                     )
                 except LLMResponseFormatError as error:
                     if not error.truncated or len(fragment.blocks) <= 1:
@@ -863,6 +1051,7 @@ class AnalyzeChapter:
         *,
         blocks: Sequence[DocumentBlock] = (),
         normalize_dialogue: bool = False,
+        known_names: Sequence[str] = (),
     ) -> tuple[NarrativeAnalysisResponse | PedagogicalAnalysisResponse, ResolutionT, int, TokenUsage | None]:
         request, attempts, usages = context.request, 0, []
         while True:
@@ -880,7 +1069,10 @@ class AnalyzeChapter:
                     response = replace(response, payload=_prepare_staged_payload(response.payload))
                     if normalize_dialogue:
                         response = replace(response, payload=self._normalize_a2_dialogue(
-                            response.payload, blocks, context.block_ids_by_alias,
+                            response.payload,
+                            blocks,
+                            context.block_ids_by_alias,
+                            known_names=known_names,
                         ))
                     resolved = validate(response.payload)
                     if isinstance(response.payload, PedagogicalAnalysisResponse):
@@ -1052,11 +1244,17 @@ class AnalyzeChapter:
                 ordered_block_ids=tuple(block.id for block in blocks),
             ),
         )
+        known_names = _a2_vocab_known_names_from_glossary(
+            accumulated,
+            user_decisions,
+            (*nonbinding_suggestions, *(concepts or ())),
+        )
         payload, attempts, usage = await self._request_analysis(
             context,
             blocks=blocks,
             source_language=document.source_language,
             concepts=concepts,
+            known_names=known_names,
         )
         analysis = self._to_analysis(
             payload,
@@ -1091,6 +1289,11 @@ class AnalyzeChapter:
         attempts = 0
         usages: list[TokenUsage | None] = []
         queue: list[ChapterFragment] = list(fragments)
+        base_known_names = _a2_vocab_known_names_from_glossary(
+            accumulated,
+            user_decisions,
+            (*nonbinding_suggestions, *(concepts or ())),
+        )
         while queue:
             fragment = queue.pop(0)
             previous = None
@@ -1114,6 +1317,7 @@ class AnalyzeChapter:
                         for part in analysed
                         for entry in part.before_you_read
                     ),
+                    candidates=_merge_fragment_candidates(analysed),
                 )
             total_fragments = len(analysed) + 1 + len(queue)
             context = self._context_builder.for_chapter_fragment(
@@ -1136,12 +1340,26 @@ class AnalyzeChapter:
                     ordered_block_ids=tuple(block.id for block in fragment.blocks),
                 ),
             )
+            fragment_known_names = tuple(
+                dict.fromkeys(
+                    (
+                        *base_known_names,
+                        *(
+                            c.source_text.strip()
+                            for part in analysed
+                            for c in part.glossary_candidates
+                            if c.type in _A2_VOCAB_NAME_TYPES and c.source_text.strip()
+                        ),
+                    )
+                )
+            )
             try:
                 payload, fragment_attempts, usage = await self._request_analysis(
                     context,
                     blocks=fragment.blocks,
                     source_language=document.source_language,
                     concepts=concepts,
+                    known_names=fragment_known_names,
                 )
             except LLMResponseFormatError as error:
                 if error.truncated and len(fragment.blocks) > 1:
@@ -1183,9 +1401,26 @@ class AnalyzeChapter:
         )
         return analysis, attempts, _total_usage(usages)
 
+    def _is_sequential_active(self, transaction: UnitOfWork, book_id: str) -> bool:
+        work_repo = getattr(transaction, "work", None)
+        conditions = (
+            work_repo.latest_conditions(book_id)
+            if work_repo is not None
+            else None
+        )
+        if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
+            return bool(
+                (conditions.payload.get("checks") or {}).get(
+                    "sequential_analysis", self._sequential_analysis
+                )
+            )
+        return bool(self._sequential_analysis)
+
     def _parallel_batch_and_seed(
         self, transaction: UnitOfWork, command: AnalyzeChapterCommand
     ) -> tuple[bool, bool]:
+        if self._is_sequential_active(transaction, command.book_id):
+            return False, False
         tasks_repo = getattr(transaction, "tasks", None)
         parallel_batch = self._max_concurrency > 1 or (
             tasks_repo is not None
@@ -1356,6 +1591,7 @@ class AnalyzeChapter:
         source_language: str,
         concepts: Sequence[TermConcept] | None = None,
         part_divider: bool = False,
+        known_names: Sequence[str] = (),
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
         """Executes model call with retries per policy (ALG-05).
 
@@ -1390,8 +1626,37 @@ class AnalyzeChapter:
                         _ensure_candidates_single_script(response.payload, context)
                         self._resolved_content_plan.set(None)
                     else:
+                        payload_scenes = (
+                            *getattr(response.payload, "scenes", ()),
+                            *(
+                                getattr(response.payload.content_plan, "scenes", ())
+                                if response.payload.content_plan is not None
+                                else ()
+                            ),
+                        )
+                        response_known_names = tuple(
+                            dict.fromkeys(
+                                (
+                                    *known_names,
+                                    *(
+                                        c.source_text.strip()
+                                        for c in response.payload.glossary_candidates
+                                        if c.type in _A2_VOCAB_NAME_TYPES and c.source_text.strip()
+                                    ),
+                                    *(
+                                        participant.strip()
+                                        for scene in payload_scenes
+                                        for participant in getattr(scene, "participants", ())
+                                        if isinstance(participant, str) and participant.strip()
+                                    ),
+                                )
+                            )
+                        )
                         response = replace(response, payload=self._normalize_a2_dialogue(
-                            response.payload, blocks, context.block_ids_by_alias,
+                            response.payload,
+                            blocks,
+                            context.block_ids_by_alias,
+                            known_names=response_known_names,
                         ))
                         if self._context_builder._reader_level == "a2":
                             validate_a2_summary(
@@ -1602,6 +1867,7 @@ class ChapterAnalysisSequence:
         auto_start_processing: bool = False,
         start_processing: Callable[[str], Awaitable[object]] | None = None,
         seed_first_chapter: bool = False,
+        sequential_analysis: bool | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._queue = queue
@@ -1613,9 +1879,17 @@ class ChapterAnalysisSequence:
         )
         if self._seed_first_chapter and hasattr(analyze_chapter, "_seed_first_chapter"):
             analyze_chapter._seed_first_chapter = True
+        if sequential_analysis is None:
+            self._sequential_analysis = bool(
+                getattr(analyze_chapter, "_sequential_analysis", True)
+            )
+        else:
+            self._sequential_analysis = bool(sequential_analysis)
+            if hasattr(analyze_chapter, "_sequential_analysis"):
+                analyze_chapter._sequential_analysis = self._sequential_analysis
 
     async def start(self, book_id: str) -> ProcessingTask | None:
-        """Starts book analysis: transitions book to `ANALYZING` and enqueues all chapters.
+        """Starts book analysis: transitions book to `ANALYZING` and enqueues chapters.
 
         Returns `None` if there is nothing left to analyze: a book without chapters or one
         already fully analyzed. Re-running after application restart resumes from unanalyzed chapters.
@@ -1645,17 +1919,43 @@ class ChapterAnalysisSequence:
                 task_id=task.id,
             )
         )
+        with self._unit_of_work.transaction() as transaction:
+            sequential_active = self._is_sequential_active(transaction, task.book_id)
+            if sequential_active:
+                _record_success_in_tx(transaction, task.id)
+        if sequential_active:
+            enqueued = await self._enqueue_all(
+                task.book_id,
+                finished_task_id=task.id,
+                complete_if_empty=False,
+            )
+            if not enqueued and self._try_complete_analysis(
+                task.book_id, finished_task_id=task.id
+            ):
+                assert self._start_processing is not None
+                await self._start_processing(task.book_id)
+            return
         if self._should_enqueue_remaining_wave(task.book_id, task.scope_id):
             await self._enqueue_all(task.book_id)
         if self._try_complete_analysis(task.book_id, finished_task_id=task.id):
             assert self._start_processing is not None
             await self._start_processing(task.book_id)
 
-    async def _enqueue_all(self, book_id: str) -> list[ProcessingTask]:
-        """Enqueues tasks for all unanalyzed chapters in parallel (or seed wave first)."""
-        section_ids = self._section_ids_for_wave(book_id)
+    async def _enqueue_all(
+        self,
+        book_id: str,
+        *,
+        finished_task_id: str | None = None,
+        complete_if_empty: bool = True,
+    ) -> list[ProcessingTask]:
+        """Enqueues tasks for the next chapter (sequential) or wave (parallel)."""
+        section_ids = self._section_ids_for_wave(
+            book_id, finished_task_id=finished_task_id
+        )
         if not section_ids:
-            if self._try_complete_analysis(book_id):
+            if complete_if_empty and self._try_complete_analysis(
+                book_id, finished_task_id=finished_task_id
+            ):
                 assert self._start_processing is not None
                 await self._start_processing(book_id)
             return []
@@ -1670,6 +1970,21 @@ class ChapterAnalysisSequence:
             )
             tasks.append(task)
         return tasks
+
+    def _is_sequential_active(self, transaction: UnitOfWork, book_id: str) -> bool:
+        work_repo = getattr(transaction, "work", None)
+        conditions = (
+            work_repo.latest_conditions(book_id)
+            if work_repo is not None
+            else None
+        )
+        if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
+            return bool(
+                (conditions.payload.get("checks") or {}).get(
+                    "sequential_analysis", self._sequential_analysis
+                )
+            )
+        return bool(self._sequential_analysis)
 
     def _is_seed_active(self, transaction: UnitOfWork, book_id: str) -> bool:
         work_repo = getattr(transaction, "work", None)
@@ -1686,7 +2001,9 @@ class ChapterAnalysisSequence:
             )
         return bool(self._seed_first_chapter)
 
-    def _section_ids_for_wave(self, book_id: str) -> list[str]:
+    def _section_ids_for_wave(
+        self, book_id: str, *, finished_task_id: str | None = None
+    ) -> list[str]:
         """Chapters in reading order to enqueue in the current wave."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(book_id)
@@ -1696,9 +2013,28 @@ class ChapterAnalysisSequence:
                 analysis.section_id
                 for analysis in transaction.analyses.list_for_book(book_id)
             }
-            seed_active = self._is_seed_active(transaction, book_id)
+            sequential_active = self._is_sequential_active(transaction, book_id)
+            if sequential_active:
+                tasks_repo = getattr(transaction, "tasks", None)
+                has_active_task = (
+                    tasks_repo is not None
+                    and any(
+                        task.task_type is TaskType.ANALYZE_CHAPTER
+                        and task.id != finished_task_id
+                        and task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                        for task in tasks_repo.list_for_book(book_id)
+                    )
+                )
+                seed_active = False
+            else:
+                has_active_task = False
+                seed_active = self._is_seed_active(transaction, book_id)
         ordered = document.ordered_sections
         unanalyzed = [section for section in ordered if section.id not in analyzed]
+        if sequential_active:
+            if has_active_task or not unanalyzed:
+                return []
+            return [unanalyzed[0].id]
         if not seed_active or len(unanalyzed) <= 1:
             return [section.id for section in unanalyzed]
         has_analyzed_content = any(
@@ -1989,6 +2325,216 @@ class ChapterAnalysisSequence:
 
 
 _WORD_TOKEN_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
+_FRAGMENT_HEADER_RE = re.compile(
+    r"Фрагмент главы: \d+-й из \d+\. Остальные фрагменты главы тебе не показаны\."
+)
+
+
+def _normalize_fragment_header_for_sha(input_text: str) -> str:
+    """Normalize dynamic fragment position/total header so cache keys survive queue resplits."""
+    return _FRAGMENT_HEADER_RE.sub("Фрагмент главы.", input_text)
+
+
+def _recover_cached_fragment_split(
+    fragment: ChapterFragment,
+    saved_fragment_passes: Sequence[AnalysisPassResult],
+) -> list[ChapterFragment]:
+    """Recover contiguous cached sub-fragment split inside `fragment` (+ uncovered tail)."""
+    if not saved_fragment_passes or len(fragment.blocks) <= 1:
+        return [fragment]
+    index_by_id = {block.id: idx for idx, block in enumerate(fragment.blocks)}
+    by_start: dict[int, list[int]] = {}
+    for saved_pass in saved_fragment_passes:
+        scope_key = saved_pass.scope_key
+        if not scope_key:
+            continue
+        matched_span: tuple[int, int] | None = None
+        if scope_key.count(":") == 1:
+            start_id, end_id = scope_key.split(":", 1)
+            if start_id in index_by_id and end_id in index_by_id:
+                matched_span = (index_by_id[start_id], index_by_id[end_id])
+        else:
+            for block_id, start_idx in index_by_id.items():
+                prefix = f"{block_id}:"
+                if scope_key.startswith(prefix):
+                    end_id = scope_key[len(prefix):]
+                    if end_id in index_by_id:
+                        matched_span = (start_idx, index_by_id[end_id])
+                        break
+        if matched_span is None:
+            continue
+        start_idx, end_idx = matched_span
+        if start_idx > end_idx:
+            continue
+        if start_idx == 0 and end_idx == len(fragment.blocks) - 1:
+            continue
+        by_start.setdefault(start_idx, []).append(end_idx)
+    if 0 not in by_start:
+        return [fragment]
+    recovered: list[ChapterFragment] = []
+    pos = 0
+    while pos < len(fragment.blocks) and pos in by_start:
+        end_idx = max(by_start[pos])
+        recovered.append(
+            ChapterFragment(order=0, blocks=tuple(fragment.blocks[pos : end_idx + 1]))
+        )
+        pos = end_idx + 1
+    if pos < len(fragment.blocks):
+        recovered.append(
+            ChapterFragment(order=0, blocks=tuple(fragment.blocks[pos:]))
+        )
+    return recovered if len(recovered) > 1 else [fragment]
+
+
+def _distribute_quota(
+    total_quota: int,
+    sub_fragments: Sequence[ChapterFragment],
+    parent_block_count: int,
+) -> list[int]:
+    """Proportionally distribute parent quota across recovered sub-fragments."""
+    if total_quota <= 0 or not sub_fragments:
+        return [0] * len(sub_fragments)
+    if (
+        len(sub_fragments) == 2
+        and len(sub_fragments[0].blocks) == parent_block_count // 2
+    ):
+        return [(total_quota + 1) // 2, total_quota // 2]
+    weights = [len(sf.blocks) for sf in sub_fragments]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return [0] * len(sub_fragments)
+    shares = [(total_quota * weight) // total_weight for weight in weights]
+    remainder = total_quota - sum(shares)
+    if remainder > 0:
+        ranked = sorted(
+            range(len(sub_fragments)),
+            key=lambda idx: (-((total_quota * weights[idx]) % total_weight), idx),
+        )
+        for idx in ranked[:remainder]:
+            shares[idx] += 1
+    return shares
+
+
+def _iter_part_candidates(part: object) -> Sequence[GlossaryCandidateResponse]:
+    if isinstance(part, tuple) and part and hasattr(part[0], "glossary_candidates"):
+        return part[0].glossary_candidates
+    if hasattr(part, "glossary_candidates"):
+        return part.glossary_candidates
+    return part  # type: ignore[return-value]
+
+
+def _merge_fragment_candidates(
+    parts: Sequence[object],
+) -> tuple[GlossaryCandidateResponse, ...]:
+    """Deterministically merge glossary candidates across earlier fragments of the chapter."""
+    ordered_keys: list[str] = []
+    by_key: dict[str, list[GlossaryCandidateResponse]] = {}
+    for part in parts:
+        for candidate in _iter_part_candidates(part):
+            key = glossary_key(candidate.source_text)
+            if key not in by_key:
+                ordered_keys.append(key)
+                by_key[key] = []
+            by_key[key].append(candidate)
+
+    merged: list[GlossaryCandidateResponse] = []
+    for key in ordered_keys:
+        variants = by_key[key]
+        best = variants[0]
+        for candidate in variants[1:]:
+            if candidate.confidence >= best.confidence:
+                best = candidate
+        best_note = ""
+        for candidate in variants:
+            note = candidate.note.strip()
+            if note and len(note) >= len(best_note):
+                best_note = note
+        best_description = ""
+        for candidate in variants:
+            description = candidate.description.strip()
+            if description and len(description) >= len(best_description):
+                best_description = description
+        merged.append(
+            replace(
+                best,
+                note=best_note,
+                description=best_description,
+                name_translation_assessment=best.name_translation_assessment,
+            )
+        )
+    return tuple(merged)
+
+
+def _a2_vocab_known_names_from_glossary(
+    accumulated: Sequence[GlossaryCandidate],
+    user_decisions: Sequence[TermConcept],
+    suggestions: Sequence[TermConcept],
+) -> tuple[str, ...]:
+    """Collect proper-name source forms (PERSON/PLACE/ORGANIZATION) for A2 vocabulary filtering."""
+    names: list[str] = []
+    for candidate in accumulated:
+        if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+            names.append(candidate.source_text.strip())
+    for concept in (*user_decisions, *suggestions):
+        if concept.type not in _A2_VOCAB_NAME_TYPES:
+            continue
+        if concept.canonical_source_text.strip():
+            names.append(concept.canonical_source_text.strip())
+        for variant in concept.variants:
+            source_text = getattr(variant, "source_text", None)
+            if isinstance(source_text, str) and source_text.strip():
+                names.append(source_text.strip())
+    return tuple(dict.fromkeys(names))
+
+
+def _a2_vocab_known_names_with_narrative(
+    base_names: Sequence[str],
+    narrative: NarrativeAnalysisResponse | None = None,
+    scenes: Sequence[Scene] = (),
+) -> tuple[str, ...]:
+    """Combine prior proper-name source forms with current chapter proper-name candidates and participants."""
+    names: list[str] = [
+        name.strip() for name in base_names if isinstance(name, str) and name.strip()
+    ]
+    if narrative is not None:
+        for candidate in narrative.glossary_candidates:
+            if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+                names.append(candidate.source_text.strip())
+        for scene in narrative.scenes:
+            for participant in scene.participants:
+                if isinstance(participant, str) and participant.strip():
+                    names.append(participant.strip())
+    for scene in scenes:
+        for participant in scene.participants:
+            if isinstance(participant, str) and participant.strip():
+                names.append(participant.strip())
+    return tuple(dict.fromkeys(names))
+
+
+def _known_names_with_narrative(
+    base_names: Sequence[str],
+    narrative: NarrativeAnalysisResponse | None = None,
+    scenes: Sequence[Scene] = (),
+) -> tuple[str, ...]:
+    """Combine prior glossary names with current chapter narrative candidates and participants."""
+    names: list[str] = [
+        name.strip() for name in base_names if isinstance(name, str) and name.strip()
+    ]
+    if narrative is not None:
+        for candidate in narrative.glossary_candidates:
+            if candidate.source_text.strip():
+                names.append(candidate.source_text.strip())
+            if candidate.suggested_translation.strip():
+                names.append(candidate.suggested_translation.strip())
+        for scene in narrative.scenes:
+            for participant in scene.participants:
+                if isinstance(participant, str) and participant.strip():
+                    names.append(participant.strip())
+    for scene in scenes:
+        for participant in scene.participants:
+            if isinstance(participant, str) and participant.strip():
+                names.append(participant.strip())
+    return tuple(dict.fromkeys(names))
 
 
 def _cumulative_words_before(

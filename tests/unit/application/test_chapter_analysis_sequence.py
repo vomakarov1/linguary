@@ -100,7 +100,7 @@ async def drain(runner: TaskRunner, queue: FakeTaskQueue) -> None:
 
 
 async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
-    """Chapters are analyzed in parallel across workers."""
+    """Chapters are analyzed sequentially in reading order by default."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
@@ -116,7 +116,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
     expected = [f"section-{number}" for number in range(1, CHAPTER_COUNT + 1)]
     assert queue.claimed_scope_ids == expected
     assert unit_of_work.analyses.saved_section_ids == expected
-    assert queue.max_running == CHAPTER_COUNT
+    assert queue.max_running == 1
     assert [
         f"Chapter {number}" in request.input_text
         for number, request in enumerate(client.requests, start=1)
@@ -124,7 +124,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
 
 
 async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
-    """Starting analysis transitions the book to `ANALYZING` and queues all chapters (ALG-06)."""
+    """Starting analysis transitions the book to `ANALYZING` and queues only the first chapter sequentially (ALG-06)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     sequence = make_sequence(
@@ -136,8 +136,8 @@ async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
     assert task is not None
     assert (task.task_type, task.scope_id) == (TaskType.ANALYZE_CHAPTER, "section-1")
     assert queue.tasks[0] == task
-    assert len(queue.tasks) == CHAPTER_COUNT
-    assert [t.scope_id for t in queue.tasks] == [f"section-{i}" for i in range(1, CHAPTER_COUNT + 1)]
+    assert len(queue.tasks) == 1
+    assert [t.scope_id for t in queue.tasks] == ["section-1"]
     stored = unit_of_work.books.get(BOOK_ID)
     assert stored is not None and stored.status is BookStatus.ANALYZING
 
@@ -286,6 +286,7 @@ async def test_auto_start_processing_transitions_book_after_auto_approve_glossar
                 "glossary_confidence_threshold": 0.7,
                 "glossary_review_min_mentions": 1,
                 "glossary_review_min_chapters": 1,
+                "sequential_analysis": False,
             }
         },
     )
@@ -321,6 +322,7 @@ async def test_auto_start_processing_transitions_book_after_auto_approve_glossar
         analyze_chapter=analyze_chapter,
         auto_start_processing=True,
         start_processing=fake_start_processing,
+        sequential_analysis=False,
     )
     runner = TaskRunner(
         queue=queue,  # type: ignore[arg-type]
@@ -384,6 +386,7 @@ async def test_auto_approve_glossary_resolves_parallel_translation_conflicts_and
                 "glossary_confidence_threshold": 0.7,
                 "glossary_review_min_mentions": 1,
                 "glossary_review_min_chapters": 1,
+                "sequential_analysis": False,
             }
         },
     )
@@ -432,6 +435,7 @@ async def test_auto_approve_glossary_resolves_parallel_translation_conflicts_and
         analyze_chapter=analyze_chapter,
         auto_start_processing=True,
         start_processing=fake_start_processing,
+        sequential_analysis=False,
     )
     runner = TaskRunner(
         queue=queue,  # type: ignore[arg-type]
@@ -497,6 +501,7 @@ async def test_try_complete_analysis_avoids_duplicate_queries_and_only_approves_
                 "glossary_confidence_threshold": 0.7,
                 "glossary_review_min_mentions": 1,
                 "glossary_review_min_chapters": 1,
+                "sequential_analysis": False,
             }
         },
     )
@@ -610,7 +615,7 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
     unit_of_work = FakeUnitOfWork(document=document, book=make_book_record())
     conditions = SimpleNamespace(
         id="cond-seed",
-        payload={"checks": {"seed_first_chapter": True}},
+        payload={"checks": {"seed_first_chapter": True, "sequential_analysis": False}},
     )
     unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
 
@@ -653,6 +658,7 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
         queue=queue,  # type: ignore[arg-type]
         analyze_chapter=analyze_chapter,
         seed_first_chapter=True,
+        sequential_analysis=False,
     )
 
     await sequence.start(BOOK_ID)
@@ -708,6 +714,7 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
         queue=queue_no_seed,  # type: ignore[arg-type]
         analyze_chapter=analyze_no_seed,
         seed_first_chapter=False,
+        sequential_analysis=False,
     )
     await seq_no_seed.start(BOOK_ID)
     assert len(queue_no_seed.tasks) == 4
@@ -730,6 +737,7 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
     analyze_with_policy._context_builder = ContextBuilder(name_translation_policy=policy)
     analyze_with_policy._name_translation_policy = policy
     analyze_with_policy._max_concurrency = 2
+    analyze_with_policy._sequential_analysis = False
     _, acc_seed, _, _ = analyze_with_policy._load(
         AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-4")
     )
@@ -737,7 +745,7 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
 
     conditions_off = SimpleNamespace(
         id="cond-off",
-        payload={"checks": {"seed_first_chapter": False}},
+        payload={"checks": {"seed_first_chapter": False, "sequential_analysis": False}},
     )
     unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions_off)  # type: ignore[attr-defined]
     _, acc_off, _, _ = analyze_with_policy._load(
@@ -885,6 +893,328 @@ async def test_try_complete_analysis_rearchives_deduplicated_chapter_and_guards_
     seq_minimal._try_complete_analysis(BOOK_ID)
     saved_min = {a.section_id: a for a in uow_minimal.analyses.list_for_book(BOOK_ID)}
     assert saved_min["section-2"].before_you_read == ()
+
+
+def test_sequential_analysis_init_inheritance_and_explicit_override() -> None:
+    """ChapterAnalysisSequence inherits sequential_analysis when None and explicitly overrides without `or`."""
+    unit_of_work = make_book(chapters=2)
+    queue = FakeTaskQueue()
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+
+    ac_true, _ = make_analyze_chapter(unit_of_work, client)
+    assert ac_true._sequential_analysis is True
+    seq_inherit_true = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=ac_true,
+    )
+    assert seq_inherit_true._sequential_analysis is True
+    assert ac_true._sequential_analysis is True
+
+    ac_false, _ = make_analyze_chapter(unit_of_work, client)
+    ac_false._sequential_analysis = False
+    seq_inherit_false = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=ac_false,
+    )
+    assert seq_inherit_false._sequential_analysis is False
+    assert ac_false._sequential_analysis is False
+
+    ac_override_false, _ = make_analyze_chapter(unit_of_work, client)
+    assert ac_override_false._sequential_analysis is True
+    seq_explicit_false = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=ac_override_false,
+        sequential_analysis=False,
+    )
+    assert seq_explicit_false._sequential_analysis is False
+    assert ac_override_false._sequential_analysis is False
+
+    ac_override_true, _ = make_analyze_chapter(unit_of_work, client)
+    ac_override_true._sequential_analysis = False
+    seq_explicit_true = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=ac_override_true,
+        sequential_analysis=True,
+    )
+    assert seq_explicit_true._sequential_analysis is True
+    assert ac_override_true._sequential_analysis is True
+
+
+async def test_sequential_analysis_commits_succeeded_before_enqueue_and_guards_active_tasks() -> None:
+    """In sequential mode, run_task persists SUCCEEDED before enqueuing next section, guards active tasks, and disables parallel_batch."""
+    from types import SimpleNamespace
+
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Arrival in Duskmere during chapter {number}.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(
+        document=make_analysis_document(sections), book=make_book_record()
+    )
+    stored_tasks: dict[str, ProcessingTask] = {}
+
+    class TrackingTasksRepo:
+        def get(self, task_id: str) -> ProcessingTask | None:
+            return stored_tasks.get(task_id)
+
+        def save(self, task: ProcessingTask) -> None:
+            stored_tasks[task.id] = task
+
+        def list_for_book(self, book_id: str) -> tuple[ProcessingTask, ...]:
+            return tuple(t for t in stored_tasks.values() if t.book_id == book_id)
+
+    unit_of_work.tasks = TrackingTasksRepo()  # type: ignore[attr-defined]
+    status_of_task1_at_next_enqueue: list[TaskStatus | None] = []
+
+    class ObservingTaskQueue(FakeTaskQueue):
+        async def enqueue(self, identity):
+            if identity.scope_id == "section-2":
+                prev = stored_tasks.get("task-1")
+                status_of_task1_at_next_enqueue.append(prev.status if prev is not None else None)
+            task = await super().enqueue(identity)
+            stored_tasks[task.id] = task
+            return task
+
+        async def save(self, task: ProcessingTask) -> None:
+            await super().save(task)
+            stored_tasks[task.id] = task
+
+    queue = ObservingTaskQueue()
+    reply1 = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_other = analysis_reply(aliases=("b1",), before_you_read=[], candidates=[])
+    client = FakeLLMClient.replying((reply1, reply_other, reply_other))
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    analyze_chapter._max_concurrency = 4
+    analyze_chapter._seed_first_chapter = True
+
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+        sequential_analysis=True,
+    )
+
+    first = await sequence.start(BOOK_ID)
+    assert first is not None and first.scope_id == "section-1"
+    assert len(queue.tasks) == 1
+
+    # While section-1 is PENDING/RUNNING, _section_ids_for_wave must not enqueue another section.
+    assert sequence._section_ids_for_wave(BOOK_ID) == []
+
+    # Claim and run section-1: SUCCEEDED must be written BEFORE section-2 is enqueued!
+    running1 = first.start()
+    await queue.save(running1)
+    await sequence.run_task(running1)
+    assert status_of_task1_at_next_enqueue == [TaskStatus.SUCCEEDED]
+    assert [t.scope_id for t in queue.tasks] == ["section-1", "section-2"]
+
+    # If a rogue PENDING task exists for section-3, _section_ids_for_wave returns [].
+    stored_tasks["rogue"] = ProcessingTask(
+        id="rogue",
+        book_id=BOOK_ID,
+        task_type=TaskType.ANALYZE_CHAPTER,
+        scope_id="section-3",
+        status=TaskStatus.PENDING,
+    )
+    assert sequence._section_ids_for_wave(BOOK_ID, finished_task_id=running1.id) == []
+    del stored_tasks["rogue"]
+
+    # Run section-2 and section-3 sequentially: chapter 2 sees chapter 1's unconfirmed candidate despite max_concurrency=4.
+    task2 = queue.tasks[1].start()
+    await queue.save(task2)
+    await sequence.run_task(task2)
+    assert "Даскмер" in client.requests[1].input_text
+
+    task3 = queue.tasks[2].start()
+    await queue.save(task3)
+    await sequence.run_task(task3)
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
+
+    # Book conditions override sequential_analysis=False even when instance default is True.
+    uow_cond = make_book(chapters=2)
+    uow_cond.work = SimpleNamespace(  # type: ignore[attr-defined]
+        latest_conditions=lambda _: SimpleNamespace(
+            id="cond-par",
+            payload={"checks": {"sequential_analysis": False}},
+        )
+    )
+    seq_cond = make_sequence(uow_cond, FakeTaskQueue(), FakeLLMClient.always(reply_other))
+    assert seq_cond._section_ids_for_wave(BOOK_ID) == ["section-1", "section-2"]
+
+
+def test_container_wires_sequential_analysis_max_output_tokens_and_filters_unknown_checks() -> None:
+    """container._analysis_sequence forwards sequential_analysis and max_output_tokens; check_settings_from_mapping ignores unknown keys."""
+    from dataclasses import replace as dc_replace
+    from linguary.adapters.config.settings import AppSettings, CheckSettings, LLMSettings
+    from linguary.composition.book_runtime import check_settings_from_mapping
+    from linguary.composition.container import _analysis_sequence
+
+    settings = AppSettings(
+        llm=LLMSettings(max_output_tokens=16_384),
+        checks=CheckSettings(sequential_analysis=False),
+    )
+    uow = make_book(chapters=1)
+    queue = FakeTaskQueue()
+    seq = _analysis_sequence(
+        settings=settings,
+        unit_of_work=uow,  # type: ignore[arg-type]
+        task_queue=queue,  # type: ignore[arg-type]
+        model=FakeLLMClient.always(analysis_reply(aliases=("b1",))),
+    )
+    assert seq._sequential_analysis is False
+    assert seq._analyze_chapter._sequential_analysis is False
+    assert seq._analyze_chapter._max_output_tokens == 16_384
+
+    seq_default = _analysis_sequence(
+        settings=dc_replace(settings, checks=CheckSettings()),
+        unit_of_work=uow,  # type: ignore[arg-type]
+        task_queue=queue,  # type: ignore[arg-type]
+        model=FakeLLMClient.always(analysis_reply(aliases=("b1",))),
+    )
+    assert seq_default._sequential_analysis is True
+    assert seq_default._analyze_chapter._sequential_analysis is True
+
+    parsed = check_settings_from_mapping(
+        {"sequential_analysis": False, "unknown_future_flag": 123}
+    )
+    assert parsed.sequential_analysis is False
+
+
+async def test_sequential_exception_after_record_success_does_not_rollback_succeeded_and_start_recovers_next_section(
+    tmp_path,
+) -> None:
+    """An exception after _record_success_in_tx does not revert SUCCEEDED to FAILED, and repeated start(book_id) enqueues the next section."""
+    from dataclasses import replace as dc_replace
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.runtime.task_queue import SqliteTaskQueue
+    from linguary.domain import TaskIdentity
+
+    engine = create_database_engine(tmp_path / "seq_recovery.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    queue = SqliteTaskQueue.for_engine(engine)
+    try:
+        sections = tuple(
+            make_analysis_section(
+                section_id=f"section-{number}",
+                title=f"Chapter {number}",
+                order=number - 1,
+                texts=(f"Text of chapter {number}.",),
+            )
+            for number in (1, 2, 3)
+        )
+        document = make_analysis_document(sections)
+        with uow.transaction() as tx:
+            tx.books.add(make_book_record())
+            tx.documents.save(document)
+
+        # Direct repository guard: SUCCEEDED cannot be downgraded to FAILED, but CAN become SUPERSEDED.
+        probe = await queue.enqueue(
+            TaskIdentity(book_id=BOOK_ID, task_type=TaskType.EXPORT_BOOK, scope_id="probe")
+        )
+        succeeded_probe = probe.start().succeed()
+        with uow.transaction() as tx:
+            tx.tasks.save(succeeded_probe)
+        with uow.transaction() as tx:
+            tx.tasks.save(
+                probe.start().fail(TaskError(type=ErrorType.TRANSIENT, message="late failure"))
+            )
+        with uow.transaction() as tx:
+            stored_probe = tx.tasks.get(probe.id)
+            assert stored_probe is not None and stored_probe.status is TaskStatus.SUCCEEDED
+            tx.tasks.save(dc_replace(succeeded_probe, status=TaskStatus.SUPERSEDED))
+        with uow.transaction() as tx:
+            stored_probe = tx.tasks.get(probe.id)
+            assert stored_probe is not None and stored_probe.status is TaskStatus.SUPERSEDED
+
+        client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
+        analyze_chapter, _ = make_analyze_chapter(uow, client)
+        sequence = ChapterAnalysisSequence(
+            unit_of_work=uow,
+            queue=queue,
+            analyze_chapter=analyze_chapter,
+            sequential_analysis=True,
+        )
+        runner = TaskRunner(
+            queue=queue,
+            handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
+        )
+
+        first = await sequence.start(BOOK_ID)
+        assert first is not None and first.scope_id == "section-1"
+
+        original_enqueue_all = sequence._enqueue_all
+        fail_once = {"armed": True}
+
+        async def flaky_enqueue_all(book_id: str, **kwargs):
+            if fail_once["armed"] and kwargs.get("finished_task_id") == first.id:
+                fail_once["armed"] = False
+                raise RuntimeError("enqueue failed after commit")
+            return await original_enqueue_all(book_id, **kwargs)
+
+        sequence._enqueue_all = flaky_enqueue_all  # type: ignore[method-assign]
+
+        finished = await runner.run_next()
+        assert finished is not None
+        assert finished.id == first.id
+        assert finished.status is TaskStatus.SUCCEEDED
+        with uow.transaction() as tx:
+            stored_first = tx.tasks.get(first.id)
+            assert stored_first is not None
+            assert stored_first.status is TaskStatus.SUCCEEDED
+            assert [
+                t.scope_id
+                for t in tx.tasks.list_for_book(BOOK_ID)
+                if t.task_type is TaskType.ANALYZE_CHAPTER
+            ] == ["section-1"]
+
+        # Repeated start(book_id) resumes cleanly from section-2 without re-analyzing section-1.
+        resumed = await sequence.start(BOOK_ID)
+        assert resumed is not None and resumed.scope_id == "section-2"
+
+        while await runner.run_next() is not None:
+            pass
+
+        with uow.transaction() as tx:
+            book = tx.books.get(BOOK_ID)
+            assert book is not None and book.status is BookStatus.GLOSSARY_REVIEW
+            analyze_tasks = [
+                t for t in tx.tasks.list_for_book(BOOK_ID) if t.task_type is TaskType.ANALYZE_CHAPTER
+            ]
+            assert [(t.scope_id, t.status) for t in analyze_tasks] == [
+                ("section-1", TaskStatus.SUCCEEDED),
+                ("section-2", TaskStatus.SUCCEEDED),
+                ("section-3", TaskStatus.SUCCEEDED),
+            ]
+        assert client.call_count == 3
+    finally:
+        engine.dispose()
+
+
 
 
 

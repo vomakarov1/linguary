@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, Scene, SceneVisualFact, SourceAnchor, artifact_key
 from linguary.domain.llm_log import Violation
 
+from linguary.application.a2_core_vocab import non_core_a2_words
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import _same_word, expression_words
@@ -71,6 +72,7 @@ from linguary.domain.name_translation import (
     NameTranslationObservation,
     NameTranslationPolicy,
     NameTranslationReviewReason,
+    NameTranslationStrategy,
 )
 
 #: Fallback limit if provider does not report output token capacity.
@@ -221,13 +223,19 @@ class FragmentAnalysis:
         )
 
 
-_DESCRIBED_CANDIDATE_TYPES = frozenset({ConceptType.PERSON, ConceptType.PLACE})
+_DESCRIBED_CANDIDATE_TYPES = frozenset({
+    ConceptType.PERSON,
+    ConceptType.PLACE,
+    ConceptType.ORGANIZATION,
+    ConceptType.FICTIONAL_CONCEPT,
+    ConceptType.TERM,
+})
 
 
 def kept_candidate_description(
     candidate_type: ConceptType, responses: Iterable[GlossaryCandidateResponse]
 ) -> str:
-    """Description is kept only for a person or a place.
+    """Description is kept for every concept type.
 
     Among duplicates, the highest-confidence non-empty description wins.
     """
@@ -848,6 +856,159 @@ def _instructions_semantically_match(
     )
 
 
+_INSTRUCTION_ABBREV_BEFORE_DOT_RE = re.compile(
+    r"(?:^|(?<!\w))(?:"
+    r"т\.\s*[пде]"
+    r"|(?:ед|мн)\.\s*ч"
+    r"|др|см|стр|г"
+    r"|mr|mrs|ms|dr|st"
+    r")\.$",
+    re.IGNORECASE,
+)
+_INSTRUCTION_INITIAL_BEFORE_DOT_RE = re.compile(r"(?:^|(?<!\w))[A-ZА-ЯЁ]\.$")
+_FRAGMENT_BOUNDARY_ARTIFACT_RE = re.compile(
+    r"до\s+конца\s+фрагмента"
+    r"|без\s+подстановки\s+имени\s+из\s+других\s+глав"
+    r"|в\s+этом\s+фрагменте\s+оста[её]тся\s+без\s+имени",
+    re.IGNORECASE,
+)
+
+
+def _is_fragment_boundary_artifact(text: str) -> bool:
+    return _FRAGMENT_BOUNDARY_ARTIFACT_RE.search(text) is not None
+
+
+def _split_instruction_sentences(text: str) -> tuple[str, ...]:
+    """Splits a plain paragraph into sentences without cutting inside quotes or abbreviations."""
+    stripped = text.strip()
+    if not stripped:
+        return ()
+    track_straight_double = stripped.count('"') % 2 == 0
+    guillemet_depth = 0
+    curly_double_depth = 0
+    in_straight_double = False
+    parts: list[str] = []
+    start = 0
+    n = len(stripped)
+    idx = 0
+    while idx < n:
+        ch = stripped[idx]
+        if ch == "«":
+            guillemet_depth += 1
+            idx += 1
+            continue
+        if ch == "“":
+            curly_double_depth += 1
+            idx += 1
+            continue
+        closed_quote = False
+        if ch == "»":
+            if guillemet_depth > 0:
+                guillemet_depth -= 1
+                closed_quote = True
+        elif ch == "”":
+            if curly_double_depth > 0:
+                curly_double_depth -= 1
+                closed_quote = True
+        elif ch == '"' and track_straight_double:
+            was_in_straight = in_straight_double
+            in_straight_double = not in_straight_double
+            closed_quote = was_in_straight
+        if ch in '»”"':
+            if (
+                closed_quote
+                and guillemet_depth == 0
+                and curly_double_depth == 0
+                and not in_straight_double
+            ):
+                prev_idx = idx - 1
+                while prev_idx >= start and stripped[prev_idx] in '»”"':
+                    prev_idx -= 1
+                if prev_idx >= start and stripped[prev_idx] in ".!?…":
+                    is_single_dot = stripped[prev_idx] == "." and (
+                        prev_idx == start or stripped[prev_idx - 1] not in ".!?…"
+                    )
+                    prefix = stripped[start : prev_idx + 1]
+                    if not (
+                        is_single_dot
+                        and (
+                            _INSTRUCTION_ABBREV_BEFORE_DOT_RE.search(prefix) is not None
+                            or _INSTRUCTION_INITIAL_BEFORE_DOT_RE.search(prefix) is not None
+                        )
+                    ):
+                        end = idx + 1
+                        while end < n and stripped[end] in ")]":
+                            end += 1
+                        if end < n and stripped[end].isspace():
+                            next_idx = end
+                            while next_idx < n and stripped[next_idx].isspace():
+                                next_idx += 1
+                            probe = next_idx
+                            while probe < n and stripped[probe] in '«"“([':
+                                probe += 1
+                            if probe < n and (stripped[probe].isupper() or stripped[probe].isdigit()):
+                                sentence = stripped[start:end].strip()
+                                if sentence:
+                                    parts.append(sentence)
+                                start = next_idx
+                                idx = next_idx
+                                continue
+            idx += 1
+            continue
+        if (
+            ch in ".!?…"
+            and guillemet_depth == 0
+            and curly_double_depth == 0
+            and not in_straight_double
+        ):
+            end = idx + 1
+            while end < n and stripped[end] in ".!?…":
+                end += 1
+            is_single_dot = ch == "." and end == idx + 1
+            prefix = stripped[start:end]
+            if is_single_dot and (
+                _INSTRUCTION_ABBREV_BEFORE_DOT_RE.search(prefix) is not None
+                or _INSTRUCTION_INITIAL_BEFORE_DOT_RE.search(prefix) is not None
+            ):
+                idx = end
+                continue
+            while end < n and stripped[end] in ")]":
+                end += 1
+            if end < n and stripped[end].isspace():
+                next_idx = end
+                while next_idx < n and stripped[next_idx].isspace():
+                    next_idx += 1
+                probe = next_idx
+                while probe < n and stripped[probe] in '«"“([':
+                    probe += 1
+                if probe < n and (stripped[probe].isupper() or stripped[probe].isdigit()):
+                    sentence = stripped[start:end].strip()
+                    if sentence:
+                        parts.append(sentence)
+                    start = next_idx
+                    idx = next_idx
+                    continue
+            idx = end
+            continue
+        idx += 1
+    tail = stripped[start:].strip()
+    if tail:
+        parts.append(tail)
+    return tuple(parts)
+
+
+def _should_split_instruction_paragraph(sentences: Sequence[str]) -> bool:
+    if len(sentences) >= 3:
+        return True
+    if len(sentences) >= 2 and any(
+        bool(_instruction_register(sentence))
+        or _is_fragment_boundary_artifact(sentence)
+        for sentence in sentences
+    ):
+        return True
+    return False
+
+
 def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
     """Chapter translation instructions: fragment directives ordered by reading sequence.
 
@@ -856,8 +1017,11 @@ def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
     """
     entries: list[_InstructionEntry] = []
     exact_seen: set[str] = set()
+    drop_fragment_artifacts = len(fragments) > 1
     for fragment in fragments:
         for point in _instruction_points(fragment.translation_instructions):
+            if drop_fragment_artifacts and _is_fragment_boundary_artifact(point):
+                continue
             candidate = _instruction_entry(point)
             if candidate is None or candidate.key in exact_seen:
                 continue
@@ -881,7 +1045,7 @@ def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
 
 
 def _instruction_points(text: str) -> tuple[str, ...]:
-    """Parses bulleted items and plain paragraphs."""
+    """Parses bulleted items and plain paragraphs with guarded sentence splitting."""
     points: list[str] = []
     for paragraph in re.split(r"\n\s*\n", text.strip()):
         lines = paragraph.splitlines()
@@ -892,7 +1056,12 @@ def _instruction_points(text: str) -> tuple[str, ...]:
                 if line.strip()
             )
         elif paragraph.strip():
-            points.append(re.sub(r"^\s*(?:[-•]|\d+\.)\s+", "", paragraph).strip())
+            cleaned = re.sub(r"^\s*(?:[-•]|\d+\.)\s+", "", paragraph).strip()
+            sentences = _split_instruction_sentences(cleaned)
+            if _should_split_instruction_paragraph(sentences):
+                points.extend(sentences)
+            else:
+                points.append(cleaned)
     return tuple(points)
 
 
@@ -1635,6 +1804,7 @@ _NARRATIVE_RULE_PRIORITY = (
     "name_assessment_conflict",
     "spoiler_name_leak",
     "non_visual_fact",
+    "speaker_subject_anchor",
     "context_fact_conflict",
     "glossary_fact_conflict",
 )
@@ -1784,8 +1954,18 @@ def _collect_narrative_language_issues(
     return issues
 
 
+_ALLOWED_REVIEW_REASONS_HINT = (
+    "(допустимые review_reasons: "
+    + ", ".join(reason.value for reason in NameTranslationReviewReason)
+    + ")"
+)
+_DESCRIPTIVE_LOWERCASE_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+[a-z]")
+
+
 def _collect_name_assessment_conflicts(
     candidates: Sequence[GlossaryCandidateResponse],
+    *,
+    name_translation_policy: NameTranslationPolicy | None = None,
 ) -> list[str]:
     details: list[str] = []
     for candidate in candidates:
@@ -1802,7 +1982,8 @@ def _collect_name_assessment_conflicts(
             }
         ):
             details.append(
-                f"«{candidate.source_text}»: метод sound несовместим с creative_adaptation/personal_name_substitution"
+                f"«{candidate.source_text}»: метод sound несовместим с creative_adaptation/personal_name_substitution "
+                f"{_ALLOWED_REVIEW_REASONS_HINT}"
             )
         if (
             method is NameTranslationMethod.SOUND
@@ -1816,18 +1997,41 @@ def _collect_name_assessment_conflicts(
             )
         ):
             details.append(
-                f"«{candidate.source_text}»: непрозрачное имя с методом sound несовместимо с wordplay/anagram"
+                f"«{candidate.source_text}»: непрозрачное имя с методом sound несовместимо с wordplay/anagram "
+                f"{_ALLOWED_REVIEW_REASONS_HINT}"
             )
         if method is NameTranslationMethod.MEANING and assessment.opaque_name:
             details.append(
-                f"«{candidate.source_text}»: метод meaning несовместим с opaque_name=True"
+                f"«{candidate.source_text}»: метод meaning несовместим с opaque_name=True "
+                f"{_ALLOWED_REVIEW_REASONS_HINT}"
             )
         if (
             method in {NameTranslationMethod.CREATIVE, NameTranslationMethod.UNCERTAIN}
             and assessment.eligible_without_review
         ):
             details.append(
-                f"«{candidate.source_text}»: метод {method.value} не может иметь eligible_without_review=True"
+                f"«{candidate.source_text}»: метод {method.value} не может иметь eligible_without_review=True "
+                f"{_ALLOWED_REVIEW_REASONS_HINT}"
+            )
+        if (
+            name_translation_policy is not None
+            and name_translation_policy.strategy is NameTranslationStrategy.MEANING
+            and method is NameTranslationMethod.SOUND
+            and not assessment.opaque_name
+            and assessment.eligible_without_review
+        ):
+            details.append(
+                f"«{candidate.source_text}»: при стратегии meaning прозрачное имя (opaque_name=False) с методом sound "
+                f"не может иметь eligible_without_review=True {_ALLOWED_REVIEW_REASONS_HINT}"
+            )
+        if (
+            method is NameTranslationMethod.SOUND
+            and not assessment.opaque_name
+            and _DESCRIPTIVE_LOWERCASE_ARTICLE_RE.match(candidate.source_text.strip()) is not None
+        ):
+            details.append(
+                f"«{candidate.source_text}»: описательная именная группа с opaque_name=False "
+                f"должна переводиться по смыслу (meaning), а не методом sound {_ALLOWED_REVIEW_REASONS_HINT}"
             )
     return list(dict.fromkeys(details))
 
@@ -2545,6 +2749,69 @@ def _alias_domain_conflict_message(
     return aliased
 
 
+def _collect_speaker_subject_anchor_issues(
+    context_facts: Sequence[QuotedContextFactResponse],
+    resolved_facts: Sequence[
+        tuple[QuotedContextFactResponse, tuple[SourceAnchor, ...], SourceAnchor]
+    ],
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[list[str], list[str]]:
+    resolved_subject_by_fact_id = {
+        id(raw_fact): subject_anchor
+        for raw_fact, _, subject_anchor in resolved_facts
+    }
+    details: list[str] = []
+    block_ids: list[str] = []
+    for fact in context_facts:
+        if fact.kind != "speaker":
+            continue
+        resolved_subject = resolved_subject_by_fact_id.get(id(fact))
+        if resolved_subject is not None:
+            block_id = resolved_subject.block_id
+            text = texts.get(block_id, "")
+            subject_span: tuple[int, int] | None = (
+                resolved_subject.start,
+                resolved_subject.end,
+            )
+            quote_preview = resolved_subject.quote
+        else:
+            block_id = aliases.get(fact.subject_anchor.block_id)
+            if block_id is None or block_id not in texts:
+                continue
+            text = texts[block_id]
+            quote_preview = fact.subject_anchor.quote
+            s_start = fact.subject_anchor.start
+            s_end = fact.subject_anchor.end
+            if (
+                type(s_start) is int
+                and type(s_end) is int
+                and 0 <= s_start < s_end <= len(text)
+            ):
+                subject_span = (s_start, s_end)
+            else:
+                found = _quote_spans(text, fact.subject_anchor.quote)
+                subject_span = (found[0][0], found[0][1]) if found else None
+        if subject_span is None:
+            continue
+        dialogue_spans = tuple(
+            (match.start(), match.end()) for match in _DIALOGUE_QUOTES.finditer(text)
+        )
+        if not dialogue_spans:
+            continue
+        sub_start, sub_end = subject_span
+        intersects = any(
+            sub_start < d_end and d_start < sub_end
+            for d_start, d_end in dialogue_spans
+        )
+        if not intersects:
+            label = aliases_by_block_id.get(block_id, fact.subject_anchor.block_id)
+            details.append(f"{label}: «{_preview_quote(quote_preview)}»")
+            block_ids.append(block_id)
+    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
+
+
 def validate_narrative_response(
     payload: NarrativeAnalysisResponse,
     aliases: Mapping[str, str],
@@ -2560,6 +2827,7 @@ def validate_narrative_response(
     target_language: str | None = None,
     language_detector: LanguageDetector | None = None,
     known_names: Iterable[str] = (),
+    name_translation_policy: NameTranslationPolicy | None = None,
 ) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Validate complete scene coverage and source-bound narrative facts."""
     issues: list[tuple[str, str, tuple[str, ...]]] = []
@@ -2606,7 +2874,10 @@ def validate_narrative_response(
         )
     )
 
-    assessment_conflicts = _collect_name_assessment_conflicts(payload.glossary_candidates)
+    assessment_conflicts = _collect_name_assessment_conflicts(
+        payload.glossary_candidates,
+        name_translation_policy=name_translation_policy,
+    )
     if assessment_conflicts:
         issues.append(
             (
@@ -2631,6 +2902,23 @@ def validate_narrative_response(
                 "unresolved_quote",
                 f"цитата не разрешается однозначно в тексте блока ({'; '.join(cf_missing_details)})",
                 tuple(cf_missing_blocks),
+            )
+        )
+
+    speaker_anchor_details, speaker_anchor_blocks = _collect_speaker_subject_anchor_issues(
+        payload.context_facts,
+        resolved_facts,
+        scoped_aliases,
+        texts,
+        scoped_aliases_by_block_id,
+    )
+    if speaker_anchor_details:
+        issues.append(
+            (
+                "speaker_subject_anchor",
+                "для факта speaker опора subject_anchor должна указывать на закавыченную реплику, "
+                f"а не на авторскую ремарку ({'; '.join(speaker_anchor_details)})",
+                tuple(speaker_anchor_blocks),
             )
         )
 
@@ -3804,7 +4092,7 @@ _SINGLE_QUOTE_APOSTROPHE = (
     r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
 )
 _DIALOGUE_QUOTES = re.compile(
-    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”‘’]*\""
+    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”]*\"|«[^«»]*»"
 )
 _SUBORDINATORS = frozenset({
     "if",
@@ -4071,6 +4359,10 @@ _A2_STATE_CHANGE_IDIOM_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_A2_IT_IS_TIME_RE = re.compile(
+    r"\bit['’]s\s+(?:(?:about|high)\s+)?time\s+(?!to\b|for\b)(?:you|we|i|he|she|they|[a-z]+)\b",
+    re.IGNORECASE,
+)
 _A2_NONLEXICAL_BACKING_KINDS = frozenset({"grammar", "idiom", "speech_style"})
 
 
@@ -4091,6 +4383,7 @@ def _has_a2_nonlexical_stoplist(text: str) -> bool:
         or _A2_SARCASM_RE.search(text) is not None
         or _A2_NONSTANDARD_SPEECH_RE.search(text) is not None
         or _A2_STATE_CHANGE_IDIOM_RE.search(text) is not None
+        or _A2_IT_IS_TIME_RE.search(text) is not None
     ):
         return True
     if "?" not in text and _A2_INITIAL_WHAT_CLAUSE_RE.search(text) is not None:
@@ -4177,6 +4470,7 @@ def normalize_a2_dialogue_response(
     *,
     reader_level: str | None = None,
     english_help: bool = False,
+    known_names: Sequence[str] = (),
 ) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
     """Promote non-elementary quoted A2 dialogue and keep a short elementary reply light.
 
@@ -4245,12 +4539,14 @@ def normalize_a2_dialogue_response(
                 updated, _ = _promote_dialogue_item(item, block, difficulties)
             was_demoted = False
             if block.type in _DEMOTABLE_BLOCK_TYPES:
-                after_demote, demoted = _demote_elementary_reply(item, updated, block, difficulties)
+                after_demote, demoted = _demote_elementary_reply(
+                    item, updated, block, difficulties, known_names=known_names
+                )
                 was_demoted = after_demote is not updated
                 updated = after_demote
             if not was_demoted and block.type in _DIALOGUE_BLOCK_TYPES:
                 updated, stoplist_demoted = _promote_a2_stoplist_item(
-                    updated, block, difficulties, owners
+                    updated, block, difficulties, owners, known_names=known_names
                 )
                 if stoplist_demoted is not None:
                     demoted = stoplist_demoted
@@ -4586,7 +4882,14 @@ def _anchor_hits_ranges(anchor, text, span_start, ranges) -> bool:
     )
 
 
-def _demote_elementary_reply(original, updated, block, difficulties):
+def _demote_elementary_reply(
+    original,
+    updated,
+    block,
+    difficulties,
+    *,
+    known_names: Sequence[str] = (),
+):
     """Lower a model TRANSLATE on a short elementary reply.
 
     Returns the item and the block owners when vocabulary hints must become
@@ -4599,7 +4902,13 @@ def _demote_elementary_reply(original, updated, block, difficulties):
         return updated, None
     owners = frozenset(part for part in (original.source_block_id, block.id) if part)
     sentence_count = len({span.sentence_index for span in block.segment_spans})
-    mode = _elementary_reply_mode(block.text, difficulties, owners, sentence_count=sentence_count)
+    mode = _elementary_reply_mode(
+        block.text,
+        difficulties,
+        owners,
+        sentence_count=sentence_count,
+        known_names=known_names,
+    )
     if mode is None:
         return updated, None
     segments = tuple(SegmentTreatmentResponse(segment.index, mode) for segment in updated.segments)
@@ -4611,7 +4920,14 @@ def _demote_elementary_reply(original, updated, block, difficulties):
     return demoted, owners
 
 
-def _elementary_reply_mode(text, difficulties, owners, *, sentence_count: int = 1):
+def _elementary_reply_mode(
+    text,
+    difficulties,
+    owners,
+    *,
+    sentence_count: int = 1,
+    known_names: Sequence[str] = (),
+):
     words = expression_words(text)
     if not words:
         return None
@@ -4662,6 +4978,8 @@ def _elementary_reply_mode(text, difficulties, owners, *, sentence_count: int = 
         return None
     if any(difficulty.owner_block_id in owners for difficulty in related):
         return BlockTreatment.GLOSSARY_ONLY
+    if dominant_script(text) == "LATIN" and non_core_a2_words(text, known_names=known_names):
+        return None
     return BlockTreatment.READ_AS_IS
 
 
@@ -4763,6 +5081,50 @@ def _has_nonlexical_backing_difficulty(
     return False
 
 
+def _anchor_covers_a2_word(anchor_quote: str, word: str) -> bool:
+    norm_quote = anchor_quote.translate(_QUOTE_APOSTROPHE_TRANS).casefold()
+    if not norm_quote:
+        return False
+    if re.search(rf"(?<!\w){re.escape(word)}(?!\w)", norm_quote) is not None:
+        return True
+    anchor_words = expression_words(anchor_quote)
+    return any(aw == word or _same_word(aw, word) for aw in anchor_words)
+
+
+def _uncovered_a2_words(
+    unknown: Sequence[str],
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    *,
+    whole_block: bool,
+) -> tuple[str, ...]:
+    if not unknown:
+        return ()
+    ranges = ((span_start, span_end),)
+    owner_quotes: list[str] = []
+    for difficulty in difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        for anchor in getattr(difficulty, "anchors", ()):
+            if getattr(anchor, "block_id", None) not in owners:
+                continue
+            if not whole_block and not _anchor_hits_ranges(anchor, block_text, 0, ranges):
+                continue
+            quote = getattr(anchor, "quote", "")
+            if quote:
+                owner_quotes.append(quote)
+    if not owner_quotes:
+        return tuple(unknown)
+    return tuple(
+        word
+        for word in unknown
+        if not any(_anchor_covers_a2_word(quote, word) for quote in owner_quotes)
+    )
+
+
 def _read_as_is_stoplist_mode(
     text: str,
     block_text: str,
@@ -4772,20 +5134,40 @@ def _read_as_is_stoplist_mode(
     owners: frozenset[str],
     *,
     whole_block: bool,
+    known_names: Sequence[str] = (),
 ) -> BlockTreatment | None:
     if _has_a2_nonlexical_stoplist(text):
         return BlockTreatment.TRANSLATE
     words = expression_words(text)
-    if not words or len(words) > _SHORT_B1_WORD_LIMIT:
+    if not words:
         return None
-    if any(word in _SHORT_B1_WORDS for word in words) or any(
-        _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
+    if len(words) <= _SHORT_B1_WORD_LIMIT and (
+        any(word in _SHORT_B1_WORDS for word in words)
+        or any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES)
     ):
         if _owns_vocabulary_in_range(
             difficulties, owners, block_text, span_start, span_end, whole_block=whole_block
         ) or _is_single_b1_reporting_verb_only(words):
             return BlockTreatment.GLOSSARY_ONLY
         return BlockTreatment.TRANSLATE
+    if dominant_script(text) == "LATIN":
+        unknown = non_core_a2_words(text, known_names=known_names)
+        if unknown:
+            uncovered = _uncovered_a2_words(
+                unknown,
+                difficulties,
+                owners,
+                block_text,
+                span_start,
+                span_end,
+                whole_block=whole_block,
+            )
+            if uncovered:
+                return (
+                    BlockTreatment.TRANSLATE
+                    if len(uncovered) > 3
+                    else BlockTreatment.GLOSSARY_ONLY
+                )
     return None
 
 
@@ -4811,6 +5193,8 @@ def _promote_a2_stoplist_item(
     block: DocumentBlock,
     difficulties,
     owners: frozenset[str],
+    *,
+    known_names: Sequence[str] = (),
 ) -> tuple[TreatmentPlanItemResponse, frozenset[str] | None]:
     if item.segments:
         spans = block.segment_spans
@@ -4841,6 +5225,7 @@ def _promote_a2_stoplist_item(
                     difficulties,
                     owners,
                     whole_block=(len(sentence_segments) == 1),
+                    known_names=known_names,
                 )
             elif current_mode is BlockTreatment.GLOSSARY_ONLY:
                 if _glossary_only_needs_stoplist_translation(
@@ -4898,6 +5283,7 @@ def _promote_a2_stoplist_item(
                     difficulties,
                     owners,
                     whole_block=(len(slices) == 1),
+                    known_names=known_names,
                 )
                 if mode is not None:
                     triggered.append(mode)

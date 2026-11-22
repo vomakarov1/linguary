@@ -980,7 +980,7 @@ class _ChapterRenderer:
         state: _SectionState,
         is_front_matter: bool,
     ) -> None:
-        """Units from the request layout. Front matter and a missing entry stay source-only."""
+        """Units from the request layout. Plain front matter and missing entries stay source-only."""
         from linguary.adapters.epub.layout_render import render_unit
 
         for unit in self._units_for(block, state=state, is_front_matter=is_front_matter):
@@ -1002,7 +1002,7 @@ class _ChapterRenderer:
     ):
         from linguary.adapters.epub.layout_render import source_only_unit
 
-        if is_front_matter:
+        if is_front_matter and not self._document.has_meaningful_part_title(state.section):
             return (source_only_unit(block),)
         layout = self._request.layout
         chapter = None if layout is None else layout.chapters.get(state.section.id)

@@ -315,7 +315,7 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
     from linguary.domain.book_conditions import thaw
     conditions = transaction.work.latest_conditions(book.id)
     summary = dict(conditions_id=None, revision=None, reader_level=None, english_help=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None,
-        source_language=book.source_language, staged_analysis=False, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=False)
+        source_language=book.source_language, staged_analysis=False, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=False, sequential_analysis=True)
     if conditions is not None:
         policy = conditions.payload.get('name_translation_policy')
         summary.update(conditions_id=conditions.id, revision=conditions.revision,
@@ -326,7 +326,8 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             name_translation_policy=thaw(policy) if policy is not None else None,
             pronunciation_help_enabled=conditions.pronunciation_help_enabled,
             pronunciation_variant=conditions.pronunciation_variant,
-            seed_first_chapter=bool((conditions.payload.get('checks') or {}).get('seed_first_chapter', False)))
+            seed_first_chapter=bool((conditions.payload.get('checks') or {}).get('seed_first_chapter', False)),
+            sequential_analysis=bool((conditions.payload.get('checks') or {}).get('sequential_analysis', True)))
     results = stored_results
     if result_block_ids is not None:
         result_ids = set(result_block_ids)

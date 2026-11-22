@@ -192,13 +192,15 @@ glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария. Опирайся на справочные подсказки прошлых глав (включая описание, этимологию и признак непрозрачное=false), чтобы сохранять связность имён, сокращённых форм, неологизмов и способа их передачи между главами, не меняя без основания удачный вариант прошлой главы.
 Не клади в glossary_candidates (person) случайно упомянутых или вымышленных в диалоге людей, фоновых ведущих и дикторов, клички животных и собирательные названия семей во множественном числе. Не помечай типом person торговые марки, блюда, напитки, бытовые предметы и обычные нарицательные слова (даже названные в честь людей — при необходимости единообразия это term или не включай обычную лексику). Вымышленные книги и их авторы из эпиграфов и цитат в тексте допустимы в glossary_candidates, если их перевод требует единообразия. Требуй одну каноническую запись на персонажа: не плоди отдельно имя и форму с титулом или фамилией.
 В source_text и suggested_translation не добавляй лишних кавычек вокруг значения; в suggested_translation указывай ровно один вариант перевода на языке {target_language}, без пояснений и альтернатив в скобках и без вторых вариантов через слэш.
-description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
+description заполняй для всех 5 типов (person, place, organization, fictional_concept, term) — 1–2 предложения на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
+Описательные прозвища (например, «the freckled boy» и т. п.) прозрачны (opaque_name=false) и при переводе по смыслу получают applied_method="meaning".
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null. Для kind=gender используй единообразные английские значения male / female.
-В subject_anchor передай block_id и дословную quote субъекта из видимого текста этого блока (местоимение, именную группу или реплику, о которой факт), а не пересказ и не подставленное имя из другого места.
+Поле anchors — всегда непустой массив (минимум 1 опора {{block_id, quote}}, никогда не возвращай anchors: []).
+В subject_anchor передай block_id и дословную quote субъекта из видимого текста этого блока, а не пересказ и не подставленное имя из другого места: для kind=speaker в subject_anchor указывай саму реплику в кавычках (или её начало в кавычках), а авторскую ремарку (said ... и т. п.) и другие основания помещай в anchors; для kind=gender и kind=pronoun_referent в subject_anchor указывай местоимение или именную группу, о которой факт, а подтверждающие фрагменты — в anchors.
 Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя у анонимных обозначений (the stranger, the giant и т. п.) до первого называния персонажа по имени в тексте.
 В glossary_candidates.note указывай только внутренние переводческие пометы: обязательный грамматический род персонажей (если неочевиден по форме), грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также точные правила склоняемости имён и фамилий — указывай несклоняемость только для действительно несклоняемых заимствованных имён и фамилий (имена на гласные вроде Элли, Мэри; женские фамилии на согласный в русском не склоняются, а мужские фамилии на согласный в русском склоняются всегда). Эти внутренние пометы не копируй в заметки читателю.
-В translation_instructions фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»). Не дублируй здесь переводы имён и терминов из глоссария — при необходимости просто сошлись на глоссарий. Не ссылайся в translation_instructions на служебные метки блоков (b1, b8, b51 и т. п.) — описывай место через событие, сцену или цитату.
+В translation_instructions оформляй указания короткими отдельными строками вида «- ...»: фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»). Не пиши формулировок о границах фрагмента вроде «до конца фрагмента» или «без подстановки имени из других глав» — формулируй ограничения по сюжетной границе (например, до первого называния имени в тексте). Не дублируй здесь переводы имён и терминов из глоссария — при необходимости просто сошлись на глоссарий. Не ссылайся в translation_instructions на служебные метки блоков (b1, b8, b51 и т. п.) — описывай место через событие, сцену или цитату.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, укажи start=null и end=null. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -227,10 +229,10 @@ priority, help_kind, required_points [{{id, description}}]. Копируй quote
 false_friend — слово похоже на русское, значит другое. Примеры: actual/actually («фактический/на самом деле», не «актуальный»), magazine («журнал», не «магазин»), sympathetic («сочувствующий», не «симпатичный»), fabric («ткань», не «фабрика»); не помечай как false_friend обычные многозначные слова без ложного сходства с русским.
 speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
 Отмечай speech_style («Речь персонажа.») также при первом появлении ненормативных грамматических форм (we was, you was, don' need, them as).
-В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN.
+В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN. Соблюдай ограничения из translation_instructions и антиспойлер: в required_points блока bK не раскрывай тайну, развязку или скрытый смысл эвфемизма раньше момента раскрытия в тексте.
 Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить. В блоках TRANSLATE планируй не больше 1–2 заметок на абзац.
 В блоках без перевода (GLOSSARY_ONLY, READ_AS_IS) проверяй каждое знаменательное слово выше уровня читателя (включая редкие значения знакомых слов и официальные титулы), но не добавляй подсказки на базовые слова A1 и прозрачные интернационализмы.
-Для reader_chapter_summary (Previously in Chapter...) используй строго простую лексику A2 (без редких слов уровня B2–C1) в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский; естественно вплети 3–5 полезных общеязыковых слов главы в простой контекст. Пиши короткими фразами (<= 12–15 слов на фразу); запрещена конструкция Present Simple + for + длительность (разбивай время отдельной фразой); чётко разграничивай эпиграф или цитату из вымышленной книги и прямую речь (реплики персонажей).
+Поле reader_chapter_summary (Previously in Chapter...) возвращай только если это требуется правилами уровня читателя ниже.
 parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 Различай priority: ставь critical только когда без объяснения читатель неверно поймёт сюжет, логику, игру слов, сарказм, культурную отсылку или ключевую грамматическую конструкцию; ставь useful для вспомогательной лексики, оттенков значения и неосновных пояснений.
@@ -395,6 +397,7 @@ class FragmentFindings:
     summary: str
     instructions: str
     expressions: tuple[str, ...]
+    candidates: tuple[GlossaryCandidateResponse, ...] = ()
 
 
 def is_textual(block: DocumentBlock) -> bool:
@@ -431,7 +434,9 @@ def scaled_chapter_note_limit(effective_blocks: int, per_chapter: int) -> int:
         return 0
     if per_chapter < 6:
         return min(per_chapter, effective_blocks)
-    scaled = max(per_chapter, min(16, max(6, round(effective_blocks / 25))))
+    if effective_blocks <= 35:
+        return min(effective_blocks, per_chapter)
+    scaled = max(per_chapter, min(18, round(effective_blocks / 12) + 4))
     return min(effective_blocks, scaled)
 
 
@@ -1018,6 +1023,11 @@ class ContextBuilder:
             )
         elif document.is_front_matter(section) or section.is_notes_only:
             instructions += '\nЭто служебный раздел: верни scenes=[].'
+        if fragment is not None and findings is not None:
+            instructions += (
+                '\nВ translation_instructions этого фрагмента добавляй только новые указания: '
+                'не повторяй уже зафиксированные в предыдущих частях пары обращения «ты/вы» и общий тон.'
+            )
         return ChapterAnalysisContext(section_id=section.id,
             request=LLMRequest(kind=LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
                 instructions=instructions, input_text=self._chapter_input(
@@ -1034,7 +1044,8 @@ class ContextBuilder:
 
     def for_chapter_pedagogical_analysis(
         self, document: CanonicalDocument, section: DocumentSection, *,
-        narrative_summary: str, context_facts: Sequence[ContextFact] = (),
+        narrative_summary: str, narrative_instructions: str = "",
+        context_facts: Sequence[ContextFact] = (),
         glossary_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse] = (),
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         user_decisions: Iterable[TermConcept] | None = None,
@@ -1082,6 +1093,9 @@ class ContextBuilder:
                 context_facts=_pedagogical_context_facts(context_facts, aliases_by_block_id),
             ),
             ensure_ascii=False, sort_keys=True)
+        cleaned_narrative_instructions = narrative_instructions.strip()
+        if cleaned_narrative_instructions:
+            accepted += f'\nУказания переводчику:\n{cleaned_narrative_instructions}'
         extra_sections = [accepted]
         if self._reader_level == 'a2' and not self._english_help:
             extra_sections.append('\n\n' + _a2_progression_guidance(cumulative_words_before))
@@ -1127,6 +1141,7 @@ class ContextBuilder:
     def pedagogical_input_sha256(
         self, document: CanonicalDocument, section: DocumentSection, *,
         narrative_output_sha256: str, narrative_summary: str = '',
+        narrative_instructions: str = '',
         context_facts: Sequence[ContextFact] = (),
         glossary_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse] = (),
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
@@ -1137,7 +1152,9 @@ class ContextBuilder:
         prior_chapter_topics: Sequence[str] = (),
     ) -> str:
         context = self.for_chapter_pedagogical_analysis(document, section,
-            narrative_summary=narrative_summary, context_facts=context_facts,
+            narrative_summary=narrative_summary,
+            narrative_instructions=narrative_instructions,
+            context_facts=context_facts,
             glossary_candidates=glossary_candidates,
             accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
             cumulative_words_before=cumulative_words_before,
@@ -1712,9 +1729,18 @@ class ContextBuilder:
             if not self._english_help:
                 instructions += "\nСоблюдай лимиты BYR и обязательных заметок, указанные в запросе."
                 instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
+                note_budget_line = (
+                    f'Бюджет обязательных заметок (help_kind="explanation") этого анализа: не более {note_limit} '
+                    f'(на блоки TRANSLATE — не более трети–половины, priority="critical" только при угрозе '
+                    f'непонимания сюжета, иронии или ключевого смысла); '
+                    f'словарные подсказки help_kind="lexical_hint" (priority="useful") в блоках и сегментах '
+                    f'GLOSSARY_ONLY этим бюджетом не ограничены.'
+                    if version == 3
+                    else f"Бюджет обязательных заметок этого анализа: {note_limit}."
+                )
                 limit_lines = (
                     f"В этом ответе не больше {before_you_read_limit} BYR.",
-                    f"Бюджет обязательных заметок этого анализа: {note_limit}.",
+                    note_budget_line,
                     "Пределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False, separators=(",", ":")),
                 )
         chapter_chars = sum(len(t.text) for t in textual_blocks(section))
@@ -1880,6 +1906,8 @@ class ContextBuilder:
                 f"Указания: {findings.instructions}\n"
                 f"Выражения: {', '.join(findings.expressions)}"
             )
+            if findings.candidates:
+                parts.append(_fragment_findings_candidates(findings.candidates))
         parts.append(_chapter_blocks(
             blocks, visible_texts_by_alias, label_segments=label_segments,
         ))
@@ -2051,12 +2079,14 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 Верни ровно один элемент на каждый блок, который тебе дали: с тем же идентификатором \
 и в том же порядке. Не пропускай блоки, не добавляй чужих, не объединяй и не дели их.
 
-- TRANSLATE — основной режим: выбирай щедро (ориентир 65–80% блоков главы) для любого \
-предложения с временами сложнее Simple/Continuous, придаточными предложениями, редкой лексикой, \
-витиеватыми диалогами или развёрнутыми описаниями.
-- GLOSSARY_ONLY — выбирай только для коротких абзацев с прозрачной базовой грамматикой, \
+- TRANSLATE — основной режим (ориентир 65–80% блоков главы): выбирай для предложений \
+со сложным синтаксисом, временами сложнее Simple/Continuous, придаточными предложениями, \
+плотной редкой лексикой (> 3 слов выше A2), диалектом, витиеватыми диалогами или развёрнутыми описаниями.
+- GLOSSARY_ONLY — режим тренировки чтения: выбирай для прозрачных реплик без диалекта длиной до 15 слов \
+и простого нарратива длиной до 45 слов с базовой грамматикой (при ≤ 3 словах выше A2); \
 подсказывай любые слова выше уровня A2.
-- READ_AS_IS — выбирай только для самых элементарных реплик и базовых коротких фраз \
+- READ_AS_IS — выбирай только для самых элементарных реплик и базовых коротких фраз, \
+целиком состоящих из базовой лексики A1–A2 \
 (приветствия, простые утверждения в 2–3 слова без незнакомой лексики вроде «Nearly.»; \
 не переводи такие фразы в GLOSSARY_ONLY только ради пояснения рода местоимения it). \
 Короткую фразу с глаголом мимики, речи или взгляда выше A1–A2 нельзя оставлять в READ_AS_IS: \
@@ -2071,8 +2101,8 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной элементарной \
 реплике уровня A1–A2 без придаточных оборотов (if, when, because, that), причастных \
 оборотов, авторских предложений действия и небазовых глаголов речи \
-(demanded, murmured, snapped). Реплики длиннее 8 слов либо сочетающие прямую речь с \
-авторским действием или сложной ремаркой получают TRANSLATE.
+(demanded, murmured, snapped). Более длинную прозрачную реплику до 15 слов с простой ремаркой \
+оценивай по общей матрице: если грамматика базовая и слов выше A2 не больше 3 — допустим GLOSSARY_ONLY.
 Содержательный заголовок главы («The House on the Hill», «The Missing Key», \
 «Letters from Abroad») выбирай режимом TRANSLATE без грамматических сносок.
 Не оставляй без достаточной помощи грамматически скрытые конструкции уровня выше A2: \
@@ -2095,7 +2125,7 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 что план удачный».
 Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
 
-Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
+Длина блока не определяет режим: опирайся на матрицу выше (TRANSLATE при сложной грамматике, диалекте или > 3 словах выше A2; GLOSSARY_ONLY для прозрачных реплик до 15 слов и простого нарратива до 45 слов; READ_AS_IS только при целиком базовой лексике A1–A2). \
 Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков. \
 Соблюдай адаптивный коридор доли переведённых слов из текста запроса: прозрачные реплики без диалекта длиной до 15 слов и простой нарратив до 45 слов (при ≤ 3 трудностях) оставляй в GLOSSARY_ONLY со словарными подсказками, чтобы читатель тренировал чтение в оригинале, не снимая TRANSLATE с действительно трудных абзацев.\
 """
@@ -2250,8 +2280,11 @@ _WHOLE_CHAPTER_SUMMARY_A2 = """\
 Пиши на языке оригинала книги ({source_language}). Ограничь chapter_summary и \
 reader_chapter_summary 3–5 короткими предложениями на всю главу (<= 12–15 слов на фразу). \
 Только подтверждённые текстом события самой этой главы: что случилось, с кем, что изменилось — \
-не домысливай деталей, которых нет в тексте. Не используй Present Simple + for + длительность \
-и чётко разграничивай эпиграф или вымышленную книгу и реплики персонажей. Предыдущие главы не \
+не домысливай деталей, которых нет в тексте. Запрещены точка с запятой «;», пассивные обороты \
+вроде «are lost» (используй простой активный залог) и конструкция Present Simple + for + \
+длительность (разбивай время отдельной фразой). Чётко разграничивай эпиграф или вставную цитату \
+из вымышленной книги и прямую речь (реплики персонажей); для вставной цитаты книги используй \
+явный шаблон вроде «At the end, a quote from [Author]'s book explains...». Предыдущие главы не \
 пересказывай, о будущих не рассуждай, текст не оценивай. Верни ровно один абзац на языке \
 оригинала книги ({source_language}), без перевода на русский, без подписей и без смешения языков."""
 
@@ -2262,8 +2295,11 @@ _FRAGMENT_SUMMARY_A2 = """\
 reader_chapter_summary с начала главы до текущего фрагмента сжимается в 3–5 коротких \
 предложений (<= 12–15 слов на фразу), а не дописывается абзацем к каждому фрагменту. Верни \
 сводку всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
-частях, строго по фактам текста без выдуманных деталей. Не используй Present Simple + for + \
-длительность и чётко разграничивай эпиграф или вымышленную книгу и реплики персонажей. Не \
+частях, строго по фактам текста без выдуманных деталей. Запрещены точка с запятой «;», пассивные \
+обороты вроде «are lost» (используй простой активный залог) и конструкция Present Simple + for + \
+длительность (разбивай время отдельной фразой). Чётко разграничивай эпиграф или вставную цитату \
+из вымышленной книги и прямую речь (реплики персонажей); для вставной цитаты книги используй \
+явный шаблон вроде «At the end, a quote from [Author]'s book explains...». Не \
 рассуждай о том, что будет после, и не оценивай текст. Верни ровно один абзац на языке \
 оригинала книги ({source_language}), без перевода на русский, без подписей и без смешения \
 языков. Новые выражения before_you_read не возвращай: список остаётся пустым."""
@@ -3060,6 +3096,32 @@ def _known_decision_line(candidate: GlossaryCandidate) -> str:
     return f"{line} ({candidate.note.strip()})" if candidate.note.strip() else line
 
 
+def _fragment_findings_candidates(candidates: Sequence[GlossaryCandidateResponse]) -> str:
+    """Concise glossary candidates from earlier fragments of the same chapter."""
+    if not candidates:
+        return ""
+    lines = [
+        "Кандидаты глоссария из предыдущих частей этой главы:",
+        "Сохраняй единообразие этих переводов и меняй перевод только при явных новых сведениях в тексте.",
+    ]
+    for candidate in candidates:
+        line = f"- {candidate.source_text} [{candidate.type.value}] -> {candidate.suggested_translation}"
+        note = (candidate.note or "").strip()
+        if note:
+            line = f"{line} ({note})"
+        details: list[str] = []
+        description = (candidate.description or "").strip()
+        if description:
+            details.append(f"описание: {description}")
+        if candidate.name_translation_assessment is not None:
+            opaque = "true" if candidate.name_translation_assessment.opaque_name else "false"
+            details.append(f"непрозрачное={opaque}")
+        if details:
+            line = f"{line} — {'; '.join(details)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _name_policy(value: NameTranslationPolicy | Mapping[str, object] | None) -> NameTranslationPolicy | None:
     if value is None:
         return None
@@ -3108,6 +3170,9 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
                    'замены корневой гласной под русское созвучие и перевода корней; литературные адаптации из известных '
                    'переводов книги не помечай как sound. '
                    'При applied_method=sound и eligible_without_review=true оставляй review_reasons пустым ([]); '
+                   'допустимы ТОЛЬКО следующие 7 значений review_reasons: ambiguous, wordplay, anagram, '
+                   'uncertain_etymology, creative_adaptation, personal_name_substitution, other — '
+                   'запрещено выдумывать или возвращать любые другие строки; '
                    'не дублируй значения в review_reasons и не совмещай applied_method=sound с противоречащими причинами '
                    'вроде creative_adaptation или personal_name_substitution. '
                    'Опирайся на справочные подсказки прошлых глав (включая описание и непрозрачное=false), '
@@ -3494,7 +3559,7 @@ def _a2_word_share_corridor(cumulative_words_before: int) -> tuple[int, int]:
     """Target A2 translated-word share band by cumulative words read before the chapter."""
     words = max(0, cumulative_words_before)
     if words < 10_000:
-        return (78, 85)
+        return (70, 82)
     if words < 25_000:
         return (72, 80)
     if words < 45_000:
@@ -3527,12 +3592,17 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
     if reader_level.strip().lower() == 'a2':
         instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
         instructions += (
-            '\nВерни reader_chapter_summary: адаптируй полную сводку chapter_summary из раздела '
-            '«Принятый повествовательный анализ» для уровня A2 — один абзац из 3–5 коротких '
-            'предложений (<= 12–15 слов на фразу) на языке оригинала (без перевода на русский), '
+            '\nВерни reader_chapter_summary (Previously in Chapter...): адаптируй полную сводку '
+            'chapter_summary из раздела «Принятый повествовательный анализ» для уровня A2 — '
+            'ровно 1 абзац из 3–5 коротких предложений (<= 12–15 слов на фразу) в Present Simple '
+            'на языке оригинала без перевода на русский, используя строго простую лексику A2 '
+            '(без редких слов уровня B2–C1) и стандартные английские кавычки вместо «ёлочек», '
             'строго по фактам всей главы без выдуманных деталей и без усечения до отдельного фрагмента. '
-            'Не используй Present Simple + for + длительность и чётко разграничивай эпиграф или '
-            'вымышленную книгу и реплики персонажей.'
+            'Запрещены точка с запятой «;», пассивные обороты вроде «are lost» (используй простой активный залог) '
+            'и конструкция Present Simple + for + длительность (разбивай время отдельной фразой). '
+            'Чётко разграничивай эпиграф или вставную цитату из вымышленной книги и прямую речь '
+            '(реплики персонажей); для вставной цитаты книги используй явный шаблон вроде '
+            "«At the end, a quote from [Author]'s book explains...»."
         )
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'

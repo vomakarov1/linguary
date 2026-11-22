@@ -3256,5 +3256,318 @@ def test_normalize_a2_present_perfect_catches_inverted_proper_nouns_and_safe_use
     ] == [(t, BlockTreatment.READ_AS_IS) for t in negative_texts]
 
 
+def test_kept_candidate_description_supports_all_five_concept_types() -> None:
+    from linguary.application.analysis_merge import kept_candidate_description
+
+    expected = block_ids(2)
+    for concept_type in (
+        ConceptType.PERSON,
+        ConceptType.PLACE,
+        ConceptType.ORGANIZATION,
+        ConceptType.FICTIONAL_CONCEPT,
+        ConceptType.TERM,
+    ):
+        low = GlossaryCandidateResponse(
+            source_text=f"Entity-{concept_type.value}",
+            type=concept_type,
+            suggested_translation="Перевод",
+            confidence=0.6,
+            model_flagged_review=False,
+            description="Раннее короткое описание.",
+        )
+        high = GlossaryCandidateResponse(
+            source_text=f"Entity-{concept_type.value}",
+            type=concept_type,
+            suggested_translation="Перевод",
+            confidence=0.95,
+            model_flagged_review=False,
+            description="Точное описание понятия.",
+        )
+        empty_higher = GlossaryCandidateResponse(
+            source_text=f"Entity-{concept_type.value}",
+            type=concept_type,
+            suggested_translation="Перевод",
+            confidence=0.99,
+            model_flagged_review=False,
+            description="   ",
+        )
+        assert kept_candidate_description(concept_type, (low, high, empty_higher)) == "Точное описание понятия."
+
+        merged = merge(
+            make_fragment(0, blocks=expected[:1], candidates=(low,)),
+            make_fragment(1, blocks=expected[1:], candidates=(high,)),
+            expected=expected,
+        )
+        assert merged.glossary_candidates[0].description == "Точное описание понятия."
+
+
+def test_merged_instructions_splits_long_solid_paragraphs_guards_quotes_abbrevs_and_filters_fragment_artifacts() -> None:
+    expected = block_ids(2)
+
+    # 1. Solid paragraph with >= 3 sentences splits into numbered points and deduplicates across fragments.
+    solid_f0 = (
+        "Сохранять разговорный ритм диалогов без канцелярита. "
+        "Передавать реплики «Wait. Stop.» и \"No. Never.\" без сглаживания. "
+        "Учитывать сокращения т. д., т. п., т. е., др., ед. ч., мн. ч., см., стр., 1998 г., "
+        "а также обращения Mr. Smith, Mrs. Brown, Ms. Green, Dr. House, St. Peter и инициалы J. K. Rowling."
+    )
+    solid_f1 = (
+        "Сохранять разговорный ритм диалогов без канцелярита. "
+        "Передавать реплики «Wait. Stop.» и \"No. Never.\" без сглаживания. "
+        "Держать напряжённый темп в описаниях."
+    )
+    merged_solid = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=solid_f0),
+        make_fragment(1, blocks=expected[1:], translation_instructions=solid_f1),
+        expected=expected,
+    )
+    solid_lines = merged_solid.translation_instructions.splitlines()
+    assert solid_lines == [
+        "1. Сохранять разговорный ритм диалогов без канцелярита.",
+        "2. Передавать реплики «Wait. Stop.» и \"No. Never.\" без сглаживания.",
+        (
+            "3. Учитывать сокращения т. д., т. п., т. е., др., ед. ч., мн. ч., см., стр., 1998 г., "
+            "а также обращения Mr. Smith, Mrs. Brown, Ms. Green, Dr. House, St. Peter и инициалы J. K. Rowling."
+        ),
+        "4. Держать напряжённый темп в описаниях.",
+    ]
+
+    # 2. Curly quotes “...” are also protected from splitting.
+    curly_f0 = (
+        "Сохранять иронию рассказчика в тексте. "
+        "Передавать фразу “Stop. Look around.” целиком в репликах. "
+        "Избегать лишних пояснений в скобках."
+    )
+    merged_curly = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=curly_f0),
+        make_fragment(1, blocks=expected[1:], translation_instructions="Избегать лишних пояснений в скобках."),
+        expected=expected,
+    )
+    assert merged_curly.translation_instructions.splitlines() == [
+        "1. Сохранять иронию рассказчика в тексте.",
+        "2. Передавать фразу “Stop. Look around.” целиком в репликах.",
+        "3. Избегать лишних пояснений в скобках.",
+    ]
+
+    # 3. Solid 2-sentence paragraph splits when one sentence has ты/вы register rule -> register deduplicates cleanly.
+    reg_f0 = "Ник и Элли обращаются друг к другу на «ты». Сохранять живой темп повествования."
+    reg_f1 = "Ник и Элли обращаются друг к другу на «ты». Не упрощать метафоры в описаниях."
+    merged_reg = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=reg_f0),
+        make_fragment(1, blocks=expected[1:], translation_instructions=reg_f1),
+        expected=expected,
+    )
+    assert merged_reg.translation_instructions.splitlines() == [
+        "1. Ник и Элли обращаются друг к другу на «ты».",
+        "2. Сохранять живой темп повествования.",
+        "3. Не упрощать метафоры в описаниях.",
+    ]
+
+    # 4. Fragment boundary artifacts are split out and filtered when len(fragments) > 1,
+    #    but preserved when len(fragments) == 1.
+    art_f0 = (
+        "Сохранять тревожную интонацию. "
+        "Незнакомца оставлять безымянным до конца фрагмента."
+    )
+    art_f1 = (
+        "Держать короткие рубленые фразы. "
+        "Переводить без подстановки имени из других глав. "
+        "Герой в этом фрагменте остаётся без имени."
+    )
+    merged_multi = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=art_f0),
+        make_fragment(1, blocks=expected[1:], translation_instructions=art_f1),
+        expected=expected,
+    )
+    assert merged_multi.translation_instructions.splitlines() == [
+        "1. Сохранять тревожную интонацию.",
+        "2. Держать короткие рубленые фразы.",
+    ]
+
+    single_expected = block_ids(1)
+    merged_single = merge(
+        make_fragment(0, blocks=single_expected, translation_instructions=art_f0),
+        expected=single_expected,
+    )
+    assert "до конца фрагмента" in merged_single.translation_instructions
+
+
+def test_normalize_a2_it_is_time_and_a2_core_vocab_promotion_and_demotion_guard() -> None:
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить слово."),)
+
+    texts_and_expected = [
+        # _A2_IT_IS_TIME_RE positives -> TRANSLATE
+        ("It's about time you woke up.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("It’s high time we left.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        ("It's time he knew.", BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        # _A2_IT_IS_TIME_RE negatives -> stay READ_AS_IS
+        ("It's time to go.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("It's time for bed.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        ("It's about time to leave.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        # a2_core_vocab: 1..3 uncovered non-core words -> GLOSSARY_ONLY (empty difficulties allowed)
+        ("We could be the only survivors?", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("I bumped into you.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("No rips, no scratches.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        ("Major whoa.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+        # a2_core_vocab: > 3 uncovered non-core words -> TRANSLATE
+        (
+            "The freckled wizard stumbled across the jagged cobblestone.",
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+        ),
+        # a2_core_vocab: covered non-core word stays READ_AS_IS
+        ("We could be the only survivors?", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        # a2_core_vocab: known_names skipped -> stays READ_AS_IS
+        ("Skinjacker waited here.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        # a2_core_vocab: non-Latin script skipped -> stays READ_AS_IS
+        ("Незнакомое редкое слово.", BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        # Demotion guard: non-core words block demotion to READ_AS_IS
+        ("I bumped into you.", BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        ("We could be the only survivors?", BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        # Demotion allowed for core A2 + HP exceptions + known_names
+        ("Nearly.", BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+        ("“Shoo!” said Mr Dursley loudly.", BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+        ("“No,” she said sharply. “Why?”", BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+        ("1 telescope", BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+        ("‘Come here,’ Skinjacker said.", BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+    ]
+
+    blocks = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=i, text=text)
+        for i, (text, _, _) in enumerate(texts_and_expected)
+    )
+    aliases = {f"b{i + 1}": block.id for i, block in enumerate(blocks)}
+    covered_alias = "b12"
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f"b{i + 1}", initial_mode)
+            for i, (_, initial_mode, _) in enumerate(texts_and_expected)
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-covered-survivor",
+                (QuotedSourceAnchorResponse(covered_alias, "survivors"),),
+                covered_alias,
+                "vocabulary",
+                "useful",
+                "explanation",
+                point,
+            ),
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        payload,
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+        known_names=("Skinjacker", "Mr Dursley"),
+    )
+
+    actual = [
+        (texts_and_expected[i][0], normalized.treatment_plan[i].treatment)
+        for i in range(len(texts_and_expected))
+    ]
+    expected = [(text, target_mode) for text, _, target_mode in texts_and_expected]
+    assert actual == expected
+
+    # Without known_names, "Skinjacker waited here." is promoted to GLOSSARY_ONLY.
+    single_block = make_analysis_block(section_id=SECTION_ID, order=99, text="Skinjacker waited here.")
+    without_known = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        ),
+        (single_block,),
+        {"b1": single_block.id},
+        reader_level="a2",
+        english_help=False,
+    )
+    assert without_known.treatment_plan[0].treatment is BlockTreatment.GLOSSARY_ONLY
+
+
+def test_dialogue_quotes_and_a2_normalization_accept_straight_quotes_with_typographic_apostrophe() -> None:
+    from linguary.application.analysis_merge import _DIALOGUE_QUOTES, normalize_a2_dialogue_response
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse
+
+    assert [m.group(0) for m in _DIALOGUE_QUOTES.finditer('"Don’t move!" said Harry.')] == ['"Don’t move!"']
+    assert [m.group(0) for m in _DIALOGUE_QUOTES.finditer('"I’m ready."')] == ['"I’m ready."']
+
+    blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text='"Don’t move!" said Harry.'),
+        make_analysis_block(section_id=SECTION_ID, order=1, text='"I’m ready, if you come now."'),
+        make_analysis_block(section_id=SECTION_ID, order=2, text='"I’m ready."'),
+    )
+    aliases = {"b1": blocks[0].id, "b2": blocks[1].id, "b3": blocks[2].id}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload,
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+        known_names=("Harry",),
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+
+
+def test_split_instruction_sentences_splits_after_terminal_punctuation_before_closing_quote() -> None:
+    from linguary.application.analysis_merge import _split_instruction_sentences
+
+    assert _split_instruction_sentences("Передавать «Wait.» Обращение на «вы» сохранять.") == (
+        "Передавать «Wait.»",
+        "Обращение на «вы» сохранять.",
+    )
+    assert _split_instruction_sentences("Передавать “Wait!” Сохранять короткий ритм.") == (
+        "Передавать “Wait!”",
+        "Сохранять короткий ритм.",
+    )
+    assert _split_instruction_sentences('Передавать "Wait?" Сохранять короткий ритм.') == (
+        'Передавать "Wait?"',
+        "Сохранять короткий ритм.",
+    )
+    assert _split_instruction_sentences("Передавать «Wait.» без сглаживания.") == (
+        "Передавать «Wait.» без сглаживания.",
+    )
+
+    expected = block_ids(2)
+    merged = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions="Передавать «Wait.» Обращение на «вы» сохранять.",
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:],
+            translation_instructions="Обращение на «вы» сохранять.",
+        ),
+        expected=expected,
+    )
+    assert merged.translation_instructions.splitlines() == [
+        "1. Передавать «Wait.»",
+        "2. Обращение на «вы» сохранять.",
+    ]
+
+
+
 
 

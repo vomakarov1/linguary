@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS,
-    payload_digest,
+    A2_CONTENT_PLAN_V7_VERSIONS, payload_digest,
 )
 from linguary.application.recovery import NOTES_POLICY, RecoveryError, RecoveryPolicy, root_manifest
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
@@ -51,12 +51,14 @@ def _verify_conditions(transaction, task, conditions):
             supported_versions.extend((
                 dict(runtime=1, context_builder=3, validators=validators_version, schemas=5, prompts=5),
                 dict(runtime=1, context_builder=4, validators=validators_version, schemas=5, prompts=6),
+                dict(runtime=1, context_builder=5, validators=validators_version, schemas=5, prompts=7),
             ))
         elif (profile == 'legacy-v1' and payload.get('reader_level') == 'a2'
                 and not payload.get('english_help', False)):
             supported_versions.extend((
                 dict(A2_CONTENT_PLAN_V5_VERSIONS),
                 dict(A2_CONTENT_PLAN_V6_VERSIONS),
+                dict(A2_CONTENT_PLAN_V7_VERSIONS),
             ))
     else:
         supported_versions = [expected]

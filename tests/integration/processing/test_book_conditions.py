@@ -159,10 +159,10 @@ async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, le
         assert conditions.payload['reader_level'] == level
         assert conditions.payload['versions'] == {
             'runtime': 1,
-            'context_builder': 4,
+            'context_builder': 5,
             'validators': 4 if level == 'a2' else 3,
             'schemas': 5,
-            'prompts': 6,
+            'prompts': 7,
         }
         assert conditions.payload['prompt_templates']['analysis_contract_version'] == 5
         app.book_runtime.settings_for(conditions)
@@ -812,6 +812,7 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
         A2_CONTENT_PLAN_VERSIONS,
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
     )
     from linguary.composition.book_runtime import effective_content_plan_profile
     from linguary.domain.book_conditions import thaw
@@ -842,8 +843,8 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
         assert effective_content_plan_profile(b2_legacy) == 'legacy-v1'
         app.book_runtime.settings_for(b2_legacy)
 
-        # A2 on legacy-v1 without english_help gets A2_CONTENT_PLAN_V6_VERSIONS
-        a2_v6 = choice(
+        # A2 on legacy-v1 without english_help gets A2_CONTENT_PLAN_V7_VERSIONS
+        a2_v7 = choice(
             'book-1',
             action='reanalyze',
             expected_revision=1,
@@ -852,18 +853,19 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
             reader_level='a2',
             english_help=False,
         )
-        assert a2_v6.payload['profile'] == 'legacy-v1'
-        assert a2_v6.payload['versions'] == A2_CONTENT_PLAN_V6_VERSIONS
-        assert a2_v6.payload['prompt_templates']['analysis_contract_version'] == 5
-        assert effective_content_plan_profile(a2_v6) == 'content-plan-v3'
-        app.book_runtime.settings_for(a2_v6)
+        assert a2_v7.payload['profile'] == 'legacy-v1'
+        assert a2_v7.payload['versions'] == A2_CONTENT_PLAN_V7_VERSIONS
+        assert a2_v7.payload['prompt_templates']['analysis_contract_version'] == 5
+        assert effective_content_plan_profile(a2_v7) == 'content-plan-v3'
+        app.book_runtime.settings_for(a2_v7)
 
-        # Historical v5 A2 snapshot on legacy-v1 remains reproducible
-        a2_v5_payload = thaw(a2_v6.payload)
-        a2_v5_payload['versions'] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
-        a2_v5 = replace(a2_v6, payload=a2_v5_payload)
-        assert effective_content_plan_profile(a2_v5) == 'content-plan-v3'
-        app.book_runtime.settings_for(a2_v5)
+        # Historical v6 and v5 A2 snapshots on legacy-v1 remain reproducible
+        for historical_versions in (A2_CONTENT_PLAN_V6_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS):
+            hist_payload = thaw(a2_v7.payload)
+            hist_payload['versions'] = dict(historical_versions)
+            hist_cond = replace(a2_v7, payload=hist_payload)
+            assert effective_content_plan_profile(hist_cond) == 'content-plan-v3'
+            app.book_runtime.settings_for(hist_cond)
     finally:
         await app.aclose()
 
@@ -911,3 +913,45 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
         app_a2.book_runtime.settings_for(legacy_a2)
     finally:
         await app_a2.aclose()
+
+
+async def test_book_conditions_sequential_analysis_default_override_and_overview_compat(tmp_path):
+    from uuid import uuid4
+    from linguary.application.book_overview import book_overview
+    from linguary.domain.book_conditions import thaw
+
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        assert book_overview(app.unit_of_work, 'book-1').conditions['sequential_analysis'] is True
+
+        with app.unit_of_work.transaction() as tx:
+            book = tx.books.get('book-1')
+            default_cond = app.book_conditions.create(tx, book, 0)
+        assert default_cond.payload['checks']['sequential_analysis'] is True
+        assert app.book_runtime.settings_for(default_cond).checks.sequential_analysis is True
+        assert book_overview(app.unit_of_work, 'book-1').conditions['sequential_analysis'] is True
+
+        with app.unit_of_work.transaction() as tx:
+            book = tx.books.get('book-1')
+            with pytest.raises(ConditionsError, match='invalid_conditions_choice'):
+                app.book_conditions.create(tx, book, 0, sequential_analysis='false')
+
+        with app.unit_of_work.transaction() as tx:
+            book = tx.books.get('book-1')
+            disabled_cond = app.book_conditions.create(tx, book, 0, sequential_analysis=False)
+        assert disabled_cond.payload['checks']['sequential_analysis'] is False
+        assert app.book_runtime.settings_for(disabled_cond).checks.sequential_analysis is False
+        assert book_overview(app.unit_of_work, 'book-1').conditions['sequential_analysis'] is False
+
+        # Historical snapshot without sequential_analysis and with unknown keys in checks
+        legacy_payload = thaw(default_cond.payload)
+        legacy_payload['checks'].pop('sequential_analysis', None)
+        legacy_payload['checks']['unknown_future_flag'] = True
+        legacy_cond = replace(default_cond, id=str(uuid4()), revision=3, payload=legacy_payload)
+        with app.unit_of_work.transaction() as tx:
+            tx.work.add_conditions(legacy_cond)
+        assert app.book_runtime.settings_for(legacy_cond).checks.sequential_analysis is True
+        assert book_overview(app.unit_of_work, 'book-1').conditions['sequential_analysis'] is True
+    finally:
+        await app.aclose()

@@ -675,7 +675,12 @@ async def test_late_pedagogical_split_preserves_parent_note_budget(stored_book):
             if request.stage == NARRATIVE:
                 reply = narrative(aliases)
             else:
-                budget = int(re.search(r'Бюджет обязательных заметок этого анализа: (\d+)', request.input_text).group(1))
+                budget = int(
+                    re.search(
+                        r'Бюджет обязательных заметок(?:\s+\([^)]+\))?\s+этого анализа:\s+(?:не более\s+)?(\d+)',
+                        request.input_text,
+                    ).group(1)
+                )
                 self.note_quotas.append(budget)
                 if not self.did_split and request.ordered_block_ids[0] == section.blocks[9].id:
                     self.did_split = True
@@ -1279,7 +1284,7 @@ async def test_uniform_segments_collapse_to_block_treatment(stored_book):
 
 
 async def test_description_kept_for_person_and_place_only(stored_book):
-    """A candidate description survives only for person and place."""
+    """A candidate description survives for all five ConceptType values."""
     import json
 
     _, uow, _ = stored_book
@@ -1309,9 +1314,9 @@ async def test_description_kept_for_person_and_place_only(stored_book):
     assert by_source == {
         "Holmes": "Детектив с Бейкер-стрит.",
         "Baker Street": "Улица в Лондоне.",
-        "actual": "",
-        "Scotland Yard": "",
-        "speckled band": "",
+        "actual": "ложный друг: не «актуальный».",
+        "Scotland Yard": "Лондонская полиция.",
+        "speckled band": "Вымышленный предмет.",
     }
 
 
@@ -1532,7 +1537,7 @@ async def test_a2_elementary_short_dialogues_and_non_dialogue_lines_keep_mode(st
         ('‘Please come over here right now,’ she said.', 'READ_AS_IS', BlockType.PARAGRAPH),
         ('The old gardener walked slowly across the empty yard before noon.', 'GLOSSARY_ONLY', BlockType.PARAGRAPH),
         ('He demanded an answer if the old gardener walked slowly across the yard.', 'GLOSSARY_ONLY', BlockType.PARAGRAPH),
-        ('It blinked.', 'READ_AS_IS', BlockType.PARAGRAPH),
+        ('It stopped.', 'READ_AS_IS', BlockType.PARAGRAPH),
         (_LONG_QUOTE, 'READ_AS_IS', BlockType.LIST_ITEM),
     )
     blocks = tuple(_block(index, text, type=block_type) for index, (text, _mode, block_type) in enumerate(cases))
@@ -2280,7 +2285,16 @@ def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_
         BlockTreatment.GLOSSARY_ONLY,   # She moaned.
         BlockTreatment.TRANSLATE,       # I suppose so.
         BlockTreatment.GLOSSARY_ONLY,
-        *[BlockTreatment.READ_AS_IS] * len(stay_lines),
+        BlockTreatment.READ_AS_IS,      # 'Up! Get up! Now!'
+        BlockTreatment.READ_AS_IS,      # 'A what?'
+        BlockTreatment.READ_AS_IS,      # 'Nearly,' said Harry.
+        BlockTreatment.READ_AS_IS,      # 'Shoo!' said Mr Dursley loudly.
+        BlockTreatment.READ_AS_IS,      # 'No,' she said sharply. 'Why?'
+        BlockTreatment.GLOSSARY_ONLY,   # It blinked. (non-core A2)
+        BlockTreatment.READ_AS_IS,      # Fancy that.
+        BlockTreatment.READ_AS_IS,      # How are you?
+        BlockTreatment.GLOSSARY_ONLY,   # I suppose he left. (non-core A2)
+        BlockTreatment.GLOSSARY_ONLY,   # It winked at the boy... (non-core A2)
         BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.GLOSSARY_ONLY,
     ]
@@ -2354,6 +2368,7 @@ def test_a2_translate_block_drops_trivial_sounding_relieved_grammar_difficulty()
     )
     normalized = normalize_a2_dialogue_response(
         payload, blocks, aliases, reader_level='a2', english_help=False,
+        known_names=('Hagrid', 'Dumbledore'),
     )
     assert [item.treatment for item in normalized.treatment_plan] == [
         BlockTreatment.TRANSLATE,
@@ -2695,7 +2710,7 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
         payload, blocks, aliases, reader_level='a2', english_help=False,
     )
     assert [item.treatment for item in normalized.treatment_plan] == [
-        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.TRANSLATE,
         BlockTreatment.TRANSLATE,
         BlockTreatment.TRANSLATE,
@@ -3136,6 +3151,7 @@ def test_a2_demotes_elementary_non_dialogue_item_like_1_telescope():
     )
     normalized = normalize_a2_dialogue_response(
         payload, blocks, aliases, reader_level='a2', english_help=False,
+        known_names=('Hagrid', 'Harry'),
     )
     assert [item.treatment for item in normalized.treatment_plan] == [
         BlockTreatment.READ_AS_IS,     # b1: list item without difficulties
@@ -4307,5 +4323,662 @@ def test_prior_chapter_topics_bounds_window_and_cap_and_handles_parallel_seed_mo
     assert _prior_chapter_topics(
         document, target, small_analyses, parallel_batch=True, seed_active=False,
     ) == ()
+
+
+async def test_narrative_and_pedagogical_use_separate_fragment_budgets(stored_book, monkeypatch):
+    """Narrative uses scaled _narrative_max_fragment_blocks() + block_overhead=450; pedagogical keeps _max_fragment_blocks."""
+    _, uow, _ = stored_book
+    blocks = tuple(_block(i, f'Sentence number {i} about Holmes.') for i in range(30))
+    _store(uow, blocks)
+
+    class AutoClient:
+        def __init__(self):
+            self.narrative_sizes = []
+            self.pedagogical_sizes = []
+
+        async def generate(self, request):
+            aliases = tuple(f'b{i}' for i in range(1, len(request.ordered_block_ids) + 1))
+            if request.stage == NARRATIVE:
+                self.narrative_sizes.append(len(aliases))
+                reply = narrative(aliases)
+            else:
+                self.pedagogical_sizes.append(len(aliases))
+                reply = pedagogical(aliases)
+            return await FakeLLMClient([reply]).generate(request)
+
+    ctx = builder('b2')
+    sha_max_blocks: list[int] = []
+    original_sha = ctx.narrative_input_sha256
+
+    def spy_sha(*args, **kwargs):
+        sha_max_blocks.append(kwargs.get('max_fragment_blocks', -1))
+        return original_sha(*args, **kwargs)
+
+    monkeypatch.setattr(ctx, 'narrative_input_sha256', spy_sha)
+
+    client = AutoClient()
+    # max_output_tokens=13_000 -> max(20, 13_000 // 650) == 20 < max_fragment_blocks=50.
+    ac = scenario(uow, client, context=ctx, max_fragment_blocks=50, max_output_tokens=13_000)
+    assert ac._narrative_max_fragment_blocks() == 20
+    result = await ac(COMMAND)
+    assert result.analysis.is_complete
+    assert sha_max_blocks == [20]
+    assert len(client.narrative_sizes) == 2
+    assert sum(client.narrative_sizes) == 30
+    assert all(size <= 20 for size in client.narrative_sizes)
+    assert client.pedagogical_sizes == [30]
+
+
+async def test_staged_fragment_cache_recovers_split_for_any_fragment_with_stable_header_sha(stored_book):
+    """Sub-fragment split recovery works on non-first fragments and _normalize_fragment_header_for_sha avoids misses when total grows."""
+    from linguary.application.use_cases.analyze_chapter import _normalize_fragment_header_for_sha
+
+    header_1_of_2 = 'Фрагмент главы: 1-й из 2. Остальные фрагменты главы тебе не показаны.'
+    header_1_of_3 = 'Фрагмент главы: 1-й из 3. Остальные фрагменты главы тебе не показаны.'
+    assert _normalize_fragment_header_for_sha(header_1_of_2) == _normalize_fragment_header_for_sha(header_1_of_3)
+
+    _, uow, _ = stored_book
+    # 8 blocks with max_fragment_blocks=4 -> initial fragments [F0(0..3), F1(4..7)].
+    blocks = tuple(_block(i, f'Block {i} about Holmes on Baker Street.') for i in range(8))
+    _store(uow, blocks)
+
+    # Run 1: F0 succeeds (cached as 1-of-2); F1 truncates -> splits into [F1a(4..5), F1b(6..7)];
+    # F1a succeeds (cached as 2-of-3); F1b fails with transport error.
+    class FailOnF1bClient:
+        def __init__(self):
+            self.calls = []
+            self.truncated_once = False
+
+        async def generate(self, request):
+            self.calls.append((request.stage, request.ordered_block_ids))
+            aliases = tuple(f'b{i}' for i in range(1, len(request.ordered_block_ids) + 1))
+            if request.stage == NARRATIVE:
+                if request.ordered_block_ids == tuple(b.id for b in blocks[4:8]) and not self.truncated_once:
+                    self.truncated_once = True
+                    raise LLMResponseFormatError('truncated F1', truncated=True)
+                if request.ordered_block_ids == tuple(b.id for b in blocks[6:8]):
+                    raise LLMTransportError('network drop on F1b')
+                return await FakeLLMClient([narrative(aliases)]).generate(request)
+            return await FakeLLMClient([pedagogical(aliases)]).generate(request)
+
+    first_client = FailOnF1bClient()
+    with pytest.raises(LLMTransportError):
+        await scenario(uow, first_client, max_fragment_blocks=4)(COMMAND)
+    assert len(first_client.calls) == 4  # F0, F1(trunc), F1a, F1b(err)
+
+    # Run 2: F0 (now 1-of-3!) AND F1a (2-of-3) BOTH hit cache -> only F1b calls NARRATIVE LLM!
+    class ResumeClient:
+        def __init__(self):
+            self.narrative_calls = []
+            self.narrative_inputs = []
+
+        async def generate(self, request):
+            aliases = tuple(f'b{i}' for i in range(1, len(request.ordered_block_ids) + 1))
+            if request.stage == NARRATIVE:
+                self.narrative_calls.append(request.ordered_block_ids)
+                self.narrative_inputs.append(request.input_text)
+                return await FakeLLMClient([narrative(aliases)]).generate(request)
+            return await FakeLLMClient([pedagogical(aliases)]).generate(request)
+
+    resume_client = ResumeClient()
+    result = await scenario(uow, resume_client, max_fragment_blocks=4)(COMMAND)
+    assert result.analysis.is_complete
+    # Only F1b (blocks 6..7) was requested from LLM for narrative!
+    assert resume_client.narrative_calls == [tuple(b.id for b in blocks[6:8])]
+    # LLM request itself still gets the real fragment position header untouched.
+    assert 'Фрагмент главы: 3-й из 3. Остальные фрагменты главы тебе не показаны.' in resume_client.narrative_inputs[0]
+
+
+async def test_staged_narrative_candidates_findings_and_narrative_instructions_flow(stored_book):
+    """FragmentFindings.candidates flows to narrative fragment 2; narrative_instructions flows to pedagogical prompt and sha."""
+    import json
+
+    _, uow, _ = stored_book
+    blocks = tuple(_block(i, f'Paragraph {i} with Everlost and Nick.') for i in range(4))
+    _store(uow, blocks)
+
+    frag1_narrative = json.loads(narrative(('b1', 'b2')).content)
+    frag1_narrative['translation_instructions'] = 'Keep Nick informal and never spoil Everlost.'
+    frag1_narrative['glossary_candidates'] = [
+        dict(
+            source_text='Everlost',
+            type='place',
+            suggested_translation='Вечноземье',
+            confidence=0.92,
+            model_flagged_review=False,
+            note='мир между мирами',
+            description='Промежуточный мир для погибших детей.',
+        )
+    ]
+    frag2_narrative = json.loads(narrative(('b1', 'b2')).content)
+    frag2_narrative['translation_instructions'] = 'Keep short punchy dialogue.'
+    frag2_narrative['glossary_candidates'] = []
+
+    client = FakeLLMClient([
+        FakeReply.of_payload(frag1_narrative),
+        FakeReply.of_payload(frag2_narrative),
+        pedagogical(('b1', 'b2')),
+        pedagogical(('b1', 'b2')),
+    ])
+    ctx = builder('b2')
+    result = await scenario(uow, client, context=ctx, max_fragment_blocks=2)(COMMAND)
+    assert result.analysis.is_complete
+
+    narrative_reqs = [r for r in client.requests if r.stage == NARRATIVE]
+    pedagogical_reqs = [r for r in client.requests if r.stage == PEDAGOGICAL]
+    assert len(narrative_reqs) == 2
+    assert 'Кандидаты глоссария из предыдущих частей этой главы:' in narrative_reqs[1].input_text
+    assert 'Everlost [place] -> Вечноземье' in narrative_reqs[1].input_text
+    assert 'Промежуточный мир для погибших детей.' in narrative_reqs[1].input_text
+
+    assert len(pedagogical_reqs) == 2
+    for req in pedagogical_reqs:
+        assert 'Указания переводчику:' in req.input_text
+        assert 'Keep Nick informal and never spoil Everlost.' in req.input_text
+
+    # Changing narrative_instructions changes pedagogical_input_sha256.
+    with uow.transaction() as tx:
+        doc = tx.documents.get(BOOK_ID)
+    sec = doc.sections[0]
+    sha_a = ctx.pedagogical_input_sha256(
+        doc, sec, narrative_output_sha256='abc', narrative_summary='Summary',
+        narrative_instructions='Rule A',
+    )
+    sha_b = ctx.pedagogical_input_sha256(
+        doc, sec, narrative_output_sha256='abc', narrative_summary='Summary',
+        narrative_instructions='Rule B',
+    )
+    assert sha_a != sha_b
+
+
+async def test_staged_narrative_validation_passes_name_policy_and_preserves_v6_cache(stored_book):
+    """validate_narrative_response receives name_translation_policy on fresh runs, skips it on V6 cache, and enforces on V7 cache."""
+    import json
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    _, uow, _ = stored_book
+    _store(uow, (_block(0, 'The freckled boy called Longbottom walked in.'),))
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
+    ctx = builder('b2', name_translation_policy=policy)
+
+    conflicting_narrative = json.loads(narrative(('b1',)).content)
+    conflicting_narrative['glossary_candidates'] = [
+        dict(
+            source_text='Longbottom',
+            type='person',
+            suggested_translation='Лонгботтом',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+            name_translation_assessment=dict(
+                opaque_name=False,
+                applied_method='sound',
+                eligible_without_review=True,
+                review_reasons=[],
+                rationale='Сохраняем звучание.',
+            ),
+        )
+    ]
+
+    # 1. Fresh run with MEANING policy rejects transparent SOUND eligible_without_review=True.
+    with pytest.raises(ResultValidationError, match='review_reasons'):
+        await scenario(
+            uow,
+            FakeLLMClient([FakeReply.of_payload(conflicting_narrative)]),
+            context=ctx,
+            name_translation_policy=policy,
+        )(COMMAND)
+
+    # 2. Pre-save a cached V6 narrative pass with the same conflicting payload: V6 conditions (prompts=6) must NOT reject it!
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    v6_id = str(uuid4())
+    v6_conditions = BookConditions(
+        id=v6_id,
+        book_id=BOOK_ID,
+        revision=1,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.work.add_conditions(v6_conditions)
+        doc = tx.documents.get(BOOK_ID)
+    sec = doc.sections[0]
+
+    # Save cached narrative pass directly using the exact hash expected for this section.
+    ac_v6 = scenario(
+        uow,
+        FakeLLMClient([pedagogical(('b1',))]),
+        context=ctx,
+        name_translation_policy=policy,
+        conditions_id=v6_id,
+    )
+    from linguary.application.analysis_pass_cache import decode_pass
+    from linguary.application.use_cases.analyze_chapter import _pass_model_dependencies
+
+    cached_conflict_raw = json.loads(narrative((sec.blocks[0].id,)).content)
+    cached_conflict_raw['glossary_candidates'] = conflicting_narrative['glossary_candidates']
+    decoded_conflict = decode_pass(
+        {'schema_version': 1, 'response': cached_conflict_raw},
+        narrative=True,
+    )
+    nar_hash = ctx.narrative_input_sha256(
+        doc,
+        sec,
+        (),
+        (),
+        (),
+        model_dependencies=_pass_model_dependencies(v6_conditions.payload, AnalysisPassKind.NARRATIVE),
+        max_fragment_blocks=ac_v6._narrative_max_fragment_blocks(),
+    )
+    ac_v6._save_pass(COMMAND, AnalysisPassKind.NARRATIVE, nar_hash, decoded_conflict, v6_id)
+
+    v6_result = await ac_v6(COMMAND)
+    assert v6_result.analysis.is_complete
+
+    # 3. With V7 conditions (prompts=7), cached narrative pass IS validated against MEANING policy and rejected.
+    v7_id = str(uuid4())
+    v7_conditions = BookConditions(
+        id=v7_id,
+        book_id=BOOK_ID,
+        revision=2,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 5, 'validators': 4, 'schemas': 5, 'prompts': 7},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.work.add_conditions(v7_conditions)
+    ac_v7 = scenario(
+        uow,
+        FakeLLMClient([]),
+        context=ctx,
+        name_translation_policy=policy,
+        conditions_id=v7_id,
+    )
+    with pytest.raises(Exception, match='review_reasons'):
+        await ac_v7(COMMAND)
+
+
+async def test_staged_a2_normalization_passes_known_names_fresh_cached_and_assemble(stored_book):
+    """known_names (narrative candidates + scene participants) flow into _normalize_a2_dialogue in fresh, cached, and assemble paths."""
+    import json
+
+    _, uow, _ = stored_book
+    # 'Hagrid' at sentence start would be flagged as non-core A2 unless present in known_names!
+    blocks = (_block(0, 'Hagrid was watching him sadly.'),)
+    _store(uow, blocks)
+
+    nar_raw = json.loads(narrative(('b1',)).content)
+    nar_raw['scenes'][0]['participants'] = ['Hagrid']
+    nar_raw['glossary_candidates'] = [
+        dict(
+            source_text='Hagrid',
+            type='person',
+            suggested_translation='Хагрид',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    # Model returns TRANSLATE for short elementary line 'Hagrid was watching him sadly.';
+    # with known_names=('Hagrid', ...), A2 normalization demotes it to READ_AS_IS!
+    ped_reply = pedagogical(
+        ('b1',),
+        summary='Hagrid watches the boy.',
+        treatment_plan=[dict(source_block_id='b1', treatment='TRANSLATE')],
+    )
+    ctx = builder('a2')
+    result = await scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(nar_raw), ped_reply]),
+        context=ctx,
+    )(COMMAND)
+    assert [i.treatment for i in result.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
+
+    # Cached re-run exercises _assemble_staged with known_names and keeps READ_AS_IS with 0 LLM calls.
+    cached_res = await scenario(uow, FakeLLMClient([]), context=ctx)(COMMAND)
+    assert cached_res.attempts == 0
+    assert [i.treatment for i in cached_res.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
+
+
+async def test_staged_a2_vocab_known_names_excludes_terms_fictional_concepts_and_translations(stored_book):
+    """A2 known_names includes only PERSON/PLACE/ORGANIZATION source forms + scene participants, excluding TERM, FICTIONAL_CONCEPT, and translations."""
+    import json
+    from linguary.application.use_cases.analyze_chapter import (
+        _a2_vocab_known_names_from_glossary,
+        _a2_vocab_known_names_with_narrative,
+    )
+    from linguary.domain import ConceptType, GlossaryCandidate, TermConcept, TermStatus, TermVariant
+
+    # Unit checks on helpers
+    acc = (
+        GlossaryCandidate(
+            id='c1', analysis_id='a1', source_text='Allie', type=ConceptType.PERSON,
+            suggested_translation='Элли', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c2', analysis_id='a1', source_text='Everlost', type=ConceptType.PLACE,
+            suggested_translation='Вечноземье', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c3', analysis_id='a1', source_text='Afterlights', type=ConceptType.FICTIONAL_CONCEPT,
+            suggested_translation='Послесветы', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+        GlossaryCandidate(
+            id='c4', analysis_id='a1', source_text='skinjacker', type=ConceptType.TERM,
+            suggested_translation='скинджекер', confidence=0.95, model_flagged_review=False, requires_review=False,
+        ),
+    )
+    concepts = (
+        TermConcept(
+            id='t1', book_id=BOOK_ID, type=ConceptType.ORGANIZATION, canonical_source_text='Gringotts',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t1', 'ru', 'Гринготтс', TermStatus.APPROVED),),
+        ),
+        TermConcept(
+            id='t2', book_id=BOOK_ID, type=ConceptType.TERM, canonical_source_text='deadspot',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t2', 'ru', 'мёртвая точка', TermStatus.APPROVED),),
+        ),
+    )
+    vocab_names = _a2_vocab_known_names_from_glossary(acc, concepts, ())
+    assert vocab_names == ('Allie', 'Everlost', 'Gringotts')
+    assert 'Afterlights' not in vocab_names
+    assert 'skinjacker' not in vocab_names
+    assert 'deadspot' not in vocab_names
+    assert 'Элли' not in vocab_names
+    assert 'Гринготтс' not in vocab_names
+
+    # Staged A2 end-to-end check: skinjacker (TERM) and Afterlights (FICTIONAL_CONCEPT) still lift READ_AS_IS -> GLOSSARY_ONLY,
+    # while Allie (PERSON) stays READ_AS_IS.
+    _, uow, _ = stored_book
+    blocks = (
+        _block(0, 'He is a skinjacker.'),
+        _block(1, 'Afterlights live here.'),
+        _block(2, 'Allie is here.'),
+    )
+    _store(uow, blocks)
+
+    nar_raw = json.loads(narrative(('b1', 'b2', 'b3')).content)
+    nar_raw['scenes'][0]['participants'] = ['Allie']
+    nar_raw['glossary_candidates'] = [
+        dict(
+            source_text='Allie', type='person', suggested_translation='Элли',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+        dict(
+            source_text='Afterlights', type='fictional_concept', suggested_translation='Послесветы',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+        dict(
+            source_text='skinjacker', type='term', suggested_translation='скинджекер',
+            confidence=0.95, model_flagged_review=False, note='',
+        ),
+    ]
+    ped_reply = pedagogical(
+        ('b1', 'b2', 'b3'),
+        summary='Allie is here.',
+        treatment_plan=[
+            dict(source_block_id='b1', treatment='READ_AS_IS'),
+            dict(source_block_id='b2', treatment='READ_AS_IS'),
+            dict(source_block_id='b3', treatment='READ_AS_IS'),
+        ],
+    )
+    ctx = builder('a2')
+    result = await scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(nar_raw), ped_reply]),
+        context=ctx,
+    )(COMMAND)
+    assert [i.treatment for i in result.analysis.treatment_plan.items] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # Single-pass A2 (_request_analysis) also adds scenes[].participants and excludes TERM/FICTIONAL_CONCEPT.
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        GlossaryCandidateResponse,
+        QuotedContentPlanResponse,
+        QuotedSceneResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.application.ports.llm import LLMResponse
+
+    single_blocks = (
+        _block(0, 'Hagrid is here.'),
+        _block(1, 'He is a skinjacker.'),
+    )
+    _store(uow, single_blocks)
+
+    class SinglePassSceneClient:
+        async def generate(self, request):
+            return LLMResponse(
+                provider='fake',
+                model='fake',
+                payload=ChapterAnalysisResponse(
+                    translation_instructions='Keep tone.',
+                    chapter_summary='Hagrid is here.',
+                    glossary_candidates=(
+                        GlossaryCandidateResponse(
+                            source_text='skinjacker',
+                            type=ConceptType.TERM,
+                            suggested_translation='скинджекер',
+                            confidence=0.95,
+                            model_flagged_review=False,
+                        ),
+                    ),
+                    treatment_plan=(
+                        TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),
+                        TreatmentPlanItemResponse('b2', BlockTreatment.READ_AS_IS),
+                    ),
+                    content_plan=QuotedContentPlanResponse(
+                        scenes=(
+                            QuotedSceneResponse(
+                                start_block_id='b1',
+                                end_block_id='b2',
+                                summary='Хагрид здесь.',
+                                location='Дом',
+                                participants=('Hagrid',),
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+    single = await AnalyzeChapter(
+        unit_of_work=uow,
+        llm_client=SinglePassSceneClient(),
+        language_detector=FakeLanguageDetector(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        glossary_confidence_threshold=.8,
+        context_builder=ctx,
+        staged_analysis=False,
+    )(COMMAND)
+    assert [i.treatment for i in single.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+
+
+async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh_and_v7(stored_book):
+    """cached_frag skips V7 name policy checks under frozen V6 conditions (prompts < 7), while fresh LLM replies and V7 cache still enforce MEANING."""
+    import json
+    from datetime import UTC, datetime
+    from uuid import uuid4
+    from linguary.application.analysis_merge import ChapterFragment
+    from linguary.application.analysis_pass_cache import decode_pass
+    from linguary.application.use_cases.analyze_chapter import (
+        _normalize_fragment_header_for_sha,
+        _pass_model_dependencies,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    _, uow, _ = stored_book
+    blocks = (
+        _block(0, 'The boy called Longbottom walked in.'),
+        _block(1, 'Holmes greeted him warmly.'),
+    )
+    _store(uow, blocks)
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
+    ctx = builder('b2', name_translation_policy=policy)
+
+    conflicting_candidate = dict(
+        source_text='Longbottom',
+        type='person',
+        suggested_translation='Лонгботтом',
+        confidence=0.95,
+        model_flagged_review=False,
+        note='',
+        name_translation_assessment=dict(
+            opaque_name=False,
+            applied_method='sound',
+            eligible_without_review=True,
+            review_reasons=[],
+            rationale='Сохраняем звучание.',
+        ),
+    )
+
+    v6_id = str(uuid4())
+    v6_conditions = BookConditions(
+        id=v6_id,
+        book_id=BOOK_ID,
+        revision=1,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.work.add_conditions(v6_conditions)
+        doc = tx.documents.get(BOOK_ID)
+    sec = doc.sections[0]
+
+    ac_v6 = scenario(
+        uow,
+        FakeLLMClient([narrative(('b1',)), pedagogical(('b1',)), pedagogical(('b1',))]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v6_id,
+    )
+    nar_hash = ctx.narrative_input_sha256(
+        doc,
+        sec,
+        (),
+        (),
+        (),
+        model_dependencies=_pass_model_dependencies(v6_conditions.payload, AnalysisPassKind.NARRATIVE),
+        max_fragment_blocks=ac_v6._narrative_max_fragment_blocks(),
+    )
+    frag0 = ChapterFragment(order=0, blocks=(sec.blocks[0],))
+    frag0_ctx = ctx.for_chapter_narrative_analysis(
+        doc, sec, (), (), (), fragment=frag0, fragment_count=2, findings=None,
+    )
+    frag0_scope_key = f'{sec.blocks[0].id}:{sec.blocks[0].id}'
+    frag0_sha = canonical_sha(
+        dict(
+            schema_version=1,
+            chapter_input_sha256=nar_hash,
+            scope_key=frag0_scope_key,
+            instructions=frag0_ctx.request.instructions,
+            input=_normalize_fragment_header_for_sha(frag0_ctx.request.input_text),
+            contract_version=frag0_ctx.request.contract_version,
+            before_you_read_limit=frag0_ctx.before_you_read_limit,
+            notes=frag0_ctx.language_notes_per_chapter,
+        )
+    )
+    frag0_raw = json.loads(narrative(('b1',)).content)
+    frag0_raw['glossary_candidates'] = [conflicting_candidate]
+    decoded_frag0 = decode_pass({'schema_version': 1, 'response': frag0_raw}, narrative=True)
+    ac_v6._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        frag0_sha,
+        decoded_frag0,
+        v6_id,
+        scope_key=frag0_scope_key,
+    )
+
+    # 1. Under V6, fresh fragment 2 returning conflicting candidate is STILL rejected.
+    bad_fresh_frag2 = json.loads(narrative(('b1',)).content)
+    bad_fresh_frag2['glossary_candidates'] = [
+        {**conflicting_candidate, 'source_text': 'Fairweather', 'suggested_translation': 'Фэрвезер'}
+    ]
+    ac_v6_bad_fresh = scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(bad_fresh_frag2)]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v6_id,
+    )
+    with pytest.raises(ResultValidationError, match='review_reasons'):
+        await ac_v6_bad_fresh(COMMAND)
+
+    # 2. Under V6, cached_frag 1 with legacy SOUND+transparent candidate succeeds when fragment 2 is valid.
+    v6_result = await ac_v6(COMMAND)
+    assert v6_result.analysis.is_complete
+    assert [c.source_text for c in v6_result.analysis.glossary_candidates] == ['Longbottom']
+
+    # 3. Under V7 (prompts == 7), cached_frag 1 with conflicting candidate IS rejected.
+    v7_id = str(uuid4())
+    v7_conditions = BookConditions(
+        id=v7_id,
+        book_id=BOOK_ID,
+        revision=2,
+        payload={
+            'schema_version': 1,
+            'versions': {'runtime': 1, 'context_builder': 5, 'validators': 4, 'schemas': 5, 'prompts': 7},
+            'models': {'analysis': 'm'},
+            'llm_parameters': {'model': 'm'},
+            'route': {'provider': 'fake', 'base_url': ''},
+        },
+        created_at=datetime.now(UTC),
+    )
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
+        tx.work.add_conditions(v7_conditions)
+    ac_v7 = scenario(
+        uow,
+        FakeLLMClient([]),
+        context=ctx,
+        max_fragment_blocks=1,
+        name_translation_policy=policy,
+        conditions_id=v7_id,
+    )
+    ac_v7._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        frag0_sha,
+        decoded_frag0,
+        v7_id,
+        scope_key=frag0_scope_key,
+    )
+    with pytest.raises(Exception, match='review_reasons'):
+        await ac_v7(COMMAND)
+
+
 
 

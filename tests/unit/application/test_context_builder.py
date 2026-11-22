@@ -1196,7 +1196,9 @@ _SPEECH_STYLE_KIND = (
 )
 _PARODY_KIND = "parody — в required_points назвать исходный текст."
 _DESCRIPTION_RULE = (
-    "description для person и place пишется на языке перевода (ru), "
+    "description заполняй для всех 5 типов "
+    "(person, place, organization, fictional_concept, term) — "
+    "1–2 предложения на языке перевода (ru), "
     "строго до первого упоминания в данной главе "
     "и по прошлым главам, без спойлеров текущей и будущих глав."
 )
@@ -1382,7 +1384,9 @@ def test_narrative_instructions_require_target_language_description() -> None:
     )
 
     german = templates["narrative_analysis"]
-    assert "description для person и place пишется на языке перевода (de)" in german
+    assert "description заполняй для всех 5 типов" in german
+    assert "(person, place, organization, fictional_concept, term)" in german
+    assert "языке перевода (de)" in german
     assert "строго до первого упоминания в данной главе" in german
     assert "без спойлеров текущей и будущих глав" in german
     assert "языке перевода (ru)" in russian["narrative_analysis"]
@@ -1421,14 +1425,16 @@ def test_a2_pedagogical_instructions_include_grammar_support_and_strict_dialogue
         "авторских предложений действия и небазовых глаголов речи "
         "(demanded, murmured, snapped)"
     )
-    promote = (
+    removed_promote = (
         "Реплики длиннее 8 слов либо сочетающие прямую речь с авторским действием "
         "или сложной ремаркой получают TRANSLATE."
     )
     for instructions in (templates["pedagogical_analysis"], live.request.instructions):
         assert grammar in instructions
         assert window in instructions
-        assert promote in instructions
+        assert removed_promote not in instructions
+        assert "до 15 слов" in instructions
+        assert "до 45 слов" in instructions
     assert grammar not in b1["pedagogical_analysis"]
     assert "элементарной реплике" not in b1["pedagogical_analysis"]
 
@@ -2067,6 +2073,10 @@ def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques()
         "не больше 1–2 заметок на абзац",
         "reader_chapter_summary",
         "Previously in Chapter",
+    )
+    a2_summary_rules = (
+        "reader_chapter_summary",
+        "Previously in Chapter",
         "Present Simple",
         "стандартные английские кавычки",
         "«ёлочек»",
@@ -2097,6 +2107,9 @@ def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques()
             assert phrase in instructions
     for instructions in (pedagogical, a2_pedagogy, templates["pedagogical_analysis"]):
         for phrase in pedagogical_rules:
+            assert phrase in instructions
+    for instructions in (a2_pedagogy, templates["pedagogical_analysis"]):
+        for phrase in a2_summary_rules:
             assert phrase in instructions
     for instructions in (
         _CONTENT_PLAN_PROCESSING_V3,
@@ -2302,7 +2315,7 @@ def test_a2_word_share_progression_in_input_text_and_sha() -> None:
     )
 
     expected_bands = (
-        (0, "78–85%"),
+        (0, "70–82%"),
         (12_000, "72–80%"),
         (30_000, "68–76%"),
         (50_000, "62–72%"),
@@ -2359,17 +2372,21 @@ def test_a2_word_share_progression_in_input_text_and_sha() -> None:
         narrative_summary="Harry arrives at the hut.",
         cumulative_words_before=30_000,
     )
-    assert "78–85%" not in b2_ctx.request.input_text
+    assert "70–82%" not in b2_ctx.request.input_text
     assert "68–76%" not in b2_ctx.request.input_text
 
     # Prompt updates for false_friend, strict A2 reader_chapter_summary, contextual notes, and ты/вы pairs.
+    from linguary.application.context_builder import _pedagogical_instructions
+
     ped = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS
+    a2_ped = _pedagogical_instructions("en", "ru", "a2", False)
     assert _FALSE_FRIEND_KIND in ped
     assert _SPEECH_STYLE_KIND in ped
     for example in ("actual", "magazine", "sympathetic"):
         assert example in ped
-    assert "3–5" in ped
-    assert "общеязыковых слов" in ped
+    assert "3–5" in a2_ped
+    assert "общеязыковых слов" not in ped
+    assert "общеязыковых слов" not in a2_ped
 
     a2_guidance = _reader_level_treatment_guidance("a2")
     assert "GLOSSARY_ONLY" in a2_guidance
@@ -2452,11 +2469,14 @@ def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
     assert scaled_chapter_note_limit(300, 4) == 4
     assert scaled_chapter_note_limit(2, 4) == 2
     assert scaled_chapter_note_limit(2, 8) == 2
-    assert scaled_chapter_note_limit(100, 8) == 8
-    assert scaled_chapter_note_limit(250, 8) == 10
-    assert scaled_chapter_note_limit(300, 8) == 12
-    assert scaled_chapter_note_limit(400, 8) == 16
-    assert scaled_chapter_note_limit(600, 8) == 16
+    assert scaled_chapter_note_limit(35, 8) == 8
+    assert scaled_chapter_note_limit(60, 8) == 9
+    assert scaled_chapter_note_limit(100, 8) == 12
+    assert scaled_chapter_note_limit(168, 8) == 18
+    assert scaled_chapter_note_limit(250, 8) == 18
+    assert scaled_chapter_note_limit(300, 8) == 18
+    assert scaled_chapter_note_limit(400, 8) == 18
+    assert scaled_chapter_note_limit(600, 8) == 18
     assert scaled_chapter_note_limit(300, 20) == 20
 
     long_blocks = tuple(
@@ -2469,7 +2489,7 @@ def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
         for i in range(300)
     )
     long_section = make_analysis_section(section_id="sec-long", title="Chapter 5", blocks=long_blocks)
-    assert chapter_note_limit(long_section, 8) == 12
+    assert chapter_note_limit(long_section, 8) == 18
     assert chapter_note_limit(long_section, 4) == 4
 
     plan = TreatmentPlan.of_treatments(
@@ -2500,9 +2520,9 @@ def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
         content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=ten_difficulties),
         scenes=(Scene("s1", 0, long_section.blocks[0].id, long_section.blocks[-1].id, "Long scene"),),
     )
-    assert _scene_notes_budget(analysis_ten, long_section, unit, per_chapter=8) == 12
+    assert _scene_notes_budget(analysis_ten, long_section, unit, per_chapter=8) == 18
 
-    thirteen_difficulties = tuple(
+    nineteen_difficulties = tuple(
         Difficulty(
             f"d{idx}",
             (SourceAnchor(block.id, 0, 9, block.text[:9]),),
@@ -2512,20 +2532,20 @@ def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
             "explanation",
             (RequiredPoint(f"p{idx}", "Explain grammar"),),
         )
-        for idx, block in enumerate(long_section.blocks[:13], start=1)
+        for idx, block in enumerate(long_section.blocks[:19], start=1)
     )
-    analysis_thirteen = ChapterAnalysis(
-        id="a-long-13",
+    analysis_nineteen = ChapterAnalysis(
+        id="a-long-19",
         section_id=long_section.id,
         coverage_status=CoverageStatus.COMPLETE,
         treatment_plan=plan,
         translation_instructions="Keep tone.",
         chapter_summary="Summary.",
-        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=thirteen_difficulties),
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=nineteen_difficulties),
         scenes=(Scene("s1", 0, long_section.blocks[0].id, long_section.blocks[-1].id, "Long scene"),),
     )
     with pytest.raises(ContextBuildError):
-        _scene_notes_budget(analysis_thirteen, long_section, unit, per_chapter=8)
+        _scene_notes_budget(analysis_nineteen, long_section, unit, per_chapter=8)
 
 
 def test_narrative_instructions_require_headings_in_first_scene_and_clean_glossary() -> None:
@@ -3306,15 +3326,16 @@ def test_pedagogical_a2_instructions_include_segments_example_stoplist_and_tense
         for marker in stoplist_markers:
             assert marker in text
 
-    # 4. A2 summary template across pedagogical instructions and whole/fragment A2 summaries.
+    # 4. A2 summary template in unified _pedagogical_instructions (not duplicated in _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS) and whole/fragment A2 summaries.
     summary_markers = (
         "<= 12–15 слов на фразу",
         "Present Simple + for + длительность",
         "эпиграф",
         "реплик",
     )
+    assert "Present Simple + for + длительность" not in ped_raw
+    assert "общеязыковых слов" not in ped_raw
     for text in (
-        ped_raw,
         ped_a2,
         templates["pedagogical_analysis"],
         live_ctx.request.instructions,
@@ -3323,6 +3344,12 @@ def test_pedagogical_a2_instructions_include_segments_example_stoplist_and_tense
     ):
         for marker in summary_markers:
             assert marker in text
+    for text in (ped_a2, templates["pedagogical_analysis"], live_ctx.request.instructions):
+        assert text.count("Present Simple + for + длительность") == 1
+        assert "общеязыковых слов" not in text
+        assert ";" in text
+        assert "are lost" in text
+        assert "At the end, a quote from [Author]'s book explains..." in text
 
     # No duplicate "might have been" or _A2_NOTE_DISCIPLINE after deduplication.
     note_discipline_body = _A2_NOTE_DISCIPLINE.strip()
@@ -3511,6 +3538,322 @@ def test_pedagogical_context_passes_prior_chapter_topics_and_segment_notes_budge
     )
     unit_g1 = TranslationUnit.of_blocks(id="u-g1", blocks=(g1,), plan=plan_gloss)
     assert _scene_notes_budget(gloss_analysis, gloss_section, unit_g1, per_chapter=1) == 1
+
+
+def test_fragment_findings_candidates_rendered_in_narrative_chapter_input() -> None:
+    """FragmentFindings.candidates renders concise glossary consistency section without None."""
+    from linguary.application.context_builder import FragmentFindings
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain.name_translation import NameTranslationAssessment, NameTranslationMethod
+
+    section = make_analysis_section(
+        section_id="sec-frag-cand",
+        title="Chapter 2",
+        order=1,
+        texts=("First fragment line.", "Second fragment line about Everlost and Nick."),
+    )
+    document = make_analysis_document((section,))
+    fragments = plan_fragments(textual_blocks(section), max_blocks=1)
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+
+    default_findings = FragmentFindings(
+        summary="Nick wakes up.",
+        instructions="- Ник и Элли на «ты».",
+        expressions=(),
+    )
+    assert default_findings.candidates == ()
+    ctx_no_cands = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        fragment=fragments[1],
+        fragment_count=2,
+        findings=default_findings,
+    )
+    assert "Кандидаты глоссария из предыдущих частей этой главы:" not in ctx_no_cands.request.input_text
+    assert "ты/вы" in ctx_no_cands.request.instructions
+    assert "не повторяй" in ctx_no_cands.request.instructions.lower()
+
+    first_ctx = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        fragment=fragments[0],
+        fragment_count=2,
+        findings=None,
+    )
+    assert "не повторяй уже зафиксированные" not in first_ctx.request.instructions.lower()
+
+    cand_full = GlossaryCandidateResponse(
+        source_text="Everlost",
+        type=ConceptType.PLACE,
+        suggested_translation="Вечнопустье",
+        confidence=0.95,
+        model_flagged_review=False,
+        note="несклоняемое",
+        description="Мир между жизнью и смертью.",
+        name_translation_assessment=NameTranslationAssessment(
+            applied_method=NameTranslationMethod.MEANING,
+            eligible_without_review=True,
+            review_reasons=(),
+            rationale="Прозрачное составное название.",
+            opaque_name=False,
+        ),
+    )
+    cand_opaque = GlossaryCandidateResponse(
+        source_text="Nick",
+        type=ConceptType.PERSON,
+        suggested_translation="Ник",
+        confidence=0.98,
+        model_flagged_review=False,
+        note="",
+        description="",
+        name_translation_assessment=NameTranslationAssessment(
+            applied_method=NameTranslationMethod.SOUND,
+            eligible_without_review=True,
+            review_reasons=(),
+            rationale="Непрозрачное личное имя.",
+            opaque_name=True,
+        ),
+    )
+    cand_minimal = GlossaryCandidateResponse(
+        source_text="Afterlight",
+        type=ConceptType.FICTIONAL_CONCEPT,
+        suggested_translation="Послесвет",
+        confidence=0.9,
+        model_flagged_review=False,
+    )
+    findings = FragmentFindings(
+        summary="Nick and Allie reach Everlost.",
+        instructions="- Ник и Элли на «ты».",
+        expressions=(),
+        candidates=(cand_full, cand_opaque, cand_minimal),
+    )
+    ctx = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        fragment=fragments[1],
+        fragment_count=2,
+        findings=findings,
+    )
+    text = ctx.request.input_text
+    assert "Кандидаты глоссария из предыдущих частей этой главы:" in text
+    assert "единообразие" in text.lower()
+    assert (
+        "- Everlost [place] -> Вечнопустье (несклоняемое) — "
+        "описание: Мир между жизнью и смертью.; непрозрачное=false"
+    ) in text
+    assert "- Nick [person] -> Ник — непрозрачное=true" in text
+    assert "- Afterlight [fictional_concept] -> Послесвет" in text
+    assert "None" not in text
+
+
+def test_pedagogical_narrative_instructions_in_input_and_sha256() -> None:
+    """narrative_instructions enters «Принятый повествовательный анализ» and pedagogical_input_sha256."""
+    section = make_analysis_section(
+        section_id="sec-narr-instr",
+        title="Chapter 3",
+        order=2,
+        texts=("They walked into the forest.",),
+    )
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+
+    ctx_empty = builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="They enter the forest.",
+        narrative_instructions="   ",
+    )
+    assert "Указания переводчику:" not in ctx_empty.request.input_text
+
+    instructions_text = "  - Передавай иронию сухо.\n- Не раскрывай имя до финала сцены.  "
+    ctx_with = builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="They enter the forest.",
+        narrative_instructions=instructions_text,
+    )
+    expected_block = (
+        "Указания переводчику:\n"
+        "- Передавай иронию сухо.\n"
+        "- Не раскрывай имя до финала сцены."
+    )
+    assert expected_block in ctx_with.request.input_text
+    accepted_idx = ctx_with.request.input_text.index("Принятый повествовательный анализ:")
+    instr_idx = ctx_with.request.input_text.index(expected_block)
+    assert instr_idx > accepted_idx
+
+    sha_default = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="They enter the forest.",
+    )
+    sha_blank = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="They enter the forest.",
+        narrative_instructions="   ",
+    )
+    sha_with = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="They enter the forest.",
+        narrative_instructions=instructions_text,
+    )
+    sha_trimmed = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="They enter the forest.",
+        narrative_instructions=instructions_text.strip(),
+    )
+    assert sha_default == sha_blank
+    assert sha_with != sha_default
+    assert sha_with == sha_trimmed
+
+
+def test_narrative_prompt_and_name_policy_p5_t2_rules() -> None:
+    """Narrative prompt covers all 5 description types, non-empty anchors, speaker anchor split, atomic instructions, descriptive nicknames, and 7 review_reasons."""
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS, _with_name_policy
+
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("meaning"),
+    )
+    for text in (narrative, templates["narrative_analysis"]):
+        for concept_type in ("person", "place", "organization", "fictional_concept", "term"):
+            assert concept_type in text
+        assert "1–2 предложения" in text
+        assert "anchors: []" in text
+        assert "реплику в кавычках" in text
+        assert "said ..." in text
+        assert "до конца фрагмента" in text
+        assert "без подстановки имени из других глав" in text
+        assert "the freckled boy" in text
+        assert "opaque_name=false" in text
+        assert 'applied_method="meaning"' in text
+
+    all_seven_reasons = (
+        "ambiguous",
+        "wordplay",
+        "anagram",
+        "uncertain_etymology",
+        "creative_adaptation",
+        "personal_name_substitution",
+        "other",
+    )
+    for strategy in ("sound", "meaning"):
+        analysis_prompt = _with_name_policy("Base.", _policy(strategy), analysis=True)
+        for reason in all_seven_reasons:
+            assert reason in analysis_prompt
+        assert "запрещено" in analysis_prompt.lower()
+        non_analysis_prompt = _with_name_policy("Base.", _policy(strategy), analysis=False)
+        assert "uncertain_etymology" not in non_analysis_prompt
+
+
+def test_p5_t3_note_budget_split_a2_calibration_antispoiler_and_summary() -> None:
+    """P5.T3: v3 splits explanation vs unlimited lexical_hint budget, A2 removes contradictions, adds anti-spoiler & unified summary."""
+    from linguary.application.context_builder import (
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _a2_word_share_corridor,
+        _pedagogical_instructions,
+        _reader_level_treatment_guidance,
+        scaled_chapter_note_limit,
+    )
+
+    assert scaled_chapter_note_limit(35, 8) == 8
+    assert scaled_chapter_note_limit(36, 8) == 8
+    assert scaled_chapter_note_limit(60, 8) == 9
+    assert scaled_chapter_note_limit(100, 8) == 12
+    assert scaled_chapter_note_limit(168, 8) == 18
+    assert scaled_chapter_note_limit(300, 6) == 18
+    assert scaled_chapter_note_limit(300, 8) == 18
+
+    assert _a2_word_share_corridor(0) == (70, 82)
+    assert _a2_word_share_corridor(9_999) == (70, 82)
+    assert _a2_word_share_corridor(10_000) == (72, 80)
+
+    section = make_analysis_section(
+        section_id="sec-quota",
+        title="Chapter 1",
+        order=0,
+        texts=("First block.", "Second block."),
+    )
+    document = make_analysis_document((section,))
+    v3_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        language_notes_per_chapter=8,
+    ).for_chapter_pedagogical_analysis(document, section, narrative_summary="Summary.")
+    assert 'help_kind="explanation"' in v3_ctx.request.input_text
+    assert 'help_kind="lexical_hint"' in v3_ctx.request.input_text
+    assert 'priority="critical"' in v3_ctx.request.input_text
+    assert 'priority="useful"' in v3_ctx.request.input_text
+    assert "GLOSSARY_ONLY" in v3_ctx.request.input_text
+    assert "не ограничены" in v3_ctx.request.input_text
+
+    v2_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v2",
+        reader_level="b2",
+        language_notes_per_chapter=8,
+    ).for_chapter_analysis(document=document, section=section)
+    assert "Бюджет обязательных заметок этого анализа: 2." in v2_ctx.request.input_text
+
+    a2_guidance = _reader_level_treatment_guidance("a2")
+    assert "выбирай щедро" not in a2_guidance
+    assert "Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE)" not in a2_guidance
+    assert "Реплики длиннее 8 слов либо сочетающие прямую речь" not in a2_guidance
+    assert "15 слов" in a2_guidance
+    assert "45 слов" in a2_guidance
+
+    ped_raw = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2",
+    )
+    assert "translation_instructions" in ped_raw
+    assert "эвфемизма" in ped_raw
+    assert "раньше момента раскрытия" in ped_raw
+    assert "are lost" not in ped_raw
+
+    ped_a2 = _pedagogical_instructions("en", "ru", "a2", False)
+    assert "точка с запятой «;»" in ped_a2
+    assert "are lost" in ped_a2
+    assert "At the end, a quote from [Author]'s book explains..." in ped_a2
+    assert "общеязыковых слов" not in ped_a2
+    assert ped_a2.count("Present Simple + for + длительность") == 1
+
+
+def test_non_staged_a2_summary_prompts_align_with_validate_a2_summary_rules() -> None:
+    from linguary.application.context_builder import (
+        _FRAGMENT_SUMMARY_A2,
+        _WHOLE_CHAPTER_SUMMARY_A2,
+    )
+
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    for text in (
+        _WHOLE_CHAPTER_SUMMARY_A2.format(source_language="en"),
+        _FRAGMENT_SUMMARY_A2.format(source_language="en"),
+        whole,
+        fragment,
+    ):
+        assert "точка с запятой «;»" in text
+        assert "are lost" in text
+        assert "At the end, a quote from [Author]'s book explains..." in text
+
 
 
 
