@@ -670,3 +670,141 @@ async def test_discarded_result_never_marks_incomplete_chapter_succeeded(tmp_pat
     finally:
         await app.aclose()
 
+
+@pytest.mark.parametrize("error_kind", ["provider", "capacity", "truncated", "rate_limit"])
+async def test_restarted_root_failing_at_concurrency_2_isolates_sibling(tmp_path, error_kind):
+    """When root 1 is restarted while in-flight and then fails with a terminal error, sibling root 2 still succeeds."""
+    from linguary.application.ports.llm import (
+        LLMContextCapacityError,
+        LLMProviderError,
+        LLMResponseFormatError,
+    )
+    from linguary.domain.llm_log import Violation
+
+    both_entered = asyncio.Event()
+    gates = {}
+    seen = []
+    restarted_block = {"id": None}
+
+    class FailingPausingClient(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage != LLMCallStage.TRANSLATION_UNIT:
+                return await super().generate(request)
+            block_id = request.ordered_block_ids[0]
+            gate = asyncio.Event()
+            gates[block_id] = gate
+            seen.append(block_id)
+            if len(seen) == 2:
+                both_entered.set()
+            await gate.wait()
+            if block_id == restarted_block["id"]:
+                if error_kind == "provider":
+                    raise LLMProviderError("400 rejected")
+                if error_kind == "capacity":
+                    raise LLMContextCapacityError("context length exceeded")
+                if error_kind == "truncated":
+                    raise LLMResponseFormatError(
+                        "truncated",
+                        truncated=True,
+                        violation=Violation("provider_truncated", "translation_unit", safe_message="truncated"),
+                    )
+                raise LLMTransportError("HTTP 429", outcome="known_transient")
+            _queue_translation(self, request)
+            return await super().generate(request)
+
+    fake = FailingPausingClient([analysis_reply(2)])
+    app = build_application(settings=AppSettings(
+        llm=LLMSettings(
+            model="pinned-model",
+            api_key="synthetic-secret",
+            proxy_mode="direct",
+            max_unit_source_chars=15,
+            max_attempts=1,
+        ),
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+        worker=WorkerPoolSettings(concurrency=2),
+    ), llm_client=fake, content_plan_profile="legacy-v1")
+    running = None
+    try:
+        store_imported(app, (("The cat sat.", "The dog ran."),))
+        await app.analysis.start("book-1")
+        assert (await drain_tasks(app))[0].status is TaskStatus.SUCCEEDED
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        dispatcher = (await app.processing.start("book-1"))[0]
+        running = asyncio.create_task(app.runner.run_next())
+        await asyncio.wait_for(both_entered.wait(), 5)
+        with app.unit_of_work.transaction() as tx:
+            roots = [
+                tx.work.get_root(ref["root_id"])
+                for ref in tx.work.get_binding("task", dispatcher.id)["payload_json"]["operation_refs"]
+            ]
+        restarted_root = next(r for r in roots if seen[0] in r.manifest["ordered_blocks"])
+        sibling_root = next(r for r in roots if r.id != restarted_root.id)
+        sibling_block = seen[1]
+        restarted_block["id"] = seen[0]
+
+        successor = restart(app, restarted_root, acknowledge=True)
+        gates[seen[0]].set()
+        gates[sibling_block].set()
+        completed = await asyncio.wait_for(running, 5)
+        assert completed.id == dispatcher.id
+        assert completed.status is TaskStatus.SUCCEEDED, completed.last_error
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.get_root(sibling_root.id).status == "complete"
+            assert tx.work.get_root(restarted_root.id).superseded_by == successor.successor_root_id
+            assert tx.results.get(run.id, sibling_block) is not None
+    finally:
+        for gate in gates.values():
+            gate.set()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await app.aclose()
+
+
+async def test_stale_generation_failure_after_reconcile_does_not_overwrite_root(tmp_path):
+    """An attempt started at generation G failing after reconcile (G+1) does not mutate the root."""
+    from linguary.application.ports.llm import LLMProviderError
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowFailClient(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage == LLMCallStage.TRANSLATION_UNIT:
+                entered.set()
+                await release.wait()
+                raise LLMProviderError("400 rejected")
+            return await super().generate(request)
+
+    fake = SlowFailClient([analysis_reply(1)])
+    app = make_app(tmp_path, fake)
+    running = None
+    try:
+        _doc, run, _task = await prepare(app, blocks=1)
+        running = asyncio.create_task(app.runner.run_next())
+        await asyncio.wait_for(entered.wait(), 5)
+        with app.unit_of_work.transaction() as tx:
+            root, = tx.work.list_roots("book-1", run_id=run.id)
+            gen_before = root.generation
+            tx.work.reconcile_recovery_attempts()
+            reconciled = tx.work.get_root(root.id)
+            gen_after = reconciled.generation
+            status_after = reconciled.status
+            reason_after = reconciled.reason
+        assert gen_after == gen_before + 1
+        assert (status_after, reason_after) == ("stopped", "interrupted")
+        release.set()
+        await asyncio.wait_for(running, 5)
+        with app.unit_of_work.transaction() as tx:
+            final_root = tx.work.get_root(root.id)
+        assert final_root.generation == gen_after
+        assert final_root.status == status_after
+        assert final_root.reason == reason_after
+    finally:
+        release.set()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await app.aclose()
+

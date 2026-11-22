@@ -1977,6 +1977,84 @@ class SqlAlchemyWorkRepository:
             self._session.flush()
         return updated
 
+    def supersede_stopped_regeneration_roots(
+        self, book_id: str, *, run_id: str, block_id: str, successor_id: str
+    ) -> tuple[str, ...]:
+        from linguary.domain import TaskStatus, TaskType
+        stopped_ids = tuple(
+            root.id
+            for root in self.list_roots(book_id, run_id=run_id)
+            if root.id != successor_id
+            and root.superseded_by is None
+            and root.operation_kind == 'regeneration'
+            and root.status == 'stopped'
+            and tuple(root.manifest.get('ordered_blocks', ())) == (block_id,)
+        )
+        if not stopped_ids:
+            return ()
+        self._session.execute(
+            update(RecoveryRootRow)
+            .where(
+                RecoveryRootRow.id.in_(stopped_ids),
+                RecoveryRootRow.superseded_by.is_(None),
+            )
+            .values(
+                superseded_by=successor_id,
+                generation=RecoveryRootRow.generation + 1,
+            )
+        )
+        self._session.execute(
+            update(RecoveryScopeRow)
+            .where(
+                RecoveryScopeRow.root_id.in_(stopped_ids),
+                RecoveryScopeRow.status.in_(('pending', 'claimed', 'stopped')),
+            )
+            .values(
+                status='stopped',
+                generation=RecoveryScopeRow.generation + 1,
+            )
+        )
+        self._session.execute(
+            update(LLMAttemptRow)
+            .where(
+                LLMAttemptRow.root_id.in_(stopped_ids),
+                LLMAttemptRow.state.in_(('created', 'reserved')),
+            )
+            .values(state='cancelled')
+        )
+        self._session.execute(
+            update(ProcessingTaskRow)
+            .where(
+                ProcessingTaskRow.book_id == book_id,
+                ProcessingTaskRow.task_type == TaskType.REGENERATE_BLOCK.value,
+                ProcessingTaskRow.operation_id.in_(stopped_ids),
+                ProcessingTaskRow.status.in_(
+                    (
+                        TaskStatus.FAILED.value,
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    )
+                ),
+            )
+            .values(
+                status=TaskStatus.SUPERSEDED.value,
+                error_type=None,
+                error_message=None,
+                error_detail=None,
+            )
+        )
+        self._session.flush()
+        for row in list(self._session.identity_map.values()):
+            if isinstance(row, RecoveryRootRow) and row.id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, RecoveryScopeRow) and row.root_id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, LLMAttemptRow) and row.root_id in stopped_ids:
+                self._session.expire(row)
+            elif isinstance(row, ProcessingTaskRow) and row.operation_id in stopped_ids:
+                self._session.expire(row)
+        return stopped_ids
+
     def scope_attempt_count(self, scope_id):
         return self._session.scalar(select(func.count()).select_from(LLMAttemptRow).where(
             LLMAttemptRow.scope_id == scope_id, LLMAttemptRow.state != 'cancelled')) or 0

@@ -350,6 +350,66 @@ async def test_new_regeneration_supersedes_stopped_regeneration_root(
     assert stopped.superseded_by == successor.id
 
 
+async def test_failed_regeneration_superseded_by_new_regeneration_reaches_ready_to_export(
+    tmp_path,
+) -> None:
+    """Failed regeneration task_1 is marked SUPERSEDED with cleared error when task_2 starts, and book returns to READY_TO_EXPORT."""
+    from linguary.application.book_overview import book_overview
+    from linguary.application.ports.llm import LLMProviderError
+    from linguary.composition import drain_tasks
+    from linguary.domain import BookStatus
+    from correction_fakes import CorrectionAwareFakeLLMClient
+    from test_book_conditions import make_app
+    from test_recovery_commit import analysis_reply, prepare, translation_reply
+
+    fake = CorrectionAwareFakeLLMClient([
+        analysis_reply(1),
+        translation_reply(1),
+        LLMProviderError("hard provider failure"),
+        translation_reply(1),
+    ])
+    app = make_app(tmp_path, fake)
+    try:
+        document, run, _ = await prepare(app, blocks=1)
+        block_id = document.sections[0].blocks[0].id
+        completed = await drain_tasks(app)
+        assert completed[-1].status is TaskStatus.SUCCEEDED
+
+        # First regeneration fails -> stopped regeneration root + FAILED task
+        task_1 = await app.regeneration.start("book-1", block_id)
+        failed = await drain_tasks(app)
+        assert failed[-1].id == task_1.id
+        assert failed[-1].status is TaskStatus.FAILED
+        with app.unit_of_work.transaction() as tx:
+            root_1 = tx.work.get_root(task_1.operation_id)
+            assert root_1.operation_kind == "regeneration"
+            tx.work.stop_root(root_1.id, "provider_error", expected_generation=root_1.generation)
+            stopped_gen = tx.work.get_root(root_1.id).generation
+
+        # Start second regeneration -> supersedes root_1 and task_1 (clearing error fields)
+        task_2 = await app.regeneration.start("book-1", block_id)
+        assert task_2.id != task_1.id
+        with app.unit_of_work.transaction() as tx:
+            old_task = tx.tasks.get(task_1.id)
+            old_root = tx.work.get_root(root_1.id)
+            new_root = tx.work.get_root(task_2.operation_id)
+            assert old_task.status is TaskStatus.SUPERSEDED
+            assert old_task.last_error is None
+            assert old_root.superseded_by == new_root.id
+            assert old_root.generation == stopped_gen + 1
+
+        # Complete task_2 -> book is READY_TO_EXPORT and epub_ready is True
+        finished = await drain_tasks(app)
+        assert any(t.id == task_2.id and t.status is TaskStatus.SUCCEEDED for t in finished)
+        assert all(t.status is TaskStatus.SUCCEEDED for t in finished), [t.last_error for t in finished]
+        with app.unit_of_work.transaction() as tx:
+            assert tx.books.get("book-1").status is BookStatus.READY_TO_EXPORT
+        overview = book_overview(app.unit_of_work, "book-1")
+        assert overview.epub_ready is True
+    finally:
+        await app.aclose()
+
+
 def test_correction_preserves_old_ids_and_candidate_recheck_burns_zero_counter(
     unit_of_work, engine
 ) -> None:

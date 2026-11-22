@@ -204,7 +204,7 @@ class ProcessChapter:
         try:
             return await self._process_roots(roots, work=work, note_ids=note_ids, result=result)
         except RecoveryError as error:
-            if error.reason == 'interrupted' and command.task_id is None:
+            if error.reason in {'interrupted', 'superseded'} and command.task_id is None:
                 return replace(result, processed_units=result.processed_units + 1, discarded=True)
             if command.task_id is None and error.original_error is not None:
                 raise error.original_error from error
@@ -699,7 +699,7 @@ class ChapterProcessingSequence:
                 await self._process_chapter(command)
                 break
             except RecoveryError as error:
-                if error.reason != 'interrupted':
+                if error.reason not in {'interrupted', 'superseded'}:
                     raise
                 with self._unit_of_work.transaction() as transaction:
                     current = transaction.tasks.get(task.id)
