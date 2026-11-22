@@ -964,3 +964,82 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
         )
     assert prio_spoiler_exc.value.violation.rule_code == 'spoiler_name_leak'
 
+
+def test_validate_narrative_visual_facts_allow_visual_objects_and_colors_while_rejecting_sounds():
+    visual_ok_scene = scene(
+        'b1', 'b3',
+        visual_facts=(
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'red coat'),
+                'Holmes',
+                'Держит скрипку, накинут кислотно-зелёный шарф как цветовой акцент',
+            ),
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b2', 'opened the door'),
+                'Watson',
+                'Стоит у дверного звонка в безвкусном наряде',
+            ),
+        ),
+    )
+    assert len(validate_narrative_response(
+        NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(visual_ok_scene,)),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+    )[0]) == 1
+
+    for bad_detail in (
+        'Скрипит деревянная половица под ногами',
+        'Кислый привкус во рту',
+        'Звон колокольчика у двери',
+    ):
+        bad_scene = scene(
+            'b1', 'b3',
+            visual_facts=(QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', bad_detail,
+            ),),
+        )
+        with pytest.raises(AnalysisMergeError) as exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_scene,)),
+                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            )
+        assert exc.value.violation.rule_code == 'non_visual_fact'
+
+
+def test_validate_narrative_does_not_false_flag_lowercase_or_article_role_participants():
+    role_aliases = {'b1': 'id-1', 'b2': 'id-2'}
+    role_texts = {
+        'id-1': 'The boy opened the door while the giant waited.',
+        'id-2': '‘Boy!’ shouted Uncle Vernon. ‘Giant!’',
+    }
+    role_visible = {alias: role_texts[bid] for alias, bid in role_aliases.items()}
+    role_order = ('id-1', 'id-2')
+
+    for role_participant in ('the boy', 'boy', 'The boy', 'the giant'):
+        role_scenes = (
+            QuotedSceneResponse('b1', 'b1', 'У двери.', participants=(role_participant,)),
+            QuotedSceneResponse('b2', 'b2', 'Крик в коридоре.', participants=(role_participant, 'Uncle Vernon')),
+        )
+        resolved, _ = validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=role_scenes),
+            role_aliases, role_texts, role_visible, ordered_block_ids=role_order,
+        )
+        assert len(resolved) == 2
+
+    # Proper capitalized surname colliding with earlier lowercase word ('white' vs 'Mary White') still catches spoiler.
+    proper_texts = {
+        'id-1': 'She wore a white dress in the hall.',
+        'id-2': '‘I am Mary White,’ she said.',
+    }
+    proper_visible = {alias: proper_texts[bid] for alias, bid in role_aliases.items()}
+    proper_scenes = (
+        QuotedSceneResponse('b1', 'b1', 'В зале.', participants=('Mary White',)),
+        QuotedSceneResponse('b2', 'b2', 'Знакомство.', participants=('Mary White',)),
+    )
+    with pytest.raises(AnalysisMergeError) as proper_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=proper_scenes),
+            role_aliases, proper_texts, proper_visible, ordered_block_ids=role_order,
+        )
+    assert proper_exc.value.violation.rule_code == 'spoiler_name_leak'
+
+

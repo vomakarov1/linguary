@@ -1650,14 +1650,17 @@ _NON_VISUAL_FACT_RE = re.compile(
     r"\b(?:"
     # Russian sound markers
     r"звук\w*|звуч\w*|шум\w*|голос\w*|шёпот\w*|шепот\w*|крик\w*|вопл\w*|визг\w*"
-    r"|грохот\w*|стук\w*|скрип\w*|звон(?:а|ом|е|у|ит|ел\w*|ящ\w*|к\w*)?|гул(?:а|ом|е|у)?\b|гудит|гудел\w*"
+    r"|грохот\w*|стук\w*|скрип(?:а|ом|е|у|ов|ами|ах|ит|ят|ел\w*|ну\w*|ящ\w*|уч\w*)?"
+    r"|звон(?:а|ом|е|у|ит|ят|ил\w*|ел\w*|ящ\w*|кий|кая|кое|кие|кого|кой|кому|ким|ком|кую|ких|кими|ко)?"
+    r"|гул(?:а|ом|е|у)?|гудит|гудел\w*"
     r"|свист\w*|шорох\w*|шелест\w*|хруст\w*|щёлкань\w*|щелкань\w*|щелчк\w*|щелчок\w*"
     r"|рычан\w*|рёв\w*|ревёт|ревет|ревел\w*|громк\w*|хрипл\w*|пискляв\w*"
-    r"|мелоди\w*|музык\w*|эхо\w*|слышн\w*|слышит\w*|слышать\w*|аудио\w*|интонаци\w*|акцент\w*"
+    r"|мелоди\w*|музык\w*|эхо\w*|слышн\w*|слышит\w*|слышать\w*|аудио\w*|интонаци\w*"
     # Russian smell markers
     r"|запах\w*|аромат\w*|вонь\w*|воня\w*|пахн\w*|благоухан\w*|смрад\w*|зловон\w*|душист\w*"
     # Russian taste markers
-    r"|вкус\w*|привкус\w*|сладк\w*|горьк\w*|кисл\w*|солён\w*|солен\w*|безвкусн\w*"
+    r"|вкус\w*|привкус\w*|сладк\w*|горьк\w*"
+    r"|кисл(?:ый|ая|ое|ые|ого|ой|ому|ым|ом|ую|ых|ыми|оват\w*)|солён\w*|солен\w*"
     # English sound/smell/taste markers
     r"|sound(?:s|ed|ing)?|noise(?:s|y)?|noisy|loud(?:ly|er|est)?|voice(?:s)?"
     r"|whisper(?:s|ed|ing)?|scream(?:s|ed|ing)?|shout(?:s|ed|ing)?|echo(?:es|ed|ing)?"
@@ -1898,6 +1901,25 @@ def _extract_block_spoiler_tokens(
     return tuple(result)
 
 
+_LEADING_ROLE_ARTICLES = frozenset({"the", "a", "an"})
+
+
+def _prefers_capitalized_name_match(name: str) -> bool:
+    cleaned = re.sub(r"\([^)]*\)", " ", name).strip()
+    tokens = _SPOILER_TOKEN_RE.findall(cleaned)
+    if not tokens:
+        return False
+    if tokens[0].casefold() in _LEADING_ROLE_ARTICLES:
+        return False
+    stems = _spoiler_name_stems(cleaned)
+    if not stems:
+        return False
+    stem_tokens = [
+        token for token in tokens if _strip_possessive_token(token) in stems
+    ]
+    return bool(stem_tokens) and all(token[:1].isupper() for token in stem_tokens)
+
+
 def _first_name_block_index(
     name: str,
     block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]],
@@ -1917,6 +1939,7 @@ def _first_name_block_index(
     if not stems:
         return None
     name_titles = frozenset(titles)
+    prefer_capitalized = any(_prefers_capitalized_name_match(form) for form in forms)
 
     def scan(*, require_capitalized: bool) -> int | None:
         for idx, tokens in enumerate(block_tokens):
@@ -1934,9 +1957,10 @@ def _first_name_block_index(
                 return idx
         return None
 
-    found = scan(require_capitalized=True)
-    if found is not None:
-        return found
+    if prefer_capitalized:
+        found = scan(require_capitalized=True)
+        if found is not None:
+            return found
     return scan(require_capitalized=False)
 
 
