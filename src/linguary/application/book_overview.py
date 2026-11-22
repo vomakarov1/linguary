@@ -113,6 +113,7 @@ class TaskFailure:
     detail: str | None
     attempts: int
     is_retryable: bool
+    requires_unknown_acknowledgement: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,7 +342,7 @@ def _chapter_for_blocks(block_sections, ordered_blocks):
     return first.id, first.title
 
 
-def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None, result_block_ids=None):
+def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None, result_block_ids=None, preload=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
     from linguary.application.use_cases.export_book import _ensure_ready, _validate_content_plans, ExportBookError
@@ -415,11 +416,17 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         attempts_by_root = {}
         bindings = None
         attempts_by_id = {}
+    if preload is not None:
+        preload["conditions"] = conditions
+        preload["roots_by_id"] = {root.id: root for root in roots}
+        preload["scopes_by_root"] = scopes_by_root
+        preload["attempts_by_root"] = attempts_by_root
     block_sections = {}
     if document is not None:
         for section in document.ordered_sections:
             for block in section.ordered_blocks:
                 block_sections[block.id] = section
+    blocking_roots_complete = True
     for root in roots:
         scopes = scopes_by_root.get(root.id, ())
         attempts = attempts_by_root.get(root.id, ())
@@ -491,26 +498,50 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             projected_reason = 'unknown'
         else:
             projected_reason = root.reason
+        is_stopped_regeneration = (
+            getattr(root, 'operation_kind', 'translation') == 'regeneration'
+            and getattr(root, 'status', None) == 'stopped'
+        )
+        if not is_stopped_regeneration and not complete:
+            blocking_roots_complete = False
         root_summaries.append(dict(root_id=root.id, generation=root.generation,
             covered=len(covered), total=len(ordered_blocks), calls_used=root.calls_used,
             limit=limit, reason=projected_reason, status=root.status,
             section_id=section_id, chapter_title=chapter_title,
             has_unknown_outcome=has_unknown_outcome, in_flight=in_flight,
-            can_retry=bool(current and not has_unknown_outcome and not busy and retryable
+            can_retry=bool(current and not has_unknown_outcome and not in_flight and not busy and retryable
                 and root.calls_used < limit and root.status in ('pending', 'running')),
-            can_extend=bool(current and not has_unknown_outcome and not busy and retryable
+            can_extend=bool(current and not has_unknown_outcome and not in_flight and not busy and retryable
                 and root.status == 'stopped' and root.reason == 'limit'),
             can_restart=can_restart, complete=complete))
+    recovery_reason = (
+        next(
+            (
+                item['reason']
+                for item in root_summaries
+                if item['reason'] in ('unknown', 'unknown_outcome', 'interrupted')
+            ),
+            None,
+        )
+        or next(
+            (
+                item['reason']
+                for item in root_summaries
+                if item['has_unknown_outcome'] and item['reason']
+            ),
+            None,
+        )
+        or next((item['reason'] for item in root_summaries if item['reason']), None)
+    )
     recovery = dict(covered=len(durable_coverage) if roots else len(result_ids & textual), total=len(textual),
         calls_used=sum(item['calls_used'] for item in root_summaries),
         limit=sum(item['limit'] for item in root_summaries),
-        reason=next((item['reason'] for item in root_summaries if item['reason'] == 'unknown'),
-            next((item['reason'] for item in root_summaries if item['reason']), None)),
+        reason=recovery_reason,
         can_retry=any(item['can_retry'] for item in root_summaries),
         can_extend=any(item['can_extend'] for item in root_summaries),
         can_restart=any(item['can_restart'] for item in root_summaries), roots=root_summaries)
     epub_ready = bool(document and document.sections and run is not None and textual <= result_ids
-        and all(item['complete'] for item in root_summaries))
+        and blocking_roots_complete)
     if epub_ready:
         try:
             from linguary.application.correction import correction_coverage_complete
@@ -634,6 +665,7 @@ def book_overview(
                 stored_results = transaction.results.list_for_run(run.id)
                 done_block_ids = {r.block_id for r in stored_results}
         calls = transaction.llm_calls.list_for_book(book_id)
+        preload: dict[str, object] = {}
         quality = _quality_projection(
             transaction,
             book,
@@ -644,6 +676,7 @@ def book_overview(
             stored_results=stored_results,
             stored_calls=calls,
             result_block_ids=done_block_ids,
+            preload=preload,
         )
         warning_count = len(transaction.documents.import_warnings(book_id))
         is_book_paused_fn = getattr(transaction.work, "is_book_paused", None)
@@ -670,6 +703,8 @@ def book_overview(
             tasks=tasks,
             processed_blocks=processed_blocks,
             transaction=transaction,
+            active_run=run,
+            preload=preload,
         )
     is_paused = bool(pause_requested and progress.running_tasks == 0)
     stage_estimate = _stage_estimate(
@@ -1498,11 +1533,20 @@ def _progress(
     tasks: Sequence[ProcessingTask],
     processed_blocks: int,
     transaction=None,
+    active_run=None,
+    preload: Mapping[str, object] | None = None,
 ) -> BookProgress:
     """Assembles book progress from its plan, tasks, and stored results."""
     sections = document.ordered_sections if document is not None else ()
     numbers = _chapter_numbers(document)
     titles = {section.id: section.title for section in sections}
+    failed_tasks = tuple(task for task in tasks if task.status is TaskStatus.FAILED)
+    failures = _build_failures(
+        failed_tasks,
+        transaction=transaction,
+        active_run=active_run,
+        preload=preload,
+    )
     return BookProgress(
         total_sections=len(sections),
         analyzed_sections=len(analyses),
@@ -1514,12 +1558,154 @@ def _progress(
             _treatment_counts(analysis) for analysis in analyses
         ),
         running_chapters=_running_chapters(tasks, numbers=numbers, titles=titles),
-        failures=tuple(
-            _failure(task, transaction) for task in tasks if task.status is TaskStatus.FAILED
-        ),
+        failures=failures,
         pending_tasks=sum(1 for task in tasks if task.status is TaskStatus.PENDING),
         running_tasks=sum(1 for task in tasks if task.status is TaskStatus.RUNNING),
     )
+
+
+def _build_failures(
+    failed_tasks: Sequence[ProcessingTask],
+    *,
+    transaction=None,
+    active_run=None,
+    preload: Mapping[str, object] | None = None,
+) -> tuple[TaskFailure, ...]:
+    if not failed_tasks:
+        return ()
+    if transaction is None or getattr(transaction, "work", None) is None:
+        return tuple(_failure(task, transaction) for task in failed_tasks)
+
+    from linguary.application.use_cases.retry_task import _bound_root_ids, evaluate_task_retryable
+
+    work = transaction.work
+    guarded = [
+        task for task in failed_tasks
+        if task.is_retryable and task.task_type in _RECOVERY_RETRY_TASKS
+    ]
+    if not guarded:
+        return tuple(_failure(task, None) for task in failed_tasks)
+
+    root_tasks = [
+        task for task in guarded
+        if task.task_type in {TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK}
+    ]
+    correction_tasks = [
+        task for task in guarded
+        if task.task_type is TaskType.CHAPTER_CORRECTION
+    ]
+
+    bindings_by_task: dict[str, dict | None] = {}
+    if root_tasks:
+        get_bindings = getattr(work, "get_bindings", None)
+        if callable(get_bindings):
+            bindings_by_task = dict(get_bindings("task", [task.id for task in root_tasks]))
+        else:
+            get_binding = getattr(work, "get_binding", None)
+            if callable(get_binding):
+                bindings_by_task = {
+                    task.id: get_binding("task", task.id) for task in root_tasks
+                }
+
+    task_attempts_by_task: dict[str, Sequence[object]] | None = None
+    if correction_tasks:
+        list_attempts_for_tasks = getattr(work, "list_attempts_for_tasks", None)
+        if callable(list_attempts_for_tasks):
+            task_attempts_by_task = dict(
+                list_attempts_for_tasks([task.id for task in correction_tasks])
+            )
+        else:
+            list_task_attempts = getattr(work, "list_task_attempts", None)
+            if callable(list_task_attempts):
+                task_attempts_by_task = {
+                    task.id: list_task_attempts(task.id) for task in correction_tasks
+                }
+
+    conditions = preload.get("conditions") if preload is not None else None
+    if preload is None and root_tasks:
+        conditions = work.latest_conditions(root_tasks[0].book_id)
+    if active_run is None and preload is None and root_tasks:
+        runs = getattr(transaction, "runs", None)
+        active_run = None if runs is None else runs.active_for_book(root_tasks[0].book_id)
+
+    roots_by_id = dict(preload.get("roots_by_id", {})) if preload is not None else {}
+    scopes_by_root = (
+        dict(preload.get("scopes_by_root", {}))
+        if preload is not None and "scopes_by_root" in preload
+        else ({} if callable(getattr(work, "list_scopes", None)) else None)
+    )
+    attempts_by_root = dict(preload.get("attempts_by_root", {})) if preload is not None else {}
+
+    missing_root_ids: list[str] = []
+    for task in root_tasks:
+        binding = bindings_by_task.get(task.id)
+        for root_id in (() if binding is None else _bound_root_ids(binding)):
+            if root_id not in roots_by_id:
+                missing_root_ids.append(root_id)
+    if missing_root_ids:
+        unique_missing = tuple(dict.fromkeys(missing_root_ids))
+        for root_id in unique_missing:
+            root = work.get_root(root_id)
+            if root is not None:
+                roots_by_id[root_id] = root
+        loaded_missing = tuple(rid for rid in unique_missing if rid in roots_by_id)
+        if loaded_missing:
+            list_scopes_for_roots = getattr(work, "list_scopes_for_roots", None)
+            list_scopes = getattr(work, "list_scopes", None)
+            if scopes_by_root is not None:
+                if callable(list_scopes_for_roots):
+                    scopes_by_root.update(list_scopes_for_roots(loaded_missing))
+                elif callable(list_scopes):
+                    for rid in loaded_missing:
+                        scopes_by_root[rid] = list_scopes(rid)
+            list_attempts_for_roots = getattr(work, "list_attempts_for_roots", None)
+            if callable(list_attempts_for_roots):
+                attempts_by_root.update(list_attempts_for_roots(loaded_missing))
+            else:
+                for rid in loaded_missing:
+                    attempts_by_root[rid] = work.list_root_attempts(rid)
+
+    result: list[TaskFailure] = []
+    for task in failed_tasks:
+        error = task.last_error
+        if error is None:
+            raise ApplicationError(f"у неуспешной задачи {task.id} нет ошибки")
+        retryable = task.is_retryable
+        requires_unknown_ack = False
+        if retryable and task.task_type in _RECOVERY_RETRY_TASKS:
+            retryable, _reason, requires_unknown_ack = evaluate_task_retryable(
+                task,
+                active_run=active_run,
+                conditions=conditions,
+                binding=bindings_by_task.get(task.id),
+                roots_by_id=roots_by_id,
+                scopes_by_root=scopes_by_root,
+                attempts_by_root=attempts_by_root,
+                task_attempts=(
+                    None
+                    if task_attempts_by_task is None
+                    else task_attempts_by_task.get(task.id, ())
+                ),
+            )
+            requires_unknown_ack = bool(
+                task.is_retryable
+                and task.task_type is TaskType.CHAPTER_CORRECTION
+                and requires_unknown_ack
+            )
+        result.append(
+            TaskFailure(
+                task_id=task.id,
+                task_type=task.task_type,
+                scope_id=task.scope_id,
+                error_type=error.type,
+                message=error.message,
+                detail=error.detail,
+                attempts=task.attempts,
+                is_retryable=retryable,
+                requires_unknown_acknowledgement=requires_unknown_ack,
+            )
+        )
+    return tuple(result)
 
 
 def _running_chapters(

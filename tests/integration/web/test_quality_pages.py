@@ -691,3 +691,32 @@ def test_quality_partial_shows_chapter_label_and_billing_warning_checkbox_for_un
     )
 
 
+def test_quality_partial_shows_unknown_banner_for_interrupted_and_checkbox_for_in_flight(
+    configured_client, configured_application,
+):
+    from lxml import html
+    from test_quality_projections import _prepared_book, _save_attempt, _save_root
+
+    scenario, conditions = _prepared_book(configured_client, configured_application)
+    with configured_application.unit_of_work.transaction() as tx:
+        _save_root(
+            tx, scenario, conditions, scenario.block_ids(), status='stopped', reason='interrupted',
+            calls_used=1,
+        )
+        root2, scope2 = _save_root(
+            tx, scenario, conditions, scenario.block_ids(), status='running', reason=None,
+            calls_used=1,
+        )
+        _save_attempt(tx, scenario, conditions, root2, scope2, state='sent', ordinal=1)
+    response = configured_client.get(f'/books/{scenario.book_id}', headers=HTML)
+    assert response.status_code == 200
+    assert (
+        'Неизвестный исход нельзя снять повтором или увеличением предела. '
+        'Продолжить можно только явным перезапуском незавершённой части.'
+    ) in response.text
+    tree = html.fromstring(response.text)
+    form = tree.xpath(f'//form[contains(@action, "/recovery/{root2.id}/restart")]')[0]
+    checkbox = form.xpath('.//input[@type="checkbox" and @name="acknowledge_unknown_outcome"]')
+    assert len(checkbox) == 1
+
+

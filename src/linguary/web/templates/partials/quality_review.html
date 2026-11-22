@@ -24,7 +24,8 @@
   {% for root in data.recovery.roots|default([]) if root.reason %}
     <p>{% if root.chapter_title %}{{ root.chapter_title }}: {% endif %}{{ quality_ui.reason_labels.get(root.reason, 'Обработка остановлена') }}.</p>
   {% endfor %}
-  {% if data.recovery.reason in ('unknown', 'unknown_outcome') %}<p>Неизвестный исход нельзя снять повтором или увеличением предела. Продолжить можно только явным перезапуском незавершённой части.</p>{% endif %}
+  {% set has_any_unknown = (data.recovery.reason in ('unknown', 'unknown_outcome', 'interrupted')) or ((data.recovery.roots|default([]))|selectattr('has_unknown_outcome')|list|length > 0) %}
+  {% if has_any_unknown %}<p>Неизвестный исход нельзя снять повтором или увеличением предела. Продолжить можно только явным перезапуском незавершённой части.</p>{% endif %}
   <h2>Добровольная вычитка</h2>
   <p role="status">{{ quality_ui.review_labels.get(data.quality_review.state, 'Состояние вычитки неизвестно') }}.</p>
   {% if data.quality_review.reason %}<p>{{ quality_ui.reason_labels.get(data.quality_review.reason, 'Вычитка остановлена') }}.</p>{% endif %}
@@ -102,7 +103,7 @@
       <p>{% if root.chapter_title %}{{ root.chapter_title }}. {% endif %}{% if root.reason %}{{ quality_ui.reason_labels.get(root.reason, 'Обработка остановлена') }}. {% endif %}Принятые блоки сохранятся; новый запуск обработает только оставшиеся области.</p>
       <form method="post" action="/books/{{ quality_book_id }}/recovery/{{ root.root_id }}/restart">
         <input type="hidden" name="expected_generation" value="{{ root.generation }}">
-        {% if root.has_unknown_outcome %}
+        {% if root.has_unknown_outcome or root.in_flight %}
           <p>Повторный запуск может привести к повторной оплате этого запроса у провайдера.</p>
           <label><input type="checkbox" name="acknowledge_unknown_outcome" value="true" required> Подтверждаю возможную повторную оплату запроса у провайдера</label>
         {% endif %}

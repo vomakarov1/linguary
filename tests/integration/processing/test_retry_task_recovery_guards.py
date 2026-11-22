@@ -236,3 +236,61 @@ def test_retry_task_allows_partial_chapter_when_one_root_retryable(unit_of_work)
         assert tx.work.get_attempt(unknown_attempt.id).state == 'unknown'
         assert tx.work.get_root(paused.id) == paused_before
         assert tx.tasks.get(task.id).status is TaskStatus.PENDING
+
+
+def test_retry_task_allows_complete_roots_and_rejects_in_flight_or_exhausted_scopes(unit_of_work):
+    from linguary.adapters.db.models import RecoveryScopeRow
+
+    run, conditions = _open_book(unit_of_work, 'book-strict-guards')
+    with unit_of_work.transaction() as tx:
+        # 1. FAILED task whose bound root is already complete -> retryable
+        complete_root, complete_scope = _root(
+            tx, conditions, run, ('block-complete',), status='complete', reason=None,
+            calls_used=1, max_calls=3,
+        )
+        complete_task = _failed_task(
+            tx, conditions, (complete_root,), task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+        accepted_att = _attempt(tx, conditions, complete_root, complete_scope, complete_task, state='accepted')
+        scope_row = tx.work._session.get(RecoveryScopeRow, complete_scope.id)
+        scope_row.status = 'accepted'
+        scope_row.accepted_attempt_id = accepted_att.id
+
+        # 2. pending root with stopped scope -> rejected
+        stopped_scope_root, stopped_scope = _root(
+            tx, conditions, run, ('block-stopped-scope',), status='pending', reason=None,
+            calls_used=1, max_calls=3,
+        )
+        tx.work._session.get(RecoveryScopeRow, stopped_scope.id).status = 'stopped'
+        stopped_scope_task = _failed_task(
+            tx, conditions, (stopped_scope_root,), task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+
+        # 3. pending root with in-flight sent attempt -> rejected
+        sent_root, sent_scope = _root(
+            tx, conditions, run, ('block-sent',), status='running', reason=None,
+            calls_used=1, max_calls=3,
+        )
+        sent_task = _failed_task(
+            tx, conditions, (sent_root,), task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+        _attempt(tx, conditions, sent_root, sent_scope, sent_task, state='sent')
+
+        # 4. pending root with exhausted max_scope_calls -> rejected
+        exhausted_root, exhausted_scope = _root(
+            tx, conditions, run, ('block-exhausted',), status='pending', reason=None,
+            calls_used=3, max_calls=10,
+        )
+        exhausted_task = _failed_task(
+            tx, conditions, (exhausted_root,), task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        )
+        for idx in range(1, 4):
+            _attempt(tx, conditions, exhausted_root, exhausted_scope, exhausted_task, state='failed', ordinal=idx)
+
+    assert _retry(unit_of_work, complete_task).status is TaskStatus.PENDING
+    with pytest.raises(RetryTaskError):
+        _retry(unit_of_work, stopped_scope_task)
+    with pytest.raises(RetryTaskError):
+        _retry(unit_of_work, sent_task)
+    with pytest.raises(RetryTaskError):
+        _retry(unit_of_work, exhausted_task)

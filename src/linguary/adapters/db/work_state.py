@@ -75,6 +75,18 @@ class SqlAlchemyWorkRepository:
         row = self._session.get(WorkBindingRow, (entity_kind, entity_id))
         return self._binding_from_row(row)
 
+    def get_bindings(self, entity_kind: str, entity_ids: Sequence[str]):
+        unique_ids = tuple(dict.fromkeys(entity_ids))
+        if not unique_ids:
+            return {}
+        rows = self._session.scalars(
+            select(WorkBindingRow).where(
+                WorkBindingRow.entity_kind == entity_kind,
+                WorkBindingRow.entity_id.in_(unique_ids),
+            )
+        ).all()
+        return {row.entity_id: self._binding_from_row(row) for row in rows}
+
     @staticmethod
     def _binding_from_row(row):
         if row is None:
@@ -504,6 +516,19 @@ class SqlAlchemyWorkRepository:
     def list_task_attempts(self, task_id):
         rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.task_id == task_id)).all()
         return tuple(self._attempt_from_row(row) for row in rows)
+
+    def list_attempts_for_tasks(self, task_ids: Sequence[str]):
+        unique_ids = tuple(dict.fromkeys(task_ids))
+        if not unique_ids:
+            return {}
+        grouped = {task_id: [] for task_id in unique_ids}
+        rows = self._session.scalars(
+            select(LLMAttemptRow).where(LLMAttemptRow.task_id.in_(unique_ids))
+        ).all()
+        for row in rows:
+            if row.task_id is not None:
+                grouped.setdefault(row.task_id, []).append(self._attempt_from_row(row))
+        return {task_id: tuple(items) for task_id, items in grouped.items()}
 
     def add_root(self, root):
         self._owned(BookConditionsRow, root.conditions_id, root.book_id)

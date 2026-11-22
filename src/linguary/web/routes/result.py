@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+import json
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -202,7 +203,7 @@ async def regenerate_book_block(
 @router.post('/books/{book_id}/correction-candidates/{candidate_id}/resolve', response_model=ResultBlockResponse)
 async def resolve_correction_candidate(request: Request, application: CurrentApplication,
                                        book_id: str, candidate_id: str):
-    is_json = request.headers.get('content-type', '').split(';')[0] == 'application/json'
+    is_json = request.headers.get('content-type', '').split(';')[0].strip().lower() == 'application/json'
     form_filter: str | None = None
     try:
         if is_json:
@@ -257,18 +258,24 @@ def _acknowledgement_flag(value: object) -> bool:
 
 
 async def _retry_acknowledgement(request: Request) -> bool:
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
-        try:
-            body = await request.json()
-        except ValueError:
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type == "application/json":
+        raw_body = (await request.body()).strip()
+        if not raw_body:
             return False
-        if isinstance(body, dict):
-            return _acknowledgement_flag(body.get("acknowledge_unknown_outcome"))
-        return False
-    if content_type.startswith(
-        ("application/x-www-form-urlencoded", "multipart/form-data")
-    ):
+        try:
+            body = json.loads(raw_body)
+        except ValueError:
+            raise HTTPException(422, detail={"reason_code": "invalid_request"}) from None
+        if not isinstance(body, dict):
+            raise HTTPException(422, detail={"reason_code": "invalid_request"})
+        if "acknowledge_unknown_outcome" not in body:
+            return False
+        flag = body["acknowledge_unknown_outcome"]
+        if not isinstance(flag, bool):
+            raise HTTPException(422, detail={"reason_code": "invalid_request"})
+        return flag
+    if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
         form = await request.form()
         return _acknowledgement_flag(form.get("acknowledge_unknown_outcome"))
     return False

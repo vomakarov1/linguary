@@ -337,6 +337,43 @@ def test_quality_page_context_skips_preview_when_no_routes_and_pause_preserves_p
         assert tx_opened == 0
         assert ctx["forms"] == []
 
+        # Also verify zero extra transactions when overview already has guarded failed tasks.
+        from linguary.application.book_overview import TaskFailure
+        from linguary.domain import ErrorType
+        overview_with_failures = replace(
+            overview,
+            progress=replace(
+                overview.progress,
+                failures=(
+                    TaskFailure(
+                        task_id="t-retryable",
+                        task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                        scope_id="book-paused:s1",
+                        error_type=ErrorType.TRANSIENT,
+                        message="err",
+                        detail=None,
+                        attempts=1,
+                        is_retryable=True,
+                    ),
+                    TaskFailure(
+                        task_id="t-corr-unknown",
+                        task_type=TaskType.CHAPTER_CORRECTION,
+                        scope_id="book-paused:s1",
+                        error_type=ErrorType.TRANSIENT,
+                        message="err",
+                        detail=None,
+                        attempts=1,
+                        is_retryable=False,
+                        requires_unknown_acknowledgement=True,
+                    ),
+                ),
+            ),
+        )
+        ctx_failures = quality_page_context(request, app, "book-paused", overview=overview_with_failures)
+        assert tx_opened == 0
+        assert [row["id"] for row in ctx_failures["retry_tasks"]] == ["t-retryable"]
+        assert [row["id"] for row in ctx_failures["unknown_retry_tasks"]] == ["t-corr-unknown"]
+
         # Resume unblocks claiming the preserved pending task.
         resume_result = resume_uc(ResumeBookCommand(book_id="book-paused"))
         assert resume_result.pause_requested is False
