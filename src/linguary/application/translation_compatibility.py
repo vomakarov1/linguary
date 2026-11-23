@@ -2,10 +2,7 @@
 from dataclasses import asdict
 from uuid import uuid4
 
-from linguary.application.book_conditions import (
-    A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS,
-    A2_CONTENT_PLAN_V7_VERSIONS, payload_digest,
-)
+from linguary.application.book_conditions import payload_digest, supported_condition_versions
 from linguary.application.recovery import NOTES_POLICY, RecoveryError, RecoveryPolicy, root_manifest
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
 from linguary.domain import TaskStatus, TaskType
@@ -29,44 +26,21 @@ def _verify_conditions(transaction, task, conditions):
             or task.status in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}):
         _unavailable()
     payload = conditions.payload
-    schemas = {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}
     profile = payload.get('profile')
-    implementation = 3 if profile == 'content-plan-v3' else 1
-    expected = dict(runtime=1, context_builder=implementation, validators=implementation,
-        schemas=schemas.get(profile), prompts=implementation)
-    if payload.get('english_help', False):
-        if profile != 'content-plan-v3':
-            _unavailable()
-        expected.update(schemas=4, prompts=4)
     templates = payload.get('prompt_templates')
     template_values = thaw(templates) if templates is not None else None
     marker = (template_values.get('analysis_contract_version')
               if isinstance(template_values, dict) else None)
-    if marker is not None and (type(marker) is not int or marker != 5):
-        _unavailable()
-    if marker == 5:
-        supported_versions = []
-        if profile == 'content-plan-v3':
-            validators_version = 4 if payload.get('reader_level') == 'a2' else 3
-            supported_versions.extend((
-                dict(runtime=1, context_builder=3, validators=validators_version, schemas=5, prompts=5),
-                dict(runtime=1, context_builder=4, validators=validators_version, schemas=5, prompts=6),
-                dict(runtime=1, context_builder=5, validators=validators_version, schemas=5, prompts=7),
-            ))
-        elif (profile == 'legacy-v1' and payload.get('reader_level') == 'a2'
-                and not payload.get('english_help', False)):
-            supported_versions.extend((
-                dict(A2_CONTENT_PLAN_V5_VERSIONS),
-                dict(A2_CONTENT_PLAN_V6_VERSIONS),
-                dict(A2_CONTENT_PLAN_V7_VERSIONS),
-            ))
-    else:
-        supported_versions = [expected]
-        if payload.get('reader_level') == 'a2':
-            supported_versions.append(dict(A2_CONTENT_PLAN_VERSIONS)
-                if profile == 'legacy-v1' and not payload.get('english_help', False)
-                else {**expected, 'validators': 4})
-    if (profile not in schemas or thaw(payload.get('versions')) not in supported_versions
+    supported_versions = supported_condition_versions(
+        profile,
+        reader_level=payload.get('reader_level'),
+        english_help=bool(payload.get('english_help', False)),
+        analysis_contract_version=marker,
+    )
+    versions = thaw(payload.get('versions'))
+    if (not isinstance(versions, dict)
+            or any(type(value) is not int for value in versions.values())
+            or versions not in supported_versions
             or not templates or payload_digest(templates) != payload.get('prompt_sha256')):
         _unavailable()
     return binding

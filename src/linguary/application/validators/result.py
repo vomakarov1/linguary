@@ -35,6 +35,7 @@ from linguary.application.retry_policy import (
     ResultExpectation,
     ResultValidationError,
 )
+from linguary.application.translation_policy import validation_policy_level
 from linguary.application.validators.coverage import coverage_violation
 from linguary.application.validators.dialogue import dialogue_violation
 from linguary.application.validators.language import (
@@ -144,6 +145,7 @@ class TranslationResultValidator:
         `note_id_factory` generates learning note identifiers (`ln-ch03-001`): their
         numbering depends on the chapter and already stored notes, which is use case knowledge.
         """
+        policy_level = validation_policy_level(validation_policy)
         expected = expectation or expectation_for_unit(
             unit, target_language=target_language
         )
@@ -187,7 +189,7 @@ class TranslationResultValidator:
                 paragraph_violation(
                     single,
                     unit=unit,
-                    strict_line_preservation=validation_policy == "v2",
+                    strict_line_preservation=policy_level >= 2,
                 ),
                 expected,
                 block_id=block.source_block_id,
@@ -229,13 +231,13 @@ class TranslationResultValidator:
                 safe_message="Перевод выполнен не на целевом языке",
             )
         text_payload = _payload_with_joined_translation(normalized_payload)
-        service_payload = normalized_payload if validation_policy == "v2" else text_payload
+        service_payload = normalized_payload if policy_level >= 2 else text_payload
         for block in service_payload.blocks:
             single = replace(service_payload, blocks=(block,))
             self._ensure_block(
                 _service_message_violation(
                     single,
-                    strict_fields=validation_policy == "v2",
+                    strict_fields=policy_level >= 2,
                     protected_quotes=protected_quotes,
                     excluded_texts=excluded_service_texts,
                     include_assistances=False,
@@ -245,7 +247,7 @@ class TranslationResultValidator:
                 rule_code="service_message_leak",
                 safe_message="В ответе обнаружено служебное сообщение модели",
             )
-        if validation_policy == "v2" and text_payload.fragment_assistances:
+        if policy_level >= 2 and text_payload.fragment_assistances:
             assist_payload = replace(text_payload, blocks=(), language_notes=())
             assist_problem = _service_message_violation(
                 assist_payload,

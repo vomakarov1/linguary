@@ -2119,7 +2119,7 @@ def test_validate_historical_uses_v1_validation_policy():
     inner = make_validator()
     live = make_response((make_block_result(poem, translated_text=substituted),))
     live_unit = make_unit((poem,))
-    assert require_policy(CURRENT_TRANSLATION_POLICY).validation_policy == "v2"
+    assert require_policy(CURRENT_TRANSLATION_POLICY).validation_policy == "v3"
     with pytest.raises(ResultValidationError):
         inner.validate(
             live,

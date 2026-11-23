@@ -23,6 +23,7 @@ from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_V5_VERSIONS,
     A2_CONTENT_PLAN_V6_VERSIONS,
     A2_CONTENT_PLAN_V7_VERSIONS,
+    A2_CONTENT_PLAN_V8_VERSIONS,
     payload_digest,
 )
 from linguary.application.context_builder import (
@@ -1896,16 +1897,20 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             # Demotion guard keeps short nonstandard "ain't" line in TRANSLATE.
             assert ch3_plan[ch3_blocks[3].id].treatment is BlockTreatment.TRANSLATE
 
-        # Book conditions version bump (context_builder=5, prompts=7) + backward compatibility for v6 and v5 snapshots.
+        # Book conditions version bump (context_builder=6, prompts=8) + backward compatibility for v7, v6, and v5 snapshots.
         conditions = seq_app.book_conditions.require(BOOK_ID)
         assert conditions.payload["profile"] == "content-plan-v3"
-        assert conditions.payload["versions"] == A2_CONTENT_PLAN_V7_VERSIONS
-        assert conditions.payload["versions"]["context_builder"] == 5
-        assert conditions.payload["versions"]["prompts"] == 7
+        assert conditions.payload["versions"] == A2_CONTENT_PLAN_V8_VERSIONS
+        assert conditions.payload["versions"]["context_builder"] == 6
+        assert conditions.payload["versions"]["prompts"] == 8
         assert effective_content_plan_profile(conditions) == "content-plan-v3"
         seq_app.book_runtime.settings_for(conditions)
 
-        for legacy_versions in (A2_CONTENT_PLAN_V6_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS):
+        for legacy_versions in (
+            A2_CONTENT_PLAN_V7_VERSIONS,
+            A2_CONTENT_PLAN_V6_VERSIONS,
+            A2_CONTENT_PLAN_V5_VERSIONS,
+        ):
             legacy_payload = thaw(conditions.payload)
             legacy_payload["versions"] = dict(legacy_versions)
             legacy_conditions = replace(conditions, payload=legacy_payload)

@@ -18,6 +18,65 @@ A2_CONTENT_PLAN_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4,
 A2_CONTENT_PLAN_V5_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 5, 'prompts': 5}
 A2_CONTENT_PLAN_V6_VERSIONS = {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6}
 A2_CONTENT_PLAN_V7_VERSIONS = {'runtime': 1, 'context_builder': 5, 'validators': 4, 'schemas': 5, 'prompts': 7}
+A2_CONTENT_PLAN_V8_VERSIONS = {'runtime': 1, 'context_builder': 6, 'validators': 4, 'schemas': 5, 'prompts': 8}
+
+_PROFILE_SCHEMAS = {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}
+
+
+def supported_condition_versions(
+    profile: str | None,
+    *,
+    reader_level: str | None,
+    english_help: bool,
+    analysis_contract_version: object,
+) -> tuple[dict[str, int], ...]:
+    """Return allowed `versions` dicts for a conditions snapshot, or `()` if invalid."""
+    if profile not in _PROFILE_SCHEMAS:
+        return ()
+    if type(english_help) is not bool:
+        return ()
+    if english_help and profile != 'content-plan-v3':
+        return ()
+    if analysis_contract_version is not None and (
+        type(analysis_contract_version) is not int or analysis_contract_version != 5
+    ):
+        return ()
+    if analysis_contract_version == 5:
+        if profile == 'content-plan-v3':
+            validators_version = 4 if reader_level == 'a2' else 3
+            return (
+                {'runtime': 1, 'context_builder': 3, 'validators': validators_version, 'schemas': 5, 'prompts': 5},
+                {'runtime': 1, 'context_builder': 4, 'validators': validators_version, 'schemas': 5, 'prompts': 6},
+                {'runtime': 1, 'context_builder': 5, 'validators': validators_version, 'schemas': 5, 'prompts': 7},
+                {'runtime': 1, 'context_builder': 6, 'validators': validators_version, 'schemas': 5, 'prompts': 8},
+            )
+        if profile == 'legacy-v1' and reader_level == 'a2' and not english_help:
+            return (
+                dict(A2_CONTENT_PLAN_V5_VERSIONS),
+                dict(A2_CONTENT_PLAN_V6_VERSIONS),
+                dict(A2_CONTENT_PLAN_V7_VERSIONS),
+                dict(A2_CONTENT_PLAN_V8_VERSIONS),
+            )
+        return ()
+    implementation = 3 if profile == 'content-plan-v3' else 1
+    expected = {
+        'runtime': 1,
+        'context_builder': implementation,
+        'validators': implementation,
+        'schemas': _PROFILE_SCHEMAS[profile],
+        'prompts': implementation,
+    }
+    if english_help:
+        expected['schemas'] = 4
+        expected['prompts'] = 4
+    if reader_level == 'a2':
+        a2_variant = (
+            dict(A2_CONTENT_PLAN_VERSIONS)
+            if profile == 'legacy-v1' and not english_help
+            else {**expected, 'validators': 4}
+        )
+        return (expected, a2_variant)
+    return (expected,)
 
 
 class ConditionsError(LLMConfigurationError):
@@ -153,13 +212,13 @@ class BookConditionsService:
         payload['english_help'] = english_help
         if english_help:
             payload['profile'] = 'content-plan-v3'
-            payload['versions'] = {'runtime': 1, 'context_builder': 3 if continue_legacy else 5,
+            payload['versions'] = {'runtime': 1, 'context_builder': 3 if continue_legacy else 6,
                 'validators': 3, 'schemas': 4 if continue_legacy else 5,
-                'prompts': 4 if continue_legacy else 7}
+                'prompts': 4 if continue_legacy else 8}
         profile = payload.get('profile', 'legacy-v1')
         if payload['reader_level'] == 'a2' and not continue_legacy:
             if profile == 'legacy-v1' and not english_help:
-                payload['versions'] = dict(A2_CONTENT_PLAN_V7_VERSIONS)
+                payload['versions'] = dict(A2_CONTENT_PLAN_V8_VERSIONS)
             else:
                 payload['versions'] = {**payload['versions'], 'validators': 4}
         elif continue_legacy and not english_help:

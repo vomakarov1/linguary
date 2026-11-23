@@ -159,10 +159,10 @@ async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, le
         assert conditions.payload['reader_level'] == level
         assert conditions.payload['versions'] == {
             'runtime': 1,
-            'context_builder': 5,
+            'context_builder': 6,
             'validators': 4 if level == 'a2' else 3,
             'schemas': 5,
-            'prompts': 7,
+            'prompts': 8,
         }
         assert conditions.payload['prompt_templates']['analysis_contract_version'] == 5
         app.book_runtime.settings_for(conditions)
@@ -813,6 +813,7 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
         A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
     )
     from linguary.composition.book_runtime import effective_content_plan_profile
     from linguary.domain.book_conditions import thaw
@@ -843,8 +844,8 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
         assert effective_content_plan_profile(b2_legacy) == 'legacy-v1'
         app.book_runtime.settings_for(b2_legacy)
 
-        # A2 on legacy-v1 without english_help gets A2_CONTENT_PLAN_V7_VERSIONS
-        a2_v7 = choice(
+        # A2 on legacy-v1 without english_help gets A2_CONTENT_PLAN_V8_VERSIONS
+        a2_v8 = choice(
             'book-1',
             action='reanalyze',
             expected_revision=1,
@@ -853,17 +854,21 @@ async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_comp
             reader_level='a2',
             english_help=False,
         )
-        assert a2_v7.payload['profile'] == 'legacy-v1'
-        assert a2_v7.payload['versions'] == A2_CONTENT_PLAN_V7_VERSIONS
-        assert a2_v7.payload['prompt_templates']['analysis_contract_version'] == 5
-        assert effective_content_plan_profile(a2_v7) == 'content-plan-v3'
-        app.book_runtime.settings_for(a2_v7)
+        assert a2_v8.payload['profile'] == 'legacy-v1'
+        assert a2_v8.payload['versions'] == A2_CONTENT_PLAN_V8_VERSIONS
+        assert a2_v8.payload['prompt_templates']['analysis_contract_version'] == 5
+        assert effective_content_plan_profile(a2_v8) == 'content-plan-v3'
+        app.book_runtime.settings_for(a2_v8)
 
-        # Historical v6 and v5 A2 snapshots on legacy-v1 remain reproducible
-        for historical_versions in (A2_CONTENT_PLAN_V6_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS):
-            hist_payload = thaw(a2_v7.payload)
+        # Historical v7, v6, and v5 A2 snapshots on legacy-v1 remain reproducible
+        for historical_versions in (
+            A2_CONTENT_PLAN_V7_VERSIONS,
+            A2_CONTENT_PLAN_V6_VERSIONS,
+            A2_CONTENT_PLAN_V5_VERSIONS,
+        ):
+            hist_payload = thaw(a2_v8.payload)
             hist_payload['versions'] = dict(historical_versions)
-            hist_cond = replace(a2_v7, payload=hist_payload)
+            hist_cond = replace(a2_v8, payload=hist_payload)
             assert effective_content_plan_profile(hist_cond) == 'content-plan-v3'
             app.book_runtime.settings_for(hist_cond)
     finally:
@@ -955,3 +960,79 @@ async def test_book_conditions_sequential_analysis_default_override_and_overview
         assert book_overview(app.unit_of_work, 'book-1').conditions['sequential_analysis'] is True
     finally:
         await app.aclose()
+
+
+def test_supported_condition_versions_v5_through_v8_and_fail_closed_checks():
+    from linguary.application.book_conditions import (
+        A2_CONTENT_PLAN_V5_VERSIONS,
+        A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
+        supported_condition_versions,
+    )
+
+    assert A2_CONTENT_PLAN_V8_VERSIONS == {
+        'runtime': 1,
+        'context_builder': 6,
+        'validators': 4,
+        'schemas': 5,
+        'prompts': 8,
+    }
+
+    v3_b2 = supported_condition_versions(
+        'content-plan-v3',
+        reader_level='b2',
+        english_help=False,
+        analysis_contract_version=5,
+    )
+    assert v3_b2 == (
+        {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 5, 'prompts': 5},
+        {'runtime': 1, 'context_builder': 4, 'validators': 3, 'schemas': 5, 'prompts': 6},
+        {'runtime': 1, 'context_builder': 5, 'validators': 3, 'schemas': 5, 'prompts': 7},
+        {'runtime': 1, 'context_builder': 6, 'validators': 3, 'schemas': 5, 'prompts': 8},
+    )
+
+    v3_a2_help = supported_condition_versions(
+        'content-plan-v3',
+        reader_level='a2',
+        english_help=True,
+        analysis_contract_version=5,
+    )
+    assert v3_a2_help[-1] == A2_CONTENT_PLAN_V8_VERSIONS
+    assert len(v3_a2_help) == 4
+
+    legacy_a2 = supported_condition_versions(
+        'legacy-v1',
+        reader_level='a2',
+        english_help=False,
+        analysis_contract_version=5,
+    )
+    assert legacy_a2 == (
+        A2_CONTENT_PLAN_V5_VERSIONS,
+        A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
+    )
+
+    # Rejects bool markers, unsupported contract markers, and english_help on non-v3 profiles.
+    assert supported_condition_versions(
+        'content-plan-v3', reader_level='b2', english_help=False, analysis_contract_version=True,
+    ) == ()
+    assert supported_condition_versions(
+        'content-plan-v3', reader_level='b2', english_help=False, analysis_contract_version=False,
+    ) == ()
+    assert supported_condition_versions(
+        'content-plan-v3', reader_level='b2', english_help=False, analysis_contract_version=6,
+    ) == ()
+    assert supported_condition_versions(
+        'content-plan-v3', reader_level='b2', english_help=False, analysis_contract_version='5',
+    ) == ()
+    assert supported_condition_versions(
+        'legacy-v1', reader_level='a2', english_help=True, analysis_contract_version=5,
+    ) == ()
+    assert supported_condition_versions(
+        'legacy-v1', reader_level='b2', english_help=True, analysis_contract_version=None,
+    ) == ()
+    assert supported_condition_versions(
+        'content-plan-v2', reader_level='b2', english_help=True, analysis_contract_version=None,
+    ) == ()

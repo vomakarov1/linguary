@@ -7,7 +7,17 @@ from linguary.domain.book_conditions import WorkStateError
 
 LEGACY_TRANSLATION_POLICY = "translation-context-legacy-v1"
 TRANSLATION_CONTEXT_POLICY_V2 = "translation-context-v2"
-CURRENT_TRANSLATION_POLICY = "translation-reliability-v3"
+TRANSLATION_RELIABILITY_POLICY_V3 = "translation-reliability-v3"
+CURRENT_TRANSLATION_POLICY = "translation-reliability-v4"
+
+_VALIDATION_POLICY_LEVELS = MappingProxyType({"v1": 1, "v2": 2, "v3": 3})
+
+
+def validation_policy_level(policy: str) -> int:
+    """Return numeric strictness level for a validation policy; fail closed on unknown values."""
+    if not isinstance(policy, str) or policy not in _VALIDATION_POLICY_LEVELS:
+        raise ValueError(f"неизвестная политика валидации: {policy!r}")
+    return _VALIDATION_POLICY_LEVELS[policy]
 
 
 class TranslationPolicyUnavailable(WorkStateError):
@@ -35,8 +45,11 @@ TRANSLATION_POLICIES = MappingProxyType({
     TRANSLATION_CONTEXT_POLICY_V2: TranslationPolicy(
         TRANSLATION_CONTEXT_POLICY_V2, 2, 8000, 1, validation_policy="v1",
     ),
+    TRANSLATION_RELIABILITY_POLICY_V3: TranslationPolicy(
+        TRANSLATION_RELIABILITY_POLICY_V3, 2, 8000, 1, validation_policy="v2",
+    ),
     CURRENT_TRANSLATION_POLICY: TranslationPolicy(
-        CURRENT_TRANSLATION_POLICY, 2, 8000, 1, validation_policy="v2",
+        CURRENT_TRANSLATION_POLICY, 2, 8000, 1, validation_policy="v3",
     ),
 })
 

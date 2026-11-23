@@ -2230,30 +2230,35 @@ def test_truncated_true_precedes_coverage_and_structure_violations() -> None:
 
 
 def test_translation_policy_v3_and_v2_legacy_coexist() -> None:
-    """Reliability v3 is current; legacy and context v2 stay executable at validation v1."""
+    """Reliability v4 is current (v3 validation); v3 (v2), legacy, and context v2 stay executable."""
     from linguary.application.translation_policy import (
         CURRENT_TRANSLATION_POLICY,
         LEGACY_TRANSLATION_POLICY,
         TRANSLATION_POLICIES,
+        TRANSLATION_RELIABILITY_POLICY_V3,
         require_policy,
     )
 
-    assert CURRENT_TRANSLATION_POLICY == "translation-reliability-v3"
+    assert CURRENT_TRANSLATION_POLICY == "translation-reliability-v4"
     assert set(TRANSLATION_POLICIES) == {
         LEGACY_TRANSLATION_POLICY,
         "translation-context-v2",
+        TRANSLATION_RELIABILITY_POLICY_V3,
         CURRENT_TRANSLATION_POLICY,
     }
     legacy = require_policy(LEGACY_TRANSLATION_POLICY)
     context_v2 = require_policy("translation-context-v2")
+    reliability_v3 = require_policy(TRANSLATION_RELIABILITY_POLICY_V3)
     current = require_policy(CURRENT_TRANSLATION_POLICY)
     assert legacy.validation_policy == "v1"
     assert context_v2.validation_policy == "v1"
-    assert current.validation_policy == "v2"
-    assert (legacy.version, context_v2.version, current.version) == (
+    assert reliability_v3.validation_policy == "v2"
+    assert current.validation_policy == "v3"
+    assert (legacy.version, context_v2.version, reliability_v3.version, current.version) == (
         "translation-context-legacy-v1",
         "translation-context-v2",
         "translation-reliability-v3",
+        "translation-reliability-v4",
     )
     assert legacy.max_neighbour_chars is None
     assert legacy.capacity_retries_without_neighbours == 0
@@ -2449,6 +2454,105 @@ def test_truncation_ignores_trailing_footnote_markers() -> None:
 
     unfinished = make_response((make_block_result(block, translated_text="Он ушёл[^1]"),))
     assert "терминальной пунктуацией" in str(rejection(unfinished, unit=unit))
+
+
+def test_validation_policy_v3_preserves_all_v2_checks_and_rejects_unknown_policy() -> None:
+    """validation_policy='v3' enforces strict_line_preservation, strict_fields, and fragment_assistances; unknown policy raises ValueError."""
+    from linguary.application.correction_dto import unchanged_reader_texts
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+
+    # 1. strict_line_preservation
+    quote_block = make_block(order=0, text=_THREE_LINE_QUOTE, type=BlockType.QUOTE)
+    quote_unit = make_unit((quote_block,))
+    dropped = make_response(
+        (make_block_result(quote_block, translated_text=_THREE_LINE_QUOTE_FIRST),)
+    )
+    line_err = rejection(dropped, unit=quote_unit, validation_policy="v3")
+    assert line_err.violation is not None
+    assert line_err.violation.rule_code == "paragraph_count_mismatch"
+
+    # 2. strict_fields (changed segment with service message leak)
+    part1 = "First line of English prose."
+    part2 = " Second line of English prose."
+    seg_block = replace(
+        make_block(order=0, text=part1 + part2),
+        segments=(
+            BlockSegment(0, len(part1), 0),
+            BlockSegment(len(part1), len(part1) + len(part2), 1),
+        ),
+    )
+    seg_plan = TreatmentPlan(
+        section_id=seg_block.section_id,
+        items=(
+            TreatmentPlanItem(
+                block_id=seg_block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+                sentence_indexes=(0, 1),
+            ),
+        ),
+    )
+    seg_unit = TranslationUnit.of_blocks(id="u-v3-seg", blocks=(seg_block,), plan=seg_plan)
+    old_seg = "As an AI language model, я перевёл первую строку."
+    previous = BlockProcessingResult(
+        block_id=seg_block.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=f"{old_seg} Старый перевод второй строки.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        segment_translations=(old_seg, "Старый перевод второй строки."),
+    )
+    excluded = {seg_block.id: unchanged_reader_texts(previous)}
+    dirty_seg = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                seg_block.id,
+                BlockTreatment.TRANSLATE,
+                segments=(
+                    SegmentTranslationResponse(1, old_seg),
+                    SegmentTranslationResponse(2, "Извините, но я не могу выполнить этот запрос."),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as seg_err:
+        make_validator().validate(
+            dirty_seg,
+            unit=seg_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+            validation_policy="v3",
+            excluded_service_texts=excluded,
+        )
+    assert seg_err.value.violation is not None
+    assert seg_err.value.violation.rule_code == "service_message_leak"
+
+    # 3. fragment_assistances service message check
+    read_block = make_block(order=0, text="A short line.")
+    read_plan = TreatmentPlan.of_treatments(
+        read_block.section_id, ((read_block.id, BlockTreatment.READ_AS_IS),)
+    )
+    read_unit = TranslationUnit.of_blocks(id="u-v3-read", blocks=(read_block,), plan=read_plan)
+    assist_payload = TranslationResultResponse(
+        blocks=(BlockResultResponse(read_block.id, BlockTreatment.READ_AS_IS),),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                "d1",
+                ("p1",),
+                "russian_explanation",
+                "Извините, но я не могу помочь с этим фрагментом.",
+            ),
+        ),
+    )
+    assist_err = rejection(assist_payload, unit=read_unit, validation_policy="v3")
+    assert assist_err.violation is not None
+    assert assist_err.violation.rule_code == "service_message_leak"
+
+    # 4. Fail closed on unknown policy
+    clean_payload = make_response(
+        (make_block_result(quote_block, translated_text=_THREE_LINE_QUOTE_FULL),)
+    )
+    with pytest.raises(ValueError):
+        validate(clean_payload, unit=quote_unit, validation_policy="v99")
 
 
 

@@ -4002,5 +4002,86 @@ def test_v7_narrative_compact_instructions_and_fragment_speaker_facts_reminder()
         assert "не пропуская начало нового фрагмента" in frag_ctx.request.instructions
 
 
+def test_v8_prompts_omit_byr_for_a2_pedagogy_forbid_bare_translate_hints_and_remind_fragment_summary() -> None:
+    """V8 prompts drop BYR noise from A2 pedagogy, forbid bare glossary_hints on TRANSLATE, and remind multi-fragment A2 summary scope."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _pedagogical_instructions,
+    )
+
+    # 1. _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS keeps its exact 3-key format signature.
+    raw_formatted = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2",
+    )
+    assert "BYR" in raw_formatted
+
+    # 2. _pedagogical_instructions omits BYR / Before You Read for A2 (english_help=False), keeps BYR for B1/B2/C1.
+    a2_ped = _pedagogical_instructions("en", "ru", "a2", False)
+    assert "BYR" not in a2_ped
+    assert "Before You Read" not in a2_ped
+    assert "before_you_read: []" in a2_ped
+    assert "before_you_read_evidence: []" in a2_ped
+    assert 'help_kind="lexical_hint"' in a2_ped
+
+    a2_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    assert "BYR" not in a2_templates["pedagogical_analysis"]
+    assert "Before You Read" not in a2_templates["pedagogical_analysis"]
+
+    for level in ("b1", "b2", "c1"):
+        lvl_ped = _pedagogical_instructions("en", "ru", level, False)
+        assert "BYR" in lvl_ped
+
+    # 3. _CONTENT_PLAN_PROCESSING_V3 forbids bare glossary_hints (without note) on pure TRANSLATE.
+    assert "TRANSLATE" in _CONTENT_PLAN_PROCESSING_V3
+    assert "GLOSSARY_ONLY" in _CONTENT_PLAN_PROCESSING_V3
+    assert "glossary_hints" in _CONTENT_PLAN_PROCESSING_V3
+    assert "пустым note" in _CONTENT_PLAN_PROCESSING_V3
+
+    # 4. for_chapter_pedagogical_analysis adds whole-chapter reminder for multi-fragment A2 only.
+    section = make_analysis_section(
+        section_id="sec-v8-frag",
+        title="Chapter 3",
+        order=2,
+        texts=("First line.", "Second line.", "Third line.", "Fourth line."),
+    )
+    document = make_analysis_document((section,))
+    a2_builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+    whole_ctx = a2_builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Full chapter narrative summary.",
+    )
+    single_frag = plan_fragments(textual_blocks(section), max_blocks=10)[0]
+    single_frag_ctx = a2_builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Full chapter narrative summary.",
+        fragment=single_frag, fragment_count=1,
+    )
+    assert "Фрагментная проверка" not in whole_ctx.request.instructions
+    assert "Фрагментная проверка" not in single_frag_ctx.request.instructions
+
+    fragments = plan_fragments(textual_blocks(section), max_blocks=2)
+    assert len(fragments) == 2
+    for frag in fragments:
+        frag_ctx = a2_builder.for_chapter_pedagogical_analysis(
+            document, section, narrative_summary="Full chapter narrative summary.",
+            fragment=frag, fragment_count=len(fragments),
+        )
+        assert "Фрагментная проверка" in frag_ctx.request.instructions
+        assert "reader_chapter_summary" in frag_ctx.request.instructions
+        assert "всю главу" in frag_ctx.request.instructions
+        assert "chapter_summary" in frag_ctx.request.instructions
+
+    b2_builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="b2")
+    b2_frag_ctx = b2_builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Full chapter narrative summary.",
+        fragment=fragments[0], fragment_count=len(fragments),
+    )
+    assert "Фрагментная проверка" not in b2_frag_ctx.request.instructions
+
+
 
 

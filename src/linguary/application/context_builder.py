@@ -301,6 +301,7 @@ _CONTENT_PLAN_PROCESSING_V3 = """
 Перевод и пересказ не считаются объяснением. Соседние anchors служат
 контекстом, не требуют результата.
 Запрещены буквальные кальки и несочетаемые союзы («хотя зато», «больше того»), пропуск обстоятельств времени и места, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», «V2/V3», пометы «вариант стоит проверить» и «в переводе передано как...», переводческие инструкции («не склонять») в заметках читателю, шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
+В блоках TRANSLATE (без сегментов GLOSSARY_ONLY) запрещены словарные glossary_hints с пустым note: обычный перевод уже дан, поэтому либо оставляй glossary_hints: [], либо давай содержательный note с новым языковым объяснением.
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
 Не превращай эти служебные сведения в обязательную заметку читателю.
@@ -1085,6 +1086,13 @@ class ContextBuilder:
             ),
             self._name_translation_policy,
         )
+        if fragment is not None and fragment_count > 1 and self._reader_level == 'a2':
+            instructions += (
+                '\nФрагментная проверка: даже если ниже показана только часть блоков, '
+                'reader_chapter_summary обязан пересказывать всю главу целиком строго по '
+                'chapter_summary из раздела «Принятый повествовательный анализ» '
+                '(а не только события этого фрагмента).'
+            )
         raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
         chapter_candidates = _pedagogical_glossary_candidates(
             glossary_candidates,
@@ -3626,13 +3634,14 @@ def _a2_progression_guidance(cumulative_words_before: int) -> str:
 
 
 def _pedagogical_instructions(source_language: str, target_language: str, reader_level: str, english_help: bool) -> str:
+    level = reader_level.strip().lower()
     instructions = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(source_language=source_language,
         target_language=target_language, reader_level=reader_level.upper())
     if english_help:
         instructions += '\nВсе блоки READ_AS_IS; before_you_read и before_you_read_evidence пусты. Помощь появится рядом с оригиналом; lexical_hint допустим для READ_AS_IS.'
     else:
         instructions += '\n' + _reader_level_treatment_guidance(reader_level)
-    if reader_level.strip().lower() == 'a2':
+    if level == 'a2':
         instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
         instructions += (
             '\nВерни reader_chapter_summary (краткий пересказ главы перед следующей главой): адаптируй полную сводку '
@@ -3651,6 +3660,31 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
         )
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'
+    if level == 'a2' and not english_help:
+        instructions = (
+            instructions
+            .replace(
+                'Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).',
+                'Верни difficulties (для A2 — before_you_read: [] и before_you_read_evidence: []).',
+            )
+            .replace(
+                'lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.',
+                'lexical_hint допустим только в GLOSSARY_ONLY.',
+            )
+            .replace(
+                'BYR: expression, explanation; объяснение на языке перевода, без указаний переводчику.\n',
+                '',
+            )
+            .replace(
+                'Свидетельство BYR: difficulty_id, point_id, artifact_kind=before_you_read.explanation,\n'
+                'source_block_id, artifact_index (с нуля), body_excerpt — точная часть explanation.\n',
+                '',
+            )
+            .replace(
+                'Объяснение такого выражения в Before You Read формулируй утвердительно.',
+                'Объяснение такого выражения формулируй утвердительно.',
+            )
+        )
     return instructions
 
 

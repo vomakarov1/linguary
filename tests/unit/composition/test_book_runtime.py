@@ -607,6 +607,7 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
         A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
         payload_digest,
     )
     from linguary.application.context_builder import snapshot_prompt_templates
@@ -621,10 +622,10 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
     v3_payload = conditions_payload(book, settings, 1, "content-plan-v3")
     assert v3_payload["versions"] == {
         "runtime": 1,
-        "context_builder": 5,
+        "context_builder": 6,
         "validators": 3,
         "schemas": 5,
-        "prompts": 7,
+        "prompts": 8,
     }
     assert v3_payload["prompt_templates"]["analysis_contract_version"] == 5
 
@@ -676,15 +677,15 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         )
         _verify_conditions(tx, task, cond)
 
-    # 1. New v7 content-plan-v3 (b2 and a2)
+    # 1. New v8 content-plan-v3 (b2 and a2)
     check_compat(make_cond(v3_payload), expected_profile="content-plan-v3")
     v3_a2_settings = replace(settings, reading=ReadingSettings(reader_level="a2"))
     v3_a2_payload = conditions_payload(book, v3_a2_settings, 1, "content-plan-v3")
     v3_a2_payload["versions"]["validators"] = 4
     check_compat(make_cond(v3_a2_payload), expected_profile="content-plan-v3")
 
-    # 2. Historical v6 and v5 content-plan-v3 (b2 and a2)
-    for cb_ver, prompts_ver in ((4, 6), (3, 5)):
+    # 2. Historical v7, v6, and v5 content-plan-v3 (b2 and a2)
+    for cb_ver, prompts_ver in ((5, 7), (4, 6), (3, 5)):
         hist_b2_payload = thaw(v3_payload)
         hist_b2_payload["versions"] = {
             "runtime": 1,
@@ -705,7 +706,7 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         }
         check_compat(make_cond(hist_a2_payload), expected_profile="content-plan-v3")
 
-    # 3. A2 on legacy-v1: new v7, historical v6, historical v5, historical v3
+    # 3. A2 on legacy-v1: new v8, historical v7, historical v6, historical v5, historical v3
     legacy_a2_base = conditions_payload(book, v3_a2_settings, 1, "legacy-v1")
     a2_v5_templates = snapshot_prompt_templates(
         source_language="en",
@@ -720,6 +721,7 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
         A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
     ):
         a2_payload = thaw(legacy_a2_base)
         a2_payload["versions"] = dict(a2_versions)
@@ -744,11 +746,13 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
     # 4. B2 legacy-v1 remains untouched
     check_compat(make_cond(legacy_b2_payload), expected_profile="legacy-v1")
 
-    # 5. Mismatched mixed versions (e.g. context_builder=4 with prompts=5 or 5 with 6) are rejected
+    # 5. Mismatched mixed versions (e.g. context_builder=4 with prompts=5 or 6 with 7) are rejected
     for bad_versions in (
         {"runtime": 1, "context_builder": 4, "validators": 3, "schemas": 5, "prompts": 5},
         {"runtime": 1, "context_builder": 5, "validators": 3, "schemas": 5, "prompts": 6},
         {"runtime": 1, "context_builder": 4, "validators": 3, "schemas": 5, "prompts": 7},
+        {"runtime": 1, "context_builder": 5, "validators": 3, "schemas": 5, "prompts": 8},
+        {"runtime": 1, "context_builder": 6, "validators": 3, "schemas": 5, "prompts": 7},
     ):
         bad_payload = thaw(v3_payload)
         bad_payload["versions"] = bad_versions
@@ -789,6 +793,7 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
         A2_CONTENT_PLAN_V7_VERSIONS,
+        A2_CONTENT_PLAN_V8_VERSIONS,
         payload_digest,
     )
     from linguary.application.context_builder import snapshot_prompt_templates
@@ -808,7 +813,7 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
         analysis_contract_version=5,
     )
 
-    def make_legacy_a2(versions: dict[str, int], *, marker: int | None = 5) -> BookConditions:
+    def make_legacy_a2(versions: dict[str, int], *, marker: object = 5) -> BookConditions:
         payload = thaw(base_payload)
         payload["versions"] = dict(versions)
         templates = thaw(a2_v5_templates)
@@ -826,10 +831,11 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
             created_at=datetime.now(UTC),
         )
 
-    # Valid v5, v6, and v7 legacy-v1 A2 snapshots map to content-plan-v3.
+    # Valid v5, v6, v7, and v8 legacy-v1 A2 snapshots map to content-plan-v3.
     assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V5_VERSIONS)) == "content-plan-v3"
     assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V6_VERSIONS)) == "content-plan-v3"
     assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V7_VERSIONS)) == "content-plan-v3"
+    assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V8_VERSIONS)) == "content-plan-v3"
 
     # Mixed invalid versions (validators=4 with mismatched context_builder/prompts) are rejected.
     invalid_cases = (
@@ -837,16 +843,18 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
         {"runtime": 1, "context_builder": 3, "validators": 4, "schemas": 5, "prompts": 6},
         {"runtime": 1, "context_builder": 5, "validators": 4, "schemas": 5, "prompts": 6},
         {"runtime": 1, "context_builder": 4, "validators": 4, "schemas": 5, "prompts": 7},
+        {"runtime": 1, "context_builder": 5, "validators": 4, "schemas": 5, "prompts": 8},
+        {"runtime": 1, "context_builder": 6, "validators": 4, "schemas": 5, "prompts": 7},
     )
     for bad_versions in invalid_cases:
         with pytest.raises(ConditionsError, match="conditions_unavailable"):
             effective_content_plan_profile(make_legacy_a2(bad_versions))
 
-    # Wrong/missing analysis_contract_version marker with v5/v6/v7 versions is also rejected.
-    for bad_marker in (None, 6):
+    # Wrong/missing/bool analysis_contract_version marker with v5..v8 versions is also rejected.
+    for bad_marker in (None, 6, True, False):
         with pytest.raises(ConditionsError, match="conditions_unavailable"):
             effective_content_plan_profile(
-                make_legacy_a2(A2_CONTENT_PLAN_V7_VERSIONS, marker=bad_marker)
+                make_legacy_a2(A2_CONTENT_PLAN_V8_VERSIONS, marker=bad_marker)
             )
 
 

@@ -24,7 +24,7 @@ def test_unknown_policy_fails_closed():
         require_policy("translation-context-future")
     assert set(TRANSLATION_POLICIES) == {
         "translation-context-legacy-v1", "translation-context-v2",
-        "translation-reliability-v3",
+        "translation-reliability-v3", "translation-reliability-v4",
     }
     assert require_policy("translation-context-legacy-v1").version != CURRENT_TRANSLATION_POLICY
 
@@ -54,3 +54,22 @@ def test_work_port_exposes_atomic_operation_contracts():
     assert "policy_version" in inspect.signature(WorkRepository.begin_recovery_attempt).parameters
     assert inspect.signature(WorkRepository.replace_result_binding).parameters["provenance"].default is inspect.Parameter.empty
     assert inspect.signature(WorkRepository.begin_recovery_attempt).parameters["policy_version"].default is inspect.Parameter.empty
+
+
+def test_validation_policy_level_and_v4_current_policy():
+    from linguary.application.translation_policy import (
+        TRANSLATION_RELIABILITY_POLICY_V3,
+        validation_policy_level,
+    )
+
+    assert validation_policy_level("v1") == 1
+    assert validation_policy_level("v2") == 2
+    assert validation_policy_level("v3") == 3
+    for bad in ("v99", "", "v0", "V2", None, 1):
+        with pytest.raises(ValueError):
+            validation_policy_level(bad)  # type: ignore[arg-type]
+
+    assert TRANSLATION_RELIABILITY_POLICY_V3 == "translation-reliability-v3"
+    assert CURRENT_TRANSLATION_POLICY == "translation-reliability-v4"
+    assert require_policy(TRANSLATION_RELIABILITY_POLICY_V3).validation_policy == "v2"
+    assert require_policy(CURRENT_TRANSLATION_POLICY).validation_policy == "v3"
