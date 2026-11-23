@@ -44,6 +44,7 @@ _SPLITTABLE_FAILURE_RULES = frozenset(
         "glossary_hint_spelling",
         "note_language_leak",
         "note_quote_missing",
+        "note_translated_excerpt_missing",
         "note_duplicate",
         "content_plan",
     }

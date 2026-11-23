@@ -1295,17 +1295,19 @@ def _grammar_note_rule(note: LanguageNote) -> tuple[str, int, int] | None:
 _CULTURAL_OR_TERM_CAP = 1
 
 
-def _is_cultural_note(
+def _linked_note_kinds(
     note: LanguageNote,
     evidences: Sequence[HelpEvidence],
     known: Mapping[str, Difficulty],
-) -> bool:
+    dropped_difficulty_ids: frozenset[str],
+) -> frozenset[str]:
     if not known:
-        return False
+        return frozenset()
     ids = _ids_for(evidences, {_note_evidence_key(note)})
-    return any(
-        item_id in known and known[item_id].kind == "cultural_reference"
+    return frozenset(
+        known[item_id].kind
         for item_id in ids
+        if item_id in known and item_id not in dropped_difficulty_ids
     )
 
 
@@ -1317,7 +1319,7 @@ def _deduplicate_grammar_notes(
     history: dict[str, _GrammarSeen],
     plan: ContentPlan | None = None,
 ) -> frozenset[int]:
-    """Suppress repeated grammar, cultural-reference, and short-term `LanguageNote`s."""
+    """Suppress repeated grammar, cultural-reference, and unlinked short-term `LanguageNote`s."""
     if not result.language_notes:
         return frozenset()
     evidences = _evidences(result)
@@ -1330,10 +1332,14 @@ def _deduplicate_grammar_notes(
         if matched is not None:
             key, cap, min_gap = matched
         else:
-            is_cultural = _is_cultural_note(note, evidences, known)
+            linked_kinds = _linked_note_kinds(
+                note, evidences, known, dropped_difficulty_ids
+            )
+            is_cultural = "cultural_reference" in linked_kinds
             words = expression_words(note.original_excerpt)
-            if not is_cultural and not (0 < len(words) <= 4):
-                continue
+            if not is_cultural:
+                if linked_kinds or not (0 < len(words) <= 4):
+                    continue
             term_key = vocabulary_dedup_key(note.original_excerpt)
             if not term_key:
                 continue

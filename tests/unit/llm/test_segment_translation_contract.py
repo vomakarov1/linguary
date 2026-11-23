@@ -462,3 +462,33 @@ def test_treatment_validator_clarifies_forbidden_segment_removal() -> None:
         "для сегмента 1 блока block-1 с режимом GLOSSARY_ONLY перевод недопустим: "
         "удали элемент с index=1 из segments (или передай null)"
     )
+
+
+def test_correction_segment_schema_stays_non_nullable_and_rejects_blank() -> None:
+    """Correction schemas reject null/blank segment translations at Pydantic boundary."""
+    from linguary.adapters.llm.correction_payloads import (
+        ChapterCorrectionSchema,
+        ChapterCorrectionV2Schema,
+        CorrectionSegmentTranslationSchema,
+    )
+    from linguary.adapters.llm.json_schema import strict_json_schema
+
+    for bad_text in (None, "", "   "):
+        with pytest.raises(ValidationError):
+            CorrectionSegmentTranslationSchema.model_validate({"index": 1, "translated_text": bad_text})
+
+    for schema_cls in (ChapterCorrectionSchema, ChapterCorrectionV2Schema):
+        json_schema = strict_json_schema(schema_cls)
+        seg_def = json_schema["$defs"]["CorrectionSegmentTranslationSchema"]
+        assert seg_def["properties"]["translated_text"].get("type") == "string"
+        assert "anyOf" not in seg_def["properties"]["translated_text"]
+
+
+def test_note_translated_excerpt_missing_is_splittable_violation() -> None:
+    """Cross-task seam: P2.T5A note_translated_excerpt_missing counts as splittable in work_state."""
+    from linguary.adapters.db.work_state import _is_splittable_violation
+
+    assert _is_splittable_violation(
+        {"rule_code": "note_translated_excerpt_missing", "stage": "translation_unit"}
+    ) is True
+

@@ -2,10 +2,10 @@
 
 from typing import Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from linguary.adapters.llm.schemas import (
-    _ResponseModel, GlossaryHintSchema, LanguageNoteSchema, SegmentTranslationSchema,
+    _ResponseModel, GlossaryHintSchema, LanguageNoteSchema,
 )
 from linguary.application.correction_dto import (
     ChapterCorrectionResponse, CorrectedBlockResponse, UnchangedBlockResponse,
@@ -19,6 +19,18 @@ class CorrectionModel(_ResponseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
 
 
+class CorrectionSegmentTranslationSchema(CorrectionModel):
+    index: int = Field(ge=1)
+    translated_text: str = Field(min_length=1)
+
+    @field_validator("translated_text")
+    @classmethod
+    def _reject_blank_translation(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("пустой перевод сегмента")
+        return value
+
+
 class UnchangedBlockSchema(CorrectionModel):
     block_id: str = Field(min_length=1)
     status: Literal['unchanged']
@@ -30,7 +42,7 @@ class CorrectedBlockSchema(CorrectionModel):
     translated_text: str | None
     glossary_hints: list[GlossaryHintSchema]
     language_notes: list[LanguageNoteSchema]
-    segments: list[SegmentTranslationSchema] = Field(default_factory=list)
+    segments: list[CorrectionSegmentTranslationSchema] = Field(default_factory=list)
 
 
 class ChapterCorrectionSchema(CorrectionModel):
@@ -85,7 +97,7 @@ class ProposedBlockSchema(CorrectionModel):
     glossary_hints: list[GlossaryHintSchema] | None = None
     language_notes: list[LanguageNoteSchema] | None = None
     issues: list[CorrectionIssueSchema] = Field(min_length=1)
-    segments: list[SegmentTranslationSchema] = Field(default_factory=list)
+    segments: list[CorrectionSegmentTranslationSchema] = Field(default_factory=list)
 
 
 class ChapterCorrectionV2Schema(CorrectionModel):
