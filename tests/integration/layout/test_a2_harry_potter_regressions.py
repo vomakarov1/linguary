@@ -3151,7 +3151,8 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
     )
     pages = _read_pages(epub_path)
     legend_page = _page_with(pages, "Previously in…")
-    assert "По мере чтения переводов становится меньше" in _text(legend_page)
+    assert "По мере чтения переводов становится меньше" not in _text(legend_page)
+    assert "Строка с линией слева — перевод этой части абзаца." in _text(legend_page)
     cont_units = [
         el
         for page in pages

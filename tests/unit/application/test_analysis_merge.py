@@ -4479,3 +4479,173 @@ def test_verse_unification_clears_stale_demotion_trims_adjacent_prose_and_drops_
         )
         kept = normalize_difficulty_kinds(oblique_payload, (oblique_block,), {"b1": oblique_block.id})
         assert kept.difficulties[0].kind == "wordplay"
+
+
+def test_unify_homogeneous_list_treatments_and_guards() -> None:
+    from linguary.application.analysis_merge import (
+        normalize_pedagogical_response,
+        unify_homogeneous_list_treatments,
+    )
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    # 1. Numbered 1./2./3. list lifts stray READ_AS_IS (including demoted short item) and preserves GLOSSARY_ONLY.
+    num_blocks = (
+        replace(make_analysis_block(section_id=SECTION_ID, order=0, text="1. One large silver cauldron with heavy brass scales and lid."), type=BlockType.LIST_ITEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=1, text="2. Take a warm hat."), type=BlockType.LIST_ITEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=2, text="3. One pair of dragon-hide gloves."), type=BlockType.LIST_ITEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=3, text="4. Protective cloak with clasp."), type=BlockType.LIST_ITEM),
+    )
+    num_aliases = {f"b{i + 1}": b.id for i, b in enumerate(num_blocks)}
+    num_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            # Short elementary item initially TRANSLATE -> demoted in Step 2 -> lifted back in Step 3.
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b4", BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-num-1",
+                (QuotedSourceAnchorResponse("b1", "cauldron"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "explanation",
+                (RequiredPoint("p1", "cauldron — котёл."),),
+            ),
+            QuotedDifficultyResponse(
+                "d-num-3",
+                (QuotedSourceAnchorResponse("b3", "gloves"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "gloves — перчатки."),),
+            ),
+        ),
+    )
+    num_norm = normalize_pedagogical_response(
+        num_payload, num_blocks, num_aliases, reader_level="a2", english_help=False
+    )
+    assert [item.treatment for item in num_norm.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert {d.id: d.help_kind for d in num_norm.difficulties}["d-num-3"] == "lexical_hint"
+
+    # 2. <Title> by <Author> list lifts stray READ_AS_IS without touching GLOSSARY_ONLY.
+    book_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=10, text="The Standard Book of Spells (Grade 1) by Miranda Goshawk"),
+        make_analysis_block(section_id=SECTION_ID, order=11, text="A History of Magic by Bathilda Bagshot"),
+        make_analysis_block(section_id=SECTION_ID, order=12, text="Magical Theory by Adalbert Waffling"),
+        make_analysis_block(section_id=SECTION_ID, order=13, text="Magical Drafts and Potions by Arsenius Jigger"),
+    )
+    book_aliases = {f"b{i + 1}": b.id for i, b in enumerate(book_blocks)}
+    book_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),  # demoted to READ_AS_IS in Step 2, lifted back in Step 3
+            TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b4", BlockTreatment.TRANSLATE),
+        ),
+    )
+    book_norm = normalize_pedagogical_response(
+        book_payload, book_blocks, book_aliases, reader_level="a2", english_help=False
+    )
+    assert [item.treatment for item in book_norm.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+
+    # 3. Direct unify_homogeneous_list_treatments: lifts 1) 2) 3) and rejects "1 telescope", prose "by", 2 READ_AS_IS, or english_help=True.
+    paren_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="1) First rule of magic"),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="2) Second rule"),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="3) Third rule of magic"),
+    )
+    paren_aliases = {f"b{i + 1}": b.id for i, b in enumerate(paren_blocks)}
+    paren_items = (
+        TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+    )
+    unified_paren, paren_changed = unify_homogeneous_list_treatments(
+        paren_items, paren_blocks, paren_aliases
+    )
+    assert paren_changed is True
+    assert [i.treatment for i in unified_paren] == [BlockTreatment.TRANSLATE] * 3
+
+    untouched_help, help_changed = unify_homogeneous_list_treatments(
+        paren_items, paren_blocks, paren_aliases, english_help=True
+    )
+    assert help_changed is False
+    assert [i.treatment for i in untouched_help] == [i.treatment for i in paren_items]
+
+    qty_blocks = (
+        replace(make_analysis_block(section_id=SECTION_ID, order=0, text="1 cauldron (pewter, standard size 2)"), type=BlockType.LIST_ITEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=1, text="1 telescope"), type=BlockType.LIST_ITEM),
+        replace(make_analysis_block(section_id=SECTION_ID, order=2, text="1 set of brass scales"), type=BlockType.LIST_ITEM),
+    )
+    qty_aliases = {f"b{i + 1}": b.id for i, b in enumerate(qty_blocks)}
+    qty_items = (
+        TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        TreatmentPlanItemResponse("b3", BlockTreatment.TRANSLATE),
+    )
+    untouched_qty, qty_changed = unify_homogeneous_list_treatments(
+        qty_items, qty_blocks, qty_aliases
+    )
+    assert qty_changed is False
+    assert [i.treatment for i in untouched_qty] == [i.treatment for i in qty_items]
+
+    prose_by_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="He stood by Uncle Vernon."),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="She sat by Harry."),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="They walked by Aunt Petunia."),
+    )
+    prose_aliases = {f"b{i + 1}": b.id for i, b in enumerate(prose_by_blocks)}
+    untouched_prose, prose_changed = unify_homogeneous_list_treatments(
+        qty_items, prose_by_blocks, prose_aliases
+    )
+    assert prose_changed is False
+    assert [i.treatment for i in untouched_prose] == [i.treatment for i in qty_items]
+
+    four_num_blocks = (
+        make_analysis_block(section_id=SECTION_ID, order=0, text="1. First rule"),
+        make_analysis_block(section_id=SECTION_ID, order=1, text="2. Second rule"),
+        make_analysis_block(section_id=SECTION_ID, order=2, text="3. Third rule"),
+        make_analysis_block(section_id=SECTION_ID, order=3, text="4. Fourth rule"),
+    )
+    four_aliases = {f"b{i + 1}": b.id for i, b in enumerate(four_num_blocks)}
+    two_read_items = (
+        TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b3", BlockTreatment.READ_AS_IS),
+        TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+    )
+    untouched_two_read, two_read_changed = unify_homogeneous_list_treatments(
+        two_read_items, four_num_blocks, four_aliases
+    )
+    assert two_read_changed is False
+    assert [i.treatment for i in untouched_two_read] == [i.treatment for i in two_read_items]
+
+    one_tr_items = (
+        TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        TreatmentPlanItemResponse("b3", BlockTreatment.READ_AS_IS),
+    )
+    untouched_one_tr, one_tr_changed = unify_homogeneous_list_treatments(
+        one_tr_items, paren_blocks, paren_aliases
+    )
+    assert one_tr_changed is False
+    assert [i.treatment for i in untouched_one_tr] == [i.treatment for i in one_tr_items]

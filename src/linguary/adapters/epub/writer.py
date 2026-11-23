@@ -136,6 +136,14 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   margin-bottom: 1.4em;
 }
 
+.lg-poem {
+  margin-left: 1.2em;
+}
+
+.lg-unit.lg-end.lg-poem {
+  margin-bottom: 0.45em;
+}
+
 .lg-cont > .lg-src {
   text-indent: 0;
 }

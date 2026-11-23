@@ -68,6 +68,7 @@ def block_units(
     speakers: Mapping[tuple[int, int], str],
     *,
     target_language: str | None = None,
+    is_poem: bool = False,
 ) -> tuple[LayoutUnit, ...]:
     """Project `block` into reading units.
 
@@ -94,8 +95,8 @@ def block_units(
     unit containing `line_start` (`start <= line_start < end`) records the
     earliest such name and does not write it into the translation. When that
     unit has no translation, an unnumbered note `Говорит {name}` with origin
-    `speaker` is appended. `lines` is true only for `BlockType.POEM`, on
-    every unit of that block.
+    `speaker` is appended. `lines` is true for `BlockType.POEM` or when
+    `is_poem` is true, on every unit of that block.
     """
     chosen = tuple(treatments)
     spans = block.segment_spans
@@ -120,7 +121,7 @@ def block_units(
     )
     note_buckets = _notes_by_part(parts, normalized_notes)
     speaker_names = _speakers_by_part(parts, speakers)
-    poem = block.type is BlockType.POEM
+    poem = block.type is BlockType.POEM or is_poem
     last = len(parts) - 1
     units: list[LayoutUnit] = []
     for index, part in enumerate(parts):

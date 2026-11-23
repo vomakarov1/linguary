@@ -6,7 +6,7 @@ from lxml import etree
 
 from linguary.adapters.epub.reader import _BlockContext, _SectionBuilder
 from linguary.adapters.epub.splitting import segment_text
-from linguary.domain import BlockSegment, BlockType, InlineAnnotationType
+from linguary.domain import BlockSegment, BlockType, InlineAnnotationType, SupportStatus
 from linguary.domain.identifiers import build_block_id
 
 
@@ -334,4 +334,65 @@ def test_anchors_kept_on_single_block() -> None:
     assert block.source_reference.element_id == "para1"
     assert block.attributes["anchor_ids"] == "para1 wrap mid-mark"
     assert _split_attribute_names().isdisjoint(block.attributes)
+
+
+def test_scene_dividers_imported_as_opaque_other_without_affecting_links_lists_or_runs() -> None:
+    """`<p>`/`<div>` pure punctuation dividers become OTHER/PRESERVE_OPAQUE; links, lists, inherited quotes, and inline runs do not."""
+    html = etree.fromstring(
+        "<html><body>"
+        "<p>*</p>"
+        "<div>* * *</div>"
+        "<p>— — —</p>"
+        "<p><i>~ ~ ~</i></p>"
+        "<p><a href='#fn1'>*</a></p>"
+        "<p><a href='notes.xhtml'>*</a></p>"
+        "<ul><li>*</li></ul>"
+        "<blockquote><p>*</p></blockquote>"
+        "<div>* * *<p>Inner paragraph.</p></div>"
+        "<aside epub:type='footnote' id='fn1' xmlns:epub='http://www.idpf.org/2007/ops'><p>Note.</p></aside>"
+        "</body></html>"
+    )
+    body = html.find("body")
+    assert body is not None
+    builder = _SectionBuilder(
+        book_id="test_book",
+        section_id="sec_1",
+        resource_path="chapter1.xhtml",
+        footnote_ids=frozenset({"fn1"}),
+        manifest_paths=frozenset({"chapter1.xhtml", "notes.xhtml"}),
+    )
+    builder.walk(body, _BlockContext())
+
+    by_path = {block.source_reference.structural_path: block for block in builder.blocks}
+
+    for path in (
+        "/html[1]/body[1]/p[1]",
+        "/html[1]/body[1]/div[1]",
+        "/html[1]/body[1]/p[2]",
+        "/html[1]/body[1]/p[3]",
+    ):
+        divider = by_path[path]
+        assert divider.type is BlockType.OTHER
+        assert divider.support_status is SupportStatus.PRESERVE_OPAQUE
+        assert divider.segments == ()
+
+    fn_ref_para = by_path["/html[1]/body[1]/p[4]"]
+    assert fn_ref_para.type is BlockType.PARAGRAPH
+    assert fn_ref_para.support_status is SupportStatus.SUPPORTED
+
+    link_para = by_path["/html[1]/body[1]/p[5]"]
+    assert link_para.type is BlockType.PARAGRAPH
+    assert link_para.support_status is SupportStatus.SUPPORTED
+
+    list_item = by_path["/html[1]/body[1]/ul[1]/li[1]"]
+    assert list_item.type is BlockType.LIST_ITEM
+    assert list_item.support_status is SupportStatus.SUPPORTED
+
+    quoted_star = by_path["/html[1]/body[1]/blockquote[1]/p[1]"]
+    assert quoted_star.type is BlockType.QUOTE
+    assert quoted_star.support_status is SupportStatus.SUPPORTED
+
+    inline_run = by_path["/html[1]/body[1]/div[2]/text()[1]"]
+    assert inline_run.type is BlockType.PARAGRAPH
+    assert inline_run.support_status is SupportStatus.SUPPORTED
 

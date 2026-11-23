@@ -67,6 +67,7 @@ def _features(
     has_poems: bool = False,
     has_speakers: bool = False,
     sections: frozenset[str] = frozenset(),
+    fades_translation: bool = True,
 ) -> LayoutFeatures:
     return LayoutFeatures(
         has_translation,
@@ -76,6 +77,7 @@ def _features(
         has_poems,
         has_speakers,
         sections,
+        fades_translation=fades_translation,
     )
 
 
@@ -84,7 +86,7 @@ def _symbols(ipas: list[str]) -> tuple[str, ...]:
 
 
 def _label_line(*labels: str) -> str:
-    listed = ", ".join(labels)
+    listed = ", ".join(label.rstrip(".") for label in labels) + "."
     return (
         "Слово в начале примечания называет его вид: "
         f"{listed} Примечание без такой пометки объясняет слово, выражение или устройство фразы."
@@ -93,7 +95,7 @@ def _label_line(*labels: str) -> str:
 
 def _section_line(*keys: str) -> str:
     text = {key: phrase for key, phrase in _SECTIONS}
-    return "Перед главой: " + "; ".join(text[key] for key in keys)
+    return "Перед главой: " + "; ".join(text[key] for key in keys) + "."
 
 
 def test_ipa_key_lists_only_used_symbols() -> None:
@@ -276,3 +278,20 @@ def test_legend_lines_include_progression_guidance_and_previously() -> None:
         "листать",
     ):
         assert phrase not in text
+
+
+def test_legend_label_punctuation_section_period_and_fades_translation() -> None:
+    """Labels join cleanly without '., ', sections end with '.', and fades_translation toggles progression sentence."""
+    lines = legend_lines(_features(
+        has_translation=True,
+        labels=frozenset({"wordplay", "speech_style"}),
+        sections=frozenset({"previously"}),
+        fades_translation=False,
+    ))
+    assert "Игра слов, Речь персонажа." in lines[2]
+    assert "Игра слов., Речь персонажа." not in lines[2]
+    assert lines[3] == "Перед главой: «Previously in…» — что было раньше."
+    assert "По мере чтения переводов становится меньше" not in lines[1]
+    assert "Старайтесь сначала прочитать абзац оригинала целиком" in lines[1]
+    assert legend_lines(_features(fades_translation=True)) == ()
+    assert legend_lines(_features(fades_translation=False)) == ()

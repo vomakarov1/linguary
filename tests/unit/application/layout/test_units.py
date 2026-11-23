@@ -381,3 +381,13 @@ def test_poem_unit_keeps_lines() -> None:
         {},
     )
     assert [unit.lines for unit in plain] == [False, False]
+
+    poem_flagged = block_units(
+        paragraph,
+        _result(paragraph, treatments, (None, "Строка.")),
+        treatments,
+        (),
+        {},
+        is_poem=True,
+    )
+    assert [unit.lines for unit in poem_flagged] == [True, True]

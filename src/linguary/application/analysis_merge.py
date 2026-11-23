@@ -28,7 +28,11 @@ from typing import Any
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, RequiredPoint, Scene, SceneVisualFact, SourceAnchor, artifact_key
 from linguary.domain.llm_log import Violation
 
-from linguary.application.a2_core_vocab import non_core_a2_word_spans, non_core_a2_words
+from linguary.application.a2_core_vocab import (
+    _TITLE_CASE_MINOR_WORDS,
+    non_core_a2_word_spans,
+    non_core_a2_words,
+)
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import _same_word, expression_words
@@ -49,6 +53,7 @@ from linguary.application.llm_dto import (
     TreatmentPlanItemResponse,
 )
 from linguary.application.ports.language_detection import LanguageDetector
+from linguary.application.verse import detect_verse_stanza_runs
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
@@ -59,7 +64,6 @@ from linguary.domain import (
     DocumentBlock,
     DomainError,
     GlossaryCandidate,
-    InlineAnnotationType,
     SupportStatus,
     TreatmentPlan,
     TreatmentPlanError,
@@ -1700,6 +1704,7 @@ __all__ = [
     "plan_fragments",
     "sanitize_before_you_read_explanation",
     "select_staged_a2_summary",
+    "unify_homogeneous_list_treatments",
     "validate_content_plan",
     "validate_fact_glossary",
 ]
@@ -4944,16 +4949,8 @@ _NON_LEXICAL_KIND_MARKER_RE = re.compile(
     r"\bwordplay\b|\bpun\b|\bparody\b)",
     re.IGNORECASE,
 )
-_VERSE_TERMINAL_PUNCT_RE = re.compile(r"""[.!?…:][”"’'»)\]]*\s*$""")
-_VERSE_CLOSURE_PUNCT_RE = re.compile(r"""[.!?…][”"’'»)\]]*\s*$""")
-_VERSE_LIST_PREFIX_RE = re.compile(r"^\s*(?:[-•*–—]|\d+[.)])\s+")
-_VERSE_CARDINAL_START_RE = re.compile(
-    r"^\s*(?:one|two|three|four|five|six|seven|eight|nine|ten)\b",
-    re.IGNORECASE,
-)
-_VERSE_OPENING_QUOTES = '‘“"\'«'
-_VERSE_CLOSING_QUOTES = '’”"\'»'
-_VERSE_WORD_RE = re.compile(r"[A-Za-z\u00C0-\u024FА-Яа-яЁё]+(?:['’-][A-Za-z\u00C0-\u024FА-Яа-яЁё]+)*")
+_HOMOGENEOUS_LIST_BLOCK_TYPES = frozenset({BlockType.LIST_ITEM, BlockType.PARAGRAPH})
+_NUMBERED_LIST_ITEM_RE = re.compile(r"^\d+[.)]\s+\S")
 
 
 @dataclass(frozen=True, slots=True)
@@ -5090,177 +5087,6 @@ def normalize_difficulty_kinds(
     return _replace_payload_difficulties(payload, updated)
 
 
-def _strip_leading_quotes(text: str) -> str:
-    return text.lstrip().lstrip(_VERSE_OPENING_QUOTES).lstrip()
-
-
-def _starts_with_upper_verse(text: str) -> bool:
-    stripped = _strip_leading_quotes(text)
-    for ch in stripped:
-        if ch.isalpha():
-            return ch.isupper()
-    return False
-
-
-def _is_closed_dialogue_line(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if stripped[0] in _VERSE_OPENING_QUOTES and stripped[-1] in _VERSE_CLOSING_QUOTES:
-        return True
-    quotes = list(_DIALOGUE_QUOTES.finditer(stripped))
-    if quotes and quotes[-1].end() < len(stripped):
-        tail = stripped[quotes[-1].end():].strip()
-        if tail and any(ch.isalpha() for ch in tail):
-            return True
-    return False
-
-
-def _is_full_block_italic(block: DocumentBlock) -> bool:
-    text = block.text
-    first = next((i for i, ch in enumerate(text) if not ch.isspace()), None)
-    if first is None:
-        return False
-    last = next((i for i in range(len(text) - 1, -1, -1) if not text[i].isspace()), first) + 1
-    return any(
-        ann.type is InlineAnnotationType.ITALIC and ann.start <= first and ann.end >= last
-        for ann in block.inline_annotations
-    )
-
-
-def _is_verse_paragraph_candidate(block: DocumentBlock) -> bool:
-    if block.type is not BlockType.PARAGRAPH:
-        return False
-    stripped = block.text.strip()
-    if not stripped or len(stripped) > 100:
-        return False
-    if _VERSE_LIST_PREFIX_RE.match(stripped):
-        return False
-    if _is_closed_dialogue_line(stripped):
-        return False
-    words = _VERSE_WORD_RE.findall(stripped)
-    if not (2 <= len(words) <= 15):
-        return False
-    # At most one internal sentence break inside a single verse line.
-    internal = stripped[:-1]
-    breaks = len(re.findall(r"[.!?…]\s+[A-ZА-ЯЁ]", internal))
-    return breaks <= 1
-
-
-def _is_valid_implicit_verse_run(run: Sequence[DocumentBlock]) -> bool:
-    if len(run) < 3:
-        return False
-    # Require sentence-case prose lines (distinguishes verse from Title Case lists/addresses).
-    non_initial_alpha = 0
-    non_initial_lower = 0
-    for block in run:
-        tokens = _VERSE_WORD_RE.findall(block.text)
-        for token in tokens[1:]:
-            if len(token) > 1:
-                non_initial_alpha += 1
-                if token[0].islower():
-                    non_initial_lower += 1
-    if non_initial_alpha == 0 or non_initial_lower * 2 <= non_initial_alpha:
-        return False
-    final_closed = _VERSE_CLOSURE_PUNCT_RE.search(run[-1].text) is not None
-    all_italic = all(_is_full_block_italic(block) for block in run)
-    if not final_closed and not all_italic:
-        return False
-    # Guard against unnumbered item lists (e.g. "One plain hat (black)").
-    cardinal_starts = sum(1 for block in run if _VERSE_CARDINAL_START_RE.match(block.text))
-    if cardinal_starts * 2 >= len(run):
-        return False
-    if not final_closed and sum(1 for block in run if "(" in block.text and ")" in block.text) * 2 >= len(run):
-        return False
-    # Require enjambment + verse capitalization on >= half (and >= 2) of non-final lines.
-    non_final = len(run) - 1
-    enjambed_caps = 0
-    for index in range(non_final):
-        cur_text = run[index].text.strip()
-        next_text = run[index + 1].text.strip()
-        if (
-            _VERSE_TERMINAL_PUNCT_RE.search(cur_text) is None
-            and _starts_with_upper_verse(next_text)
-        ):
-            enjambed_caps += 1
-    return enjambed_caps >= 2 and enjambed_caps * 2 >= non_final
-
-
-def _is_enjambed_pair(first_text: str, second_text: str) -> bool:
-    return (
-        _VERSE_TERMINAL_PUNCT_RE.search(first_text.strip()) is None
-        and _starts_with_upper_verse(second_text.strip())
-    )
-
-
-def _extract_implicit_verse_subruns(
-    strip: Sequence[DocumentBlock],
-) -> list[tuple[DocumentBlock, ...]]:
-    """Trim leading/trailing prose paragraphs around enjambed verse lines inside a strip."""
-    if len(strip) < 3:
-        return []
-    enjambed_indices = [
-        i for i in range(len(strip) - 1)
-        if _is_enjambed_pair(strip[i].text, strip[i + 1].text)
-    ]
-    if len(enjambed_indices) < 2:
-        return []
-    # Group enjambed transitions separated by at most 1 closed verse line (e.g. rhyming couplets).
-    groups: list[tuple[int, int]] = []
-    cur_start = enjambed_indices[0]
-    cur_end = enjambed_indices[0] + 1
-    for idx in enjambed_indices[1:]:
-        if idx <= cur_end + 1:
-            cur_end = idx + 1
-        else:
-            groups.append((cur_start, cur_end))
-            cur_start = idx
-            cur_end = idx + 1
-    groups.append((cur_start, cur_end))
-    result: list[tuple[DocumentBlock, ...]] = []
-    for start_idx, end_idx in groups:
-        candidate = tuple(strip[start_idx:end_idx + 1])
-        if _is_valid_implicit_verse_run(candidate):
-            result.append(candidate)
-    return result
-
-
-def _detect_verse_stanza_runs(blocks: Sequence[DocumentBlock]) -> tuple[tuple[DocumentBlock, ...], ...]:
-    """Detect contiguous multi-block verse stanzas (explicit POEM or enjambed PARAGRAPH)."""
-    runs: list[tuple[DocumentBlock, ...]] = []
-    n = len(blocks)
-    index = 0
-    while index < n:
-        block = blocks[index]
-        if block.type is BlockType.POEM:
-            end = index + 1
-            while (
-                end < n
-                and blocks[end].type is BlockType.POEM
-                and blocks[end].order == blocks[end - 1].order + 1
-            ):
-                end += 1
-            if end - index >= 2:
-                runs.append(tuple(blocks[index:end]))
-            index = end
-            continue
-        if _is_verse_paragraph_candidate(block):
-            italic_flag = _is_full_block_italic(block)
-            end = index + 1
-            while (
-                end < n
-                and blocks[end].order == blocks[end - 1].order + 1
-                and _is_verse_paragraph_candidate(blocks[end])
-                and _is_full_block_italic(blocks[end]) is italic_flag
-            ):
-                end += 1
-            runs.extend(_extract_implicit_verse_subruns(blocks[index:end]))
-            index = end
-            continue
-        index += 1
-    return tuple(runs)
-
-
 def _item_has_mixed_translate_segments(item: TreatmentPlanItemResponse) -> bool:
     if not item.segments:
         return False
@@ -5304,7 +5130,7 @@ def unify_verse_stanza_treatments(
                 changed = True
 
     # Group 1 (contiguous BlockType.POEM) & Group 2 (implicit enjambed PARAGRAPH stanzas).
-    for run in _detect_verse_stanza_runs(ordered_blocks):
+    for run in detect_verse_stanza_runs(ordered_blocks):
         run_indices = [item_index_by_block_id[b.id] for b in run if b.id in item_index_by_block_id]
         if len(run_indices) < 2:
             continue
@@ -5324,6 +5150,121 @@ def unify_verse_stanza_treatments(
                 if forced is not updated[i]:
                     updated[i] = forced
                     changed = True
+
+    return tuple(updated), changed
+
+
+def _is_title_by_author_item(text: str) -> bool:
+    """Whether `text` matches a `<Title> by <Author>` booklist item rather than narrative prose."""
+    if "\n" in text or len(text) > 200:
+        return False
+    title_part, sep, author_part = text.rpartition(" by ")
+    if not sep:
+        return False
+    author_tokens = author_part.strip().rstrip(".;,").split()
+    if not (1 <= len(author_tokens) <= 4):
+        return False
+    for token in author_tokens:
+        core = token.strip(".,;:()[]\"'“”‘’«»")
+        if not core or not any(ch.isalpha() for ch in core) or not core[0].isupper():
+            return False
+    title_tokens = title_part.strip().split()
+    if not (1 <= len(title_tokens) <= 16):
+        return False
+    has_upper_alpha = False
+    for idx, token in enumerate(title_tokens):
+        core = token.strip(".,:;!?()[]\"'“”‘’«»—–-")
+        if not core:
+            continue
+        if any(ch.isdigit() for ch in core) and not any(ch.isalpha() for ch in core):
+            continue
+        if core[0].isupper():
+            has_upper_alpha = True
+            continue
+        if idx > 0 and core.casefold() in _TITLE_CASE_MINOR_WORDS:
+            continue
+        return False
+    return has_upper_alpha
+
+
+def _homogeneous_list_kind(block: DocumentBlock) -> str | None:
+    """Classify a block as a numbered (`1.`/`1)`) or `<Title> by <Author>` list item."""
+    if block.type not in _HOMOGENEOUS_LIST_BLOCK_TYPES:
+        return None
+    stripped = block.text.strip()
+    if not stripped:
+        return None
+    if _NUMBERED_LIST_ITEM_RE.match(stripped):
+        return "numbered"
+    if _is_title_by_author_item(stripped):
+        return "title_by_author"
+    return None
+
+
+def unify_homogeneous_list_treatments(
+    items: Sequence[TreatmentPlanItemResponse],
+    blocks: Sequence[DocumentBlock],
+    block_ids_by_alias: Mapping[str, str],
+    *,
+    english_help: bool = False,
+) -> tuple[tuple[TreatmentPlanItemResponse, ...], bool]:
+    """Lift a single stray `READ_AS_IS` inside a numbered or `<Title> by <Author>` list.
+
+    Leaves `GLOSSARY_ONLY`, quantitative items (`1 telescope`), and prose untouched.
+    """
+    if english_help or not items or not blocks:
+        return tuple(items), False
+    blocks_by_id = {block.id: block for block in blocks}
+    item_index_by_block_id: dict[str, int] = {}
+    ordered_blocks: list[DocumentBlock] = []
+    for idx, item in enumerate(items):
+        block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+        if block is not None:
+            item_index_by_block_id[block.id] = idx
+            ordered_blocks.append(block)
+    ordered_blocks.sort(key=lambda b: b.order)
+    updated = list(items)
+    changed = False
+
+    n = len(ordered_blocks)
+    index = 0
+    while index < n:
+        kind = _homogeneous_list_kind(ordered_blocks[index])
+        if kind is None:
+            index += 1
+            continue
+        end = index + 1
+        while (
+            end < n
+            and ordered_blocks[end].order == ordered_blocks[end - 1].order + 1
+            and _homogeneous_list_kind(ordered_blocks[end]) == kind
+        ):
+            end += 1
+        if end - index >= 3:
+            run_indices = [
+                item_index_by_block_id[b.id]
+                for b in ordered_blocks[index:end]
+                if b.id in item_index_by_block_id
+            ]
+            translate_count = sum(
+                1
+                for i in run_indices
+                if updated[i].treatment is BlockTreatment.TRANSLATE
+                or any(seg.treatment is BlockTreatment.TRANSLATE for seg in updated[i].segments)
+            )
+            read_as_is_indices = [
+                i
+                for i in run_indices
+                if updated[i].treatment is BlockTreatment.READ_AS_IS
+                and all(seg.treatment is BlockTreatment.READ_AS_IS for seg in updated[i].segments)
+            ]
+            if translate_count >= 2 and len(read_as_is_indices) == 1:
+                target_idx = read_as_is_indices[0]
+                forced = _force_block_treatment(updated[target_idx], BlockTreatment.TRANSLATE)
+                if forced is not updated[target_idx]:
+                    updated[target_idx] = forced
+                    changed = True
+        index = end
 
     return tuple(updated), changed
 
@@ -5738,7 +5679,7 @@ def normalize_pedagogical_response(
             if demoted is not None:
                 demoted_blocks.append(demoted)
 
-    # Step 3: Unify verse/poem stanzas across all reader levels (except english_help).
+    # Step 3: Unify verse/poem stanzas and homogeneous lists across all reader levels (except english_help).
     if not english_help:
         unified_items, verse_changed = unify_verse_stanza_treatments(
             items, blocks, block_ids_by_alias, english_help=english_help,
@@ -5746,7 +5687,14 @@ def normalize_pedagogical_response(
         if verse_changed:
             items = list(unified_items)
             changed = True
-            # Prune stale demotion state for any block lifted to full TRANSLATE by verse unification.
+        list_unified_items, list_changed = unify_homogeneous_list_treatments(
+            items, blocks, block_ids_by_alias, english_help=english_help,
+        )
+        if list_changed:
+            items = list(list_unified_items)
+            changed = True
+        if verse_changed or list_changed:
+            # Prune stale demotion state for any block lifted to full TRANSLATE by Step 3 unification.
             promoted_full_translate_owners: set[str] = set()
             for idx, upd in enumerate(items):
                 all_translate = upd.treatment is BlockTreatment.TRANSLATE and (

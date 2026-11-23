@@ -705,6 +705,44 @@ def test_poem_stanzas_preserved() -> None:
     assert translated_children[translated_children.index("br") + 1] == "br"
     assert _plain(source) == text.replace("\n", "")
     assert _plain(translated) == translation.replace("\n", "")
+    assert "lg-poem" in _classes(unit)
+
+
+def test_poem_unit_adds_lg_poem_class_and_stylesheet_rules() -> None:
+    """`unit.lines=True` renders `.lg-poem` on `.lg-unit`, and both CSS files define poem spacing."""
+    stanza_line = _block("Enter, stranger, but take heed", block_type=BlockType.PARAGRAPH)
+    prose = _block("Harry looked at the doors.", block_id="prose-1", order=1)
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(stanza_line, prose),
+    )
+    root = _chapter(
+        stanza_line,
+        prose,
+        layout=_layout(
+            section,
+            {
+                stanza_line.id: (_unit(stanza_line, translation="Войди, чужеземец, но остерегись", lines=True),),
+                prose.id: (_unit(prose, lines=False),),
+            },
+        ),
+    )
+    units = _units(root)
+    assert "lg-poem" in _classes(units[0])
+    assert "lg-poem" not in _classes(units[1])
+
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    for sheet in (_STYLESHEET, web):
+        assert re.search(r"\.lg-poem\s*\{[^}]*margin-left\s*:\s*1\.2em\s*;", sheet)
+        assert re.search(
+            r"\.lg-unit\.lg-end\.lg-poem\s*\{[^}]*margin-bottom\s*:\s*0\.45em\s*;", sheet
+        )
 
 
 def test_heading_keeps_original_level() -> None:

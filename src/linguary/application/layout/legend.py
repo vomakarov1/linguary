@@ -10,10 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _ORIGINAL = "Абзац оригинала всегда идёт первым."
-_TRANSLATION = (
+_TRANSLATION_FADING = (
     "Строка с линией слева — перевод этой части абзаца. "
     "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
     "По мере чтения переводов становится меньше — так вы постепенно привыкаете к тексту. "
+    "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом."
+)
+_TRANSLATION_STEADY = (
+    "Строка с линией слева — перевод этой части абзаца. "
+    "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
     "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом."
 )
 _NOTES = (
@@ -56,6 +61,7 @@ class LayoutFeatures:
     has_poems: bool
     has_speakers: bool
     sections: frozenset[str]
+    fades_translation: bool = True
 
 
 def legend_lines(features: LayoutFeatures) -> tuple[str, ...]:
@@ -80,13 +86,16 @@ def legend_lines(features: LayoutFeatures) -> tuple[str, ...]:
         return ()
     lines = [_ORIGINAL]
     if features.has_translation:
-        lines.append(_TRANSLATION)
+        lines.append(
+            _TRANSLATION_FADING if features.fades_translation else _TRANSLATION_STEADY
+        )
     if features.has_notes:
         lines.append(_NOTES)
     if labels:
+        listed = ", ".join(label.rstrip(".") for label in labels) + "."
         lines.append(
             "Слово в начале примечания называет его вид: "
-            f"{', '.join(labels)} Примечание без такой пометки объясняет слово, выражение или устройство фразы."
+            f"{listed} Примечание без такой пометки объясняет слово, выражение или устройство фразы."
         )
     if features.has_ipa:
         lines.append(_IPA)
@@ -95,7 +104,7 @@ def legend_lines(features: LayoutFeatures) -> tuple[str, ...]:
     if features.has_poems:
         lines.append(_POEM)
     if sections:
-        lines.append("Перед главой: " + "; ".join(sections))
+        lines.append("Перед главой: " + "; ".join(sections) + ".")
     return tuple(lines)
 
 

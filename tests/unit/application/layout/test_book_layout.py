@@ -481,12 +481,13 @@ def test_structure_only_layout_whole_blocks_no_notes() -> None:
     ]
     assert shown[0].notes == ()
     assert (shown[0].continues, shown[0].ends_paragraph) == (False, True)
-    assert layout.features == LayoutFeatures(True, False, frozenset(), False, False, False, frozenset())
+    assert layout.features == LayoutFeatures(
+        True, False, frozenset(), False, False, False, frozenset(), fades_translation=False
+    )
     assert layout.legend == (
         "Абзац оригинала всегда идёт первым.",
         "Строка с линией слева — перевод этой части абзаца. "
         "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
-        "По мере чтения переводов становится меньше — так вы постепенно привыкаете к тексту. "
         "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом.",
     )
     assert layout.ipa_key == ()
@@ -1260,6 +1261,7 @@ def test_features_collected_for_legend() -> None:
         has_poems=True,
         has_speakers=False,
         sections=frozenset({"previously", "before_you_read"}),
+        fades_translation=False,
     )
     assert "previously" in layout.features.sections
     assert "review" not in layout.features.sections
@@ -2337,3 +2339,85 @@ def test_vocab_dedup_no_translate_flip_or_double_count_and_mixed_segment_preserv
     assert len(_notes(layout, prep_blocks[3].id)) == 1
     assert len(_notes(layout, prep_blocks[5].id)) == 1
     assert len(_notes(layout, prep_blocks[7].id)) == 0
+
+
+def test_gringotts_paragraph_stanza_sets_lines_and_has_poems() -> None:
+    """Implicit enjambed verse stanza in PARAGRAPH blocks sets `unit.lines=True` and `has_poems=True`."""
+    intro = _block("c1", 0, "Words were carved beside the doors:")
+    stanza = (
+        _block("c1", 1, "Enter, stranger, but take heed"),
+        _block("c1", 2, "Of what awaits the sin of greed,"),
+        _block("c1", 3, "For those who take, but do not earn,"),
+        _block("c1", 4, "Must pay most dearly in their turn."),
+    )
+    outro = _block("c1", 5, "Harry looked up at the doors.")
+    section = _section("c1", 0, "Chapter 1", (intro, *stanza, outro))
+    results = {
+        b.id: BlockProcessingResult(b.id, BlockTreatment.TRANSLATE, translated_text=f"Перевод {i}.")
+        for i, b in enumerate(stanza, start=1)
+    }
+    layout = build_book_layout(_inputs(_document((section,)), results, reader_level="a2"))
+    units = layout.chapters[section.id].units
+
+    assert units[intro.id][0].lines is False
+    assert all(units[b.id][0].lines is True for b in stanza)
+    assert units[outro.id][0].lines is False
+    assert layout.features.has_poems is True
+
+
+def test_fades_translation_threshold_by_content_word_count() -> None:
+    """`fades_translation` is True only for A2 without english_help, >= 2 content chapters, and >= 25_000 words before last."""
+    ten_words = "word " * 10
+    big_block_15k = "word " * 15_000
+    big_block_10k = "word " * 10_000
+    block_9999 = "word " * 9_999
+
+    def _build(
+        sections: tuple[DocumentSection, ...],
+        *,
+        reader_level: str | None = "a2",
+        english_help: bool = False,
+    ) -> BookLayout:
+        first_block = sections[0].ordered_blocks[0]
+        results = {
+            first_block.id: BlockProcessingResult(
+                first_block.id, BlockTreatment.TRANSLATE, translated_text="слово"
+            )
+        }
+        return build_book_layout(
+            _inputs(
+                _document(sections),
+                results,
+                reader_level=reader_level,
+                english_help=english_help,
+            )
+        )
+
+    # 1 content chapter with >= 25_000 words -> False
+    single_ch = _section("ch1", 0, "Chapter 1", (_block("ch1", 0, big_block_15k + big_block_10k),))
+    assert _build((single_ch,)).features.fades_translation is False
+
+    # 2 content chapters: 24_999 words before last -> False
+    ch1_under = _section("ch1", 0, "Chapter 1", (_block("ch1", 0, big_block_15k + block_9999),))
+    ch2_tail = _section("ch2", 1, "Chapter 2", (_block("ch2", 0, ten_words),))
+    assert _build((ch1_under, ch2_tail)).features.fades_translation is False
+
+    # Front matter + notes-only words do NOT count toward the 25_000 threshold
+    front = _section("front", 0, "Title", (_block("front", 0, big_block_15k + big_block_15k),))
+    ch1_small = _section("ch1", 1, "Chapter 1", (_block("ch1", 0, ten_words),))
+    notes = _section(
+        "notes",
+        2,
+        "Notes",
+        (_block("notes", 0, big_block_15k, kind=BlockType.FOOTNOTE),),
+    )
+    ch2_small = _section("ch2", 3, "Chapter 2", (_block("ch2", 0, ten_words),))
+    assert _build((front, ch1_small, notes, ch2_small)).features.fades_translation is False
+
+    # Exactly 25_000 words across ch1 + ch2 before ch3 (last) -> True for A2 without english_help
+    ch1_15k = _section("ch1", 0, "Chapter 1", (_block("ch1", 0, big_block_15k),))
+    ch2_10k = _section("ch2", 1, "Chapter 2", (_block("ch2", 0, big_block_10k),))
+    ch3_last = _section("ch3", 2, "Chapter 3", (_block("ch3", 0, ten_words),))
+    assert _build((ch1_15k, ch2_10k, ch3_last)).features.fades_translation is True
+    assert _build((ch1_15k, ch2_10k, ch3_last), reader_level="b2").features.fades_translation is False
+    assert _build((ch1_15k, ch2_10k, ch3_last), english_help=True).features.fades_translation is False

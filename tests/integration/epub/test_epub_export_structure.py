@@ -13,7 +13,7 @@ from export_pipeline import documents_of, elements, package_of, run_export, spin
 from linguary.adapters.epub import EbookLibEpubReader, verify_exported_epub
 from linguary.application.ports.epub import EpubReadRequest, ExportWarningKind
 from linguary.domain import (
-    BlockType, BlockTreatment, BlockProcessingResult,
+    BlockType, BlockTreatment, BlockProcessingResult, SupportStatus,
 )
 from linguary.domain.content_plan import SourceAnchor
 from linguary.domain.learning import FragmentAssistance
@@ -301,3 +301,39 @@ async def test_ipa_dict_epub_notice_links_are_internal_and_unique(tmp_path):
     assert pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-sources-link') == []
     for link in elements(section, 'a'):
         assert not link.get('href', '').startswith(('http:', 'https:'))
+
+
+def test_scene_divider_elements_preserved_opaque_without_lost_warning(tmp_path: Path) -> None:
+    """`<p>*</p>` and `<div>* * *</div>` export verbatim as opaque markup without OPAQUE_FRAGMENT_LOST."""
+    source = build_epub(
+        tmp_path / "dividers.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1>"
+                "<p>Opening.</p>"
+                "<p>*</p>"
+                "<div class='sep'>* * *</div>"
+                "<p>Closing.</p>"
+            )
+        },
+        toc=[("chapter1.xhtml", "Chapter One")],
+    )
+    run = run_export(source, tmp_path=tmp_path)
+
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+    assert not any(
+        w.kind is ExportWarningKind.OPAQUE_FRAGMENT_LOST for w in run.exported.warnings
+    )
+    imported_blocks = list(run.imported.document.blocks())
+    opaque_dividers = [b for b in imported_blocks if b.support_status is SupportStatus.PRESERVE_OPAQUE]
+    assert [(b.type, b.text) for b in opaque_dividers] == [
+        (BlockType.OTHER, "*"),
+        (BlockType.OTHER, "* * *"),
+    ]
+    chapter_root = documents_of(run.path)["OEBPS/chapter1.xhtml"]
+    assert [el.text for el in elements(chapter_root, "p") if el.text == "*"] == ["*"]
+    assert [
+        (el.get("class"), el.text)
+        for el in elements(chapter_root, "div")
+        if el.get("class") == "sep"
+    ] == [("sep", "* * *")]

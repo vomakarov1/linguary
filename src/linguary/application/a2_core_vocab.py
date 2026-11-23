@@ -272,7 +272,7 @@ km cm mm kg pm
 # Basic interjections and discourse markers.
 _INTERJECTIONS: frozenset[str] = _words("""
 ah aha bye eh er erm goodbye ha heh hello hey hi hm hmm hooray huh hurray
-mhm oh oops ouch ow pardon phew please psst shh shoo sorry thanks thank
+mhm mmm oh oops ouch ow pardon phew please psst shh shoo sorry thanks thank
 ugh uh um welcome well wow yay bravo
 """)
 
@@ -601,8 +601,8 @@ economic economy effect electric electronic elephant email energy engineer euro
 exam express extra
 factory family fan fantasy fashion festival film final firm fitness flag
 flash focus football format
-galaxy garage gas general genius geography global golf gram group guide guitar gym
-helicopter hero history hobby hockey hospital hostel hotel
+galaxy garage gas general genius geography global goblin golf gram group guide guitar gym
+hamburger helicopter hero history hobby hockey hospital hostel hotel
 idea ideal image individual industry info information interest international
 internet interview
 jacket jazz jeans journal journalist juice
@@ -884,6 +884,10 @@ def _is_known_name(norm: str, known_tokens: frozenset[str]) -> bool:
     return False
 
 
+_ALL_CAPS_ONOMATOPOEIA: frozenset[str] = frozenset({"boom", "smash", "wham", "thud", "whoosh"})
+_ELONGATED_SCREAM_RE = re.compile(r"([a-z])\1{2,}", re.IGNORECASE)
+
+
 def _is_trivial_token(raw: str, norm: str) -> bool:
     if not norm or len(norm) <= 1:
         return True
@@ -892,6 +896,10 @@ def _is_trivial_token(raw: str, norm: str) -> bool:
     if _NUMBER_TOKEN_RE.fullmatch(norm):
         return True
     if raw.isupper() and bool(_ROMAN_NUMERAL_RE.fullmatch(raw)):
+        return True
+    if raw.isupper() and norm in _ALL_CAPS_ONOMATOPOEIA:
+        return True
+    if _ELONGATED_SCREAM_RE.search(norm) is not None:
         return True
     return False
 

@@ -506,3 +506,22 @@ def test_title_case_minor_words_and_author_attribution_boundaries() -> None:
 def test_lowercase_article_a_does_not_bypass_title_case_guard() -> None:
     assert non_core_a2_words("Look, a Severus Snape", known_names=()) == ()
     assert non_core_a2_words("Wait, a Harry Dursley", known_names=()) == ()
+
+
+def test_onomatopoeia_screams_and_added_a2_tokens() -> None:
+    from linguary.application.a2_core_vocab import non_core_a2_word_spans
+
+    assert is_core_a2_word("hamburger") is True
+    assert is_core_a2_word("goblin") is True
+    assert is_core_a2_word("mmm") is True
+    assert is_core_a2_word("ouch") is True
+
+    assert non_core_a2_word_spans("BOOM. SMASH! WHAM! THUD. WHOOSH!", known_names=()) == ()
+    assert non_core_a2_word_spans("AAAAARRRGH! A-A-AAAARGH!", known_names=()) == ()
+    assert non_core_a2_word_spans("Mmm! Ouch! A goblin ate a hamburger.", known_names=()) == ()
+
+    for word in ("boom", "boomed", "Boom", "BOOM", "smash", "wham", "thud", "whoosh"):
+        assert is_core_a2_word(word) is False
+
+    lower_words = non_core_a2_words("A loud thud, smash, and wham whooshed as it boomed.")
+    assert lower_words == ("thud", "smash", "wham", "whooshed", "boomed")

@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
 from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
@@ -27,6 +28,7 @@ from linguary.application.layout.review import ReviewEntry
 from linguary.application.layout.units import LayoutUnit, _whole_block_translation, block_units
 from linguary.application.layout.who_is_who import WhoEntry, _content_chapter_numbers
 from linguary.application.pronunciation_projection import project_pronunciations
+from linguary.application.verse import detect_verse_stanza_runs
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
@@ -43,6 +45,8 @@ from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, S
 
 _SHOWN_CERTAINTY = frozenset({"explicit", "inferred"})
 _UNIT_SPEAKER_CERTAINTY = frozenset({"inferred"})
+_WORD_TOKEN_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
+_FADING_PROGRESSION_WORDS_THRESHOLD = 25_000
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _OPEN_QUOTES = {"“": "”", "‘": "’", "«": "»", '"': '"'}
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st", "prof"})
@@ -379,6 +383,11 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             current_chapter_num = section_number
         dropped = dropped_by_section.get(section.id, frozenset())
         plan = _plan_without(plans.get(section.id), dropped)
+        poem_block_ids = {
+            poem_block.id
+            for run in detect_verse_stanza_runs(section.ordered_blocks)
+            for poem_block in run
+        }
         units: dict[str, tuple[LayoutUnit, ...]] = {}
         for block in section.ordered_blocks:
             result = inputs.results.get(block.id)
@@ -434,6 +443,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                 notes,
                 speakers,
                 target_language=document.target_language,
+                is_poem=block.id in poem_block_ids,
             )
         chapters[section.id] = ChapterLayout(
             section_id=section.id,
@@ -443,6 +453,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             review=(),
         )
     features = _features(
+        document,
         chapters,
         inputs.analyses,
         reader_level=inputs.reader_level,
@@ -1336,6 +1347,7 @@ def _plan_without(plan: ContentPlan | None, dropped: frozenset[str]) -> ContentP
 
 
 def _features(
+    document: CanonicalDocument,
     chapters: Mapping[str, ChapterLayout],
     analyses: Sequence[ChapterAnalysis],
     *,
@@ -1383,6 +1395,30 @@ def _features(
         analysis.before_you_read and analysis.section_id in content_ids for analysis in analyses
     ):
         sections.add("before_you_read")
+    content_sections = tuple(
+        section
+        for section in document.ordered_sections
+        if not document.is_front_matter(section) and not section.is_notes_only
+    )
+    is_a2_translation_book = (
+        isinstance(reader_level, str)
+        and reader_level.strip().lower() == "a2"
+        and not english_help
+    )
+    words_before_last = (
+        sum(
+            len(_WORD_TOKEN_RE.findall(block.text))
+            for section in content_sections[:-1]
+            for block in textual_blocks(section)
+        )
+        if is_a2_translation_book and len(content_sections) >= 2
+        else 0
+    )
+    fades_translation = (
+        is_a2_translation_book
+        and len(content_sections) >= 2
+        and words_before_last >= _FADING_PROGRESSION_WORDS_THRESHOLD
+    )
     return LayoutFeatures(
         has_translation=any(unit.translation for unit in units),
         has_notes=any(item.number is not None for unit in units for item in unit.notes),
@@ -1393,6 +1429,7 @@ def _features(
             item.note.origin == "speaker" for unit in units for item in unit.notes
         ),
         sections=frozenset(sections),
+        fades_translation=fades_translation,
     )
 
 

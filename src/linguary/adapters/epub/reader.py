@@ -1014,6 +1014,24 @@ def _image_source(element: etree._Element) -> str | None:
     )
 
 
+_DIVIDER_GLYPHS = frozenset({"*", "•", "·", "~", "—", "–", "-"})
+_LINK_OR_NOTE_ANNOTATION_TYPES = frozenset(
+    {InlineAnnotationType.LINK, InlineAnnotationType.FOOTNOTE_REFERENCE}
+)
+
+
+def _is_scene_divider(content: InlineContent) -> bool:
+    """Whether inline content consists solely of decorative divider signs without links."""
+    if any(ann.type in _LINK_OR_NOTE_ANNOTATION_TYPES for ann in content.annotations):
+        return False
+    stripped = content.text.strip()
+    if not stripped:
+        return False
+    return any(ch in _DIVIDER_GLYPHS for ch in stripped) and all(
+        ch in _DIVIDER_GLYPHS or ch.isspace() for ch in stripped
+    )
+
+
 def _leaf_type(
     element: etree._Element, *, context: _BlockContext, content: InlineContent
 ) -> BlockType:
@@ -1039,6 +1057,8 @@ def _leaf_type(
         return BlockType.POEM
     if context.inherited_type is not None:
         return context.inherited_type
+    if tag in ("p", "div") and _is_scene_divider(content):
+        return BlockType.OTHER
     return BlockType.PARAGRAPH if content.text else BlockType.OTHER
 
 

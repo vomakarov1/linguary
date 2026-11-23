@@ -71,6 +71,8 @@ def render_unit(
         classes.append("lg-cont")
     if unit.ends_paragraph:
         classes.append("lg-end")
+    if unit.lines:
+        classes.append("lg-poem")
     reading = _sub(host, "div", {"class": " ".join(classes)})
     heading = block.type is BlockType.HEADING
     if not heading and not unit.continues:

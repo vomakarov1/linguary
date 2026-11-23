@@ -1130,6 +1130,9 @@ def test_result_page_renders_units_like_book(client: TestClient, application: Ap
     assert translated_row.xpath('./span[@class="lg-speaker"]') == []
     assert translated_row.text_content().strip() == "Потом она ушла."
     poem_source = poem.xpath('.//p[@class="lg-src"]')[0]
+    poem_unit_div = poem.xpath('./div[contains(concat(" ", @class, " "), " lg-unit ")]')[0]
+    assert "lg-poem" in (poem_unit_div.get("class") or "").split()
+    assert all("lg-poem" not in (u.get("class") or "").split() for u in units)
     poem_text = "How doth\nImprove,\n\nAnd pour"
     assert len(poem_source.xpath("./br")) == poem_text.count("\n")
     assert b"<br" in html.tostring(poem_source).split(b"Improve,")[1].split(b"And pour")[0]

@@ -54,7 +54,7 @@
         {% set markers.items = markers.items + [{'offset': marker_end - unit.start, 'number': item.note.number, 'id': item.id}] %}
       {% endif %}
     {% endfor %}
-    <div class="lg-unit{% if unit.continues %} lg-cont{% endif %}{% if unit.ends_paragraph %} lg-end{% endif %}">
+    <div class="lg-unit{% if unit.continues %} lg-cont{% endif %}{% if unit.ends_paragraph %} lg-end{% endif %}{% if unit.lines %} lg-poem{% endif %}">
       <p class="lg-src">{%- set cursor = namespace(at=0) -%}
         {%- for marker in markers.items|sort(attribute='offset') -%}
           {{ broken(unit.original[cursor.at:marker.offset], unit.lines) }}<a class="lg-ref" href="#{{ marker.id }}"><sup>{{ marker.number }}</sup></a>
