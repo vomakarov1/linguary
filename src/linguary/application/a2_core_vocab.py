@@ -694,6 +694,260 @@ A2_CORE_VOCABULARY: frozenset[str] = (
     | _INTERNATIONALISMS
 ) - _NON_CORE_OVERRIDE
 
+_A1_FUNCTION_AND_TIME: frozenset[str] = _words("""
+a an the this that these those
+i me my you your he him his she her it its we us our they them their
+who what where when why how
+all any many much more most no none some every
+one two three four five six seven eight nine ten eleven twelve hundred thousand million
+first second third
+about after and at because before between but by for from if in into near next not
+of off on or out over so than to under up with without
+never yes ok okay hello hi bye goodbye please sorry thanks thank welcome
+can will
+monday tuesday wednesday thursday friday saturday sunday
+january february march april may june july august september october november december
+morning afternoon evening night today tonight tomorrow yesterday
+day week month year hour minute time summer winter spring autumn
+""")
+
+_A1_VERBS: frozenset[str] = _words("""
+answer arrive ask be begin believe bring build buy
+call carry change check choose clean close come cook copy cost cry cut
+dance decide die do draw drink drive
+eat end enjoy explain
+fall feel film find finish fly follow forget
+get give go grow
+happen hate have hear help hold hope
+jump
+keep kill know
+laugh learn leave let like listen live look lose love
+make mean meet move
+name need
+open order
+paint park pass pay phone plan play practice practise prefer prepare push put
+rain read remember repeat reply rest return ride run
+say see sell send show sing sit sleep smile snow speak spell spend stand start stay stop study swim
+take talk teach telephone tell text thank think travel try turn
+understand use
+visit
+wait wake walk want wash watch wear win wish work write
+""")
+
+_A1_NOUNS: frozenset[str] = _words("""
+air airport animal apple arm
+baby back bag ball bathroom beach bed bedroom beer bicycle bike bird birthday boat book
+bookshop bookstore box boy bread breakfast brother bus butter
+cake car cat chair cheese chicken child church city classroom clothes cloud coat
+color colour country cow cup
+dad daddy daughter desk dinner dog door dress drink duck
+ear earth egg eye
+face family farm father fire fish floor flower food foot forest friend fruit
+game garden girl glass glasses grandfather grandmother grass
+hair hand hat head heart holiday home horse house
+ice island
+jacket job
+key kitchen knife
+lake lamp leg letter life light lunch
+map market meat milk money moon mother mountain mouth mum mummy
+name newspaper nose number
+office oil
+page paper parent party pen pencil person pet picture pig plant plate price
+question
+rain ring roof room
+salt sand school sea seat sheep shirt shoe shop sister sky snow soap sock song sound soup
+star story street sugar sun
+table tea teacher thing ticket time tooth town train tree
+uncle
+vacation village voice
+wall water weather wife window wine woman word worker world
+""")
+
+_A1_ADJECTIVES_AND_ADVERBS: frozenset[str] = _words("""
+afraid angry
+bad beautiful big black blue boring brown busy
+cheap clean clear cold cool
+dark dead dear different difficult dirty dry
+early easy empty expensive
+famous fast fat favorite favourite fine free fresh friendly full funny
+glad good gray great green grey
+happy hard healthy heavy high hot hungry
+ill important interesting
+kind
+large last late lazy light little long loud low lucky
+main married modern
+new nice noisy normal
+old open orange
+pink poor popular possible pretty purple
+quick quiet
+ready real red rich right
+sad safe same short sick simple slow small smart soft sorry special strong sweet
+tall terrible thick thin thirsty tired true
+ugly useful
+warm weak wet white whole wide wild wrong
+yellow young
+again ago almost already also always away
+down enough even ever far here just later much
+nearly now often only perhaps probably quite really
+sometimes soon still then there together too usually very well yet
+""")
+
+_A1_INTERNATIONALISMS: frozenset[str] = _words("""
+actor actress album ambulance app artist astronaut auto
+banana bank bar battery biology blog burger bus
+cafe calendar camera camp captain center centre champion channel chef chemistry
+chocolate cinema circus classic client clinic club coach cocoa coffee comedy
+computer concert contact continent control costume credit culture
+design designer dessert detective dialogue diamond diet digital director doctor
+document dollar drama dragon
+economy effect electric electronic elephant email energy engineer euro exam express extra
+factory fantasy fashion festival film final fitness flag flash focus football format
+galaxy garage gas genius geography global golf gram group guitar gym
+hamburger helicopter hero history hobby hockey hospital hostel hotel
+idea ideal image individual industry info information internet interview
+jazz jeans journal journalist juice
+ketchup kilogram kilometer kilometre kiwi
+lemon lemonade limit lion liter litre
+machine magic mango market math mathematics maths maximum medal media medical medicine
+melon menu metal meter method metre metro mini minimum mobile model modern moment monster
+motor museum music musician mystery
+national natural negative normal
+ocean office officer official opera orange orchestra original
+palace panda park partner passport pasta pause percent period personal
+phone photo photograph photographer physics piano picnic pilot pizza planet plastic
+police popular port positive poster president printer private prize problem process product
+profession professional professor profile program programme project public
+radio real regular report reporter restaurant result risk robot rocket role romance route routine
+salad sandwich sausage secret secretary series serious server service shampoo shock signal
+site situation sofa soup special sport stadium stage standard station student studio style
+super supermarket surprise system
+tablet talent taxi team technical technology telephone telescope television tennis test text
+theater theatre ticket tiger title tomato ton tone topic total tour tourist traffic train
+trainer tram transport tunnel tv
+uniform university
+video virus visa vision vitamin volleyball
+wifi
+yogurt yoghurt
+zebra zero zone zoo
+""")
+
+_A1_IRREGULAR_TO_BASE: dict[str, str] = {
+    "am": "be",
+    "is": "be",
+    "are": "be",
+    "was": "be",
+    "were": "be",
+    "been": "be",
+    "being": "be",
+    "has": "have",
+    "had": "have",
+    "having": "have",
+    "does": "do",
+    "did": "do",
+    "done": "do",
+    "doing": "do",
+    "could": "can",
+    "would": "will",
+    "began": "begin",
+    "begun": "begin",
+    "brought": "bring",
+    "bought": "buy",
+    "chose": "choose",
+    "chosen": "choose",
+    "came": "come",
+    "drew": "draw",
+    "drawn": "draw",
+    "drank": "drink",
+    "drunk": "drink",
+    "drove": "drive",
+    "driven": "drive",
+    "ate": "eat",
+    "eaten": "eat",
+    "fell": "fall",
+    "fallen": "fall",
+    "felt": "feel",
+    "found": "find",
+    "flew": "fly",
+    "flown": "fly",
+    "forgot": "forget",
+    "forgotten": "forget",
+    "got": "get",
+    "gave": "give",
+    "given": "give",
+    "went": "go",
+    "gone": "go",
+    "grew": "grow",
+    "grown": "grow",
+    "heard": "hear",
+    "held": "hold",
+    "kept": "keep",
+    "knew": "know",
+    "known": "know",
+    "left": "leave",
+    "lost": "lose",
+    "made": "make",
+    "meant": "mean",
+    "met": "meet",
+    "paid": "pay",
+    "ran": "run",
+    "said": "say",
+    "saw": "see",
+    "seen": "see",
+    "sold": "sell",
+    "sent": "send",
+    "showed": "show",
+    "shown": "show",
+    "sang": "sing",
+    "sung": "sing",
+    "sat": "sit",
+    "slept": "sleep",
+    "spoke": "speak",
+    "spoken": "speak",
+    "spent": "spend",
+    "stood": "stand",
+    "swam": "swim",
+    "swum": "swim",
+    "took": "take",
+    "taken": "take",
+    "taught": "teach",
+    "told": "tell",
+    "thought": "think",
+    "understood": "understand",
+    "woke": "wake",
+    "woken": "wake",
+    "wore": "wear",
+    "worn": "wear",
+    "won": "win",
+    "wrote": "write",
+    "written": "write",
+    "children": "child",
+    "men": "man",
+    "women": "woman",
+    "people": "person",
+    "feet": "foot",
+    "teeth": "tooth",
+    "mice": "mouse",
+    "better": "good",
+    "best": "good",
+    "worse": "bad",
+    "worst": "bad",
+}
+
+#: Compact set of trivial CEFR A1 base words and obvious RU-EN internationalisms.
+A1_TRIVIAL_HINT_WORDS: frozenset[str] = (
+    _A1_FUNCTION_AND_TIME
+    | _A1_VERBS
+    | _A1_NOUNS
+    | _A1_ADJECTIVES_AND_ADVERBS
+    | _A1_INTERNATIONALISMS
+) - _NON_CORE_OVERRIDE
+
+_A1_S_ROOTS: frozenset[str] = (
+    (_A1_VERBS | _A1_NOUNS | _A1_INTERNATIONALISMS)
+    - _NON_CORE_OVERRIDE
+)
+_A1_VERB_ROOTS: frozenset[str] = _A1_VERBS - _NON_CORE_OVERRIDE
+
 
 def _normalize_token(word: str) -> str:
     return word.strip().translate(_APOSTROPHES).lower().strip("'")
@@ -703,67 +957,76 @@ def _allows_undoubled_stem(stem: str) -> bool:
     return not _MONOSYLLABLE_CVC_RE.fullmatch(stem)
 
 
-def _matches_plural_or_3sg(word: str) -> bool:
+def _matches_plural_or_3sg(
+    word: str,
+    roots: frozenset[str] = _PLURAL_OR_3SG_ROOTS,
+) -> bool:
     if len(word) < 3 or not word.endswith("s"):
         return False
     if word.endswith("ies") and len(word) >= 4:
-        if (word[:-3] + "y") in _PLURAL_OR_3SG_ROOTS or word[:-1] in _PLURAL_OR_3SG_ROOTS:
+        if (word[:-3] + "y") in roots or word[:-1] in roots:
             return True
     if word.endswith("ves") and len(word) >= 5:
-        if (word[:-3] + "f") in _PLURAL_OR_3SG_ROOTS or (word[:-3] + "fe") in _PLURAL_OR_3SG_ROOTS:
+        if (word[:-3] + "f") in roots or (word[:-3] + "fe") in roots:
             return True
-    if word.endswith(_ES_ENDINGS) and len(word) >= 4:
+    if (word.endswith(_ES_ENDINGS) or word == "buses") and len(word) >= 4:
         stem = word[:-2]
-        if stem in _PLURAL_OR_3SG_ROOTS:
+        if stem in roots:
             return True
         if (
             len(stem) >= 4
             and stem[-1] == stem[-2]
             and stem[-1] in _DOUBLEABLE_CONSONANTS
-            and stem[:-1] in _PLURAL_OR_3SG_ROOTS
+            and stem[:-1] in roots
         ):
             return True
-    if not word.endswith(("ss", "us", "is")) and word[:-1] in _PLURAL_OR_3SG_ROOTS:
+    if not word.endswith(("ss", "us", "is")) and word[:-1] in roots:
         return True
     return False
 
 
-def _matches_ed(word: str) -> bool:
+def _matches_ed(
+    word: str,
+    roots: frozenset[str] = _VERB_INFLECT_ROOTS,
+) -> bool:
     if len(word) < 4 or not word.endswith("ed"):
         return False
     if word.endswith("ied") and len(word) >= 4:
-        if (word[:-3] + "y") in _VERB_INFLECT_ROOTS or word[:-1] in _VERB_INFLECT_ROOTS:
+        if (word[:-3] + "y") in roots or word[:-1] in roots:
             return True
     stem = word[:-2]
-    if len(stem) >= 3 and _allows_undoubled_stem(stem) and stem in _VERB_INFLECT_ROOTS:
+    if len(stem) >= 3 and _allows_undoubled_stem(stem) and stem in roots:
         return True
-    if len(word) >= 4 and word[:-1] in _VERB_INFLECT_ROOTS:
+    if len(word) >= 4 and word[:-1] in roots:
         return True
     if (
         len(stem) >= 4
         and stem[-1] == stem[-2]
         and stem[-1] in _DOUBLEABLE_CONSONANTS
-        and stem[:-1] in _VERB_INFLECT_ROOTS
+        and stem[:-1] in roots
     ):
         return True
     return False
 
 
-def _matches_ing(word: str) -> bool:
+def _matches_ing(
+    word: str,
+    roots: frozenset[str] = _VERB_INFLECT_ROOTS,
+) -> bool:
     if len(word) < 5 or not word.endswith("ing"):
         return False
-    if word.endswith("ying") and (word[:-4] + "ie") in _VERB_INFLECT_ROOTS:
+    if word.endswith("ying") and (word[:-4] + "ie") in roots:
         return True
     stem = word[:-3]
-    if len(stem) >= 3 and _allows_undoubled_stem(stem) and stem in _VERB_INFLECT_ROOTS:
+    if len(stem) >= 3 and _allows_undoubled_stem(stem) and stem in roots:
         return True
-    if len(stem) >= 2 and (stem + "e") in _VERB_INFLECT_ROOTS:
+    if len(stem) >= 2 and (stem + "e") in roots:
         return True
     if (
         len(stem) >= 4
         and stem[-1] == stem[-2]
         and stem[-1] in _DOUBLEABLE_CONSONANTS
-        and stem[:-1] in _VERB_INFLECT_ROOTS
+        and stem[:-1] in roots
     ):
         return True
     return False
@@ -853,6 +1116,30 @@ def _is_core_normalized(norm: str) -> bool:
 def is_core_a2_word(word: str) -> bool:
     """Return True if `word` belongs to the built-in CEFR A1-A2 core vocabulary."""
     return _is_core_normalized(_normalize_token(word))
+
+
+def is_trivial_a1_hint(original: str) -> bool:
+    """Return True if `original` is a single trivial CEFR A1 word or obvious internationalism."""
+    cleaned = original.strip().translate(_APOSTROPHES).lower()
+    has_to_prefix = False
+    if cleaned.startswith("to") and len(cleaned) > 2 and cleaned[2].isspace():
+        cleaned = cleaned[2:].lstrip()
+        has_to_prefix = True
+    if not cleaned or any(ch.isspace() for ch in cleaned):
+        return False
+    if not cleaned.isascii() or not cleaned.isalpha():
+        return False
+    if cleaned in _NON_CORE_OVERRIDE or cleaned in _SUFFIX_FALSE_POSITIVES:
+        return False
+    if has_to_prefix:
+        return cleaned in _A1_VERB_ROOTS
+    if cleaned in A1_TRIVIAL_HINT_WORDS or cleaned in _A1_IRREGULAR_TO_BASE:
+        return True
+    return (
+        _matches_plural_or_3sg(cleaned, _A1_S_ROOTS)
+        or _matches_ed(cleaned, _A1_VERB_ROOTS)
+        or _matches_ing(cleaned, _A1_VERB_ROOTS)
+    )
 
 
 def _known_name_tokens(known_names: Sequence[str]) -> frozenset[str]:

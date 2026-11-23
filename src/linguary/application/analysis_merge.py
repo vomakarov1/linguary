@@ -4771,6 +4771,11 @@ _DIALECT_WORDS = frozenset({
     "yeh", "yer", "ter", "summat", "fer", "meself", "mighta", "dunno",
     "shan't", "blimey", "codswallop",
 })
+_EDGE_APOSTROPHE_DIALECT_RE = re.compile(
+    r"(?i:(?<![\w'‘’])(?:an|o|las|don)['’](?=\s|$|[,.!?;:—–-]))"
+    r"|(?<=['‘])(?:An|O|Las|Don)['’](?=\s+\w)"
+    r"|(?i:(?<!\w)['’]em\b)"
+)
 _SHORT_B1_WORDS = frozenset({
     "winked", "groaned", "chuckled", "peered", "sniggered", "moaned", "sweetums",
     "cannon", "budge", "lump", "shack", "shivered", "uneasy", "nervous",
@@ -5008,6 +5013,8 @@ def _has_a2_nonlexical_stoplist(text: str) -> bool:
     ):
         return True
     if "?" not in text and _A2_INITIAL_WHAT_CLAUSE_RE.search(text) is not None:
+        return True
+    if _EDGE_APOSTROPHE_DIALECT_RE.search(text) is not None:
         return True
     words = expression_words(text)
     return any(word in _DIALECT_WORDS for word in words)
@@ -6164,6 +6171,7 @@ def _dialogue_needs_translation(
     all_words = expression_words(text)
     has_dialect_or_idiom = (
         any(word in _DIALECT_WORDS for word in all_words)
+        or _EDGE_APOSTROPHE_DIALECT_RE.search(text) is not None
         or any(_contains_phrase(all_words, phrase) for phrase in _SHORT_B1_PHRASES)
         or any(
             difficulty.kind in {"speech_style", "idiom"}

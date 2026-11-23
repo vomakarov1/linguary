@@ -5242,3 +5242,103 @@ def test_merged_instructions_deduplicates_canonical_english_terms_and_caps_at_20
     assert capped_lines[0] == "1. Образ «альбом» передавать с мягкой интонацией."
     assert capped_lines[-1] == "20. Образ «фонарь» передавать с мягкой интонацией."
 
+
+def test_edge_apostrophe_dialect_regex_in_stoplist_and_dialogue_needs_translation() -> None:
+    """Edge-apostrophe dialect forms trigger both stoplist and dialogue translation without polluting _DIALECT_WORDS."""
+    from linguary.application.analysis_merge import (
+        _DIALECT_WORDS,
+        _EDGE_APOSTROPHE_DIALECT_RE,
+        _dialogue_needs_translation,
+        _has_a2_nonlexical_stoplist,
+        normalize_a2_dialogue_response,
+    )
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    for token in ("an'", "o'", "'em", "las'", "don'"):
+        assert token not in _DIALECT_WORDS
+
+    positive_samples = (
+        "An’ here’s Harry!",
+        "‘An’ here’s Harry!’",
+        "‘O’ course!’",
+        "o' mine",
+        "tell 'em",
+        "las' night",
+        "don' know",
+    )
+    for sample in positive_samples:
+        assert _EDGE_APOSTROPHE_DIALECT_RE.search(sample) is not None, sample
+        assert _has_a2_nonlexical_stoplist(sample) is True, sample
+
+    negative_samples = (
+        "o'clock",
+        "'an'",
+        "‘an’",
+        "I don't know",
+        "‘o’",
+        "‘An’",
+    )
+    for sample in negative_samples:
+        assert _EDGE_APOSTROPHE_DIALECT_RE.search(sample) is None, sample
+        assert _has_a2_nonlexical_stoplist(sample) is False, sample
+
+    # Long (> 8 words, <= 15 words) dialogue with edge-apostrophe dialect triggers _dialogue_needs_translation,
+    # whereas non-dialect control with `o'clock` and `don't` does NOT.
+    long_dialect_samples = (
+        "“An’ here’s Harry, who lives in that small cupboard,” said Hagrid.",
+        "“That old coat o’ mine is lying right over there,” he said.",
+        "“Go and tell ’em to bring the big boat back,” said Hagrid.",
+        "“I saw the letter las’ night down by the sea,” he said.",
+        "“I don’ know where the little key went to,” he said.",
+    )
+    for line in long_dialect_samples:
+        assert _dialogue_needs_translation(line, (), frozenset(), 0) is True, line
+
+    negative_dialogue = "“I don't know at four o'clock in the morning,” said Harry."
+    assert _dialogue_needs_translation(negative_dialogue, (), frozenset(), 0) is False
+
+    # End-to-end normalization lifts READ_AS_IS and unbacked GLOSSARY_ONLY, while backed short GLOSSARY_ONLY stays.
+    point = (RequiredPoint("p1", "Диалектное сокращение."),)
+    b_read = make_analysis_block(section_id=SECTION_ID, order=0, text="‘An’ here’s Harry!’ said Hagrid.")
+    b_unbacked = make_analysis_block(section_id=SECTION_ID, order=1, text="‘Tell ’em,’ he said.")
+    b_backed = make_analysis_block(section_id=SECTION_ID, order=2, text="‘O’ course!’ said Hagrid.")
+    b_ctrl = make_analysis_block(section_id=SECTION_ID, order=3, text="‘At four o'clock,’ he said.")
+    blocks = (b_read, b_unbacked, b_backed, b_ctrl)
+    aliases = {f"b{i + 1}": blk.id for i, blk in enumerate(blocks)}
+    normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),
+                TreatmentPlanItemResponse("b2", BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+            ),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-style",
+                    (QuotedSourceAnchorResponse("b3", "O’ course"),),
+                    "b3",
+                    "speech_style",
+                    "useful",
+                    "explanation",
+                    point,
+                ),
+            ),
+        ),
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+    ]
+

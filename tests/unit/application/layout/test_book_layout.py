@@ -2421,3 +2421,309 @@ def test_fades_translation_threshold_by_content_word_count() -> None:
     assert _build((ch1_15k, ch2_10k, ch3_last)).features.fades_translation is True
     assert _build((ch1_15k, ch2_10k, ch3_last), reader_level="b2").features.fades_translation is False
     assert _build((ch1_15k, ch2_10k, ch3_last), english_help=True).features.fades_translation is False
+
+
+def test_a2_dedup_filters_trivial_a1_hints_per_segment_with_fallbacks_and_protections() -> None:
+    """A1 hint filtering inside `_deduplicate_glossary_hints` for `reader_level == 'a2'`."""
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    def _hint_ev(diff: Difficulty, block_id: str, hint: GlossaryHint) -> HelpEvidence:
+        key = artifact_key(
+            "glossary_hint.translation",
+            block_id,
+            {"original": hint.original, "translation": hint.translation, "note": hint.note},
+        )
+        return HelpEvidence(
+            diff.id,
+            diff.required_points[0].id,
+            "glossary_hint.translation",
+            block_id,
+            key,
+            hint.translation,
+        )
+
+    # 1. TRANSLATE block: unprotected A1 hints are suppressed and do NOT pollute history;
+    #    non-empty `hint.note` and non-`vocabulary` difficulty kinds are protected.
+    tr_block = _block(
+        "c1",
+        0,
+        "He smiled at the hamburger while reading cold banana signs and odd park rules.",
+    )
+    # 2. GLOSSARY_ONLY block with A1 + B1 -> A1 dropped, B1 kept.
+    gl_with_b1 = _block("c1", 1, "She smiled while holding the cloak.")
+    # 3. GLOSSARY_ONLY block with A1 + repeated B1 (within 20 blocks -> rescued!) ->
+    #    A1 dropped BEFORE history/rescue, repeated B1 rescued as compact!
+    gl_rescue_b1 = _block("c1", 2, "He ate a hamburger under the cloak.")
+    # 4. GLOSSARY_ONLY block with ONLY A1 hints -> keeps 1 fallback, drops extra.
+    gl_only_a1 = _block("c1", 3, "He smiled at the hamburger.")
+    # 5. Another GLOSSARY_ONLY block within 20 blocks with the same sole A1 hint ->
+    #    still keeps 1 fallback via rescue.
+    gl_only_a1_repeat = _block("c1", 4, "He smiled again.")
+    # 6. Mixed block [TRANSLATE (B1 wand + A1 hamburger), GLOSSARY_ONLY (ONLY A1 smiled + telescopes)]:
+    #    TRANSLATE drops A1 & keeps B1 wand; GLOSSARY_ONLY segment keeps 1 A1 fallback (smiled) and drops telescopes!
+    mix_1_text = "He held a wand and ate a hamburger. She smiled at telescopes."
+    mix_1_cut = mix_1_text.index(" She smiled")
+    mix_1 = _block(
+        "c1",
+        5,
+        mix_1_text,
+        segments=(
+            BlockSegment(0, mix_1_cut, 0),
+            BlockSegment(mix_1_cut, len(mix_1_text), 1),
+        ),
+    )
+    # 7. Mixed block [TRANSLATE (A1 airport), GLOSSARY_ONLY (A1 hamburger + repeated B1 cloak -> rescued!)]:
+    #    TRANSLATE drops airport; GLOSSARY_ONLY drops hamburger and rescues cloak!
+    mix_2_text = "They walked to the airport. The cloak hid her."
+    mix_2_cut = mix_2_text.index(" The cloak")
+    mix_2 = _block(
+        "c1",
+        6,
+        mix_2_text,
+        segments=(
+            BlockSegment(0, mix_2_cut, 0),
+            BlockSegment(mix_2_cut, len(mix_2_text), 1),
+        ),
+    )
+    # 8. Mixed block with 2 GLOSSARY_ONLY segments:
+    #    seg 0 GLOSSARY_ONLY (only A1 smiled) -> keeps smiled fallback;
+    #    seg 1 TRANSLATE (A1 computer) -> drops computer;
+    #    seg 2 GLOSSARY_ONLY (A1 hotel + B1 lantern) -> drops hotel, keeps lantern!
+    mix_3_text = "She smiled. He used a computer. He saw a hotel lantern."
+    mix_3_c1 = mix_3_text.index(" He used")
+    mix_3_c2 = mix_3_text.index(" He saw")
+    mix_3 = _block(
+        "c1",
+        7,
+        mix_3_text,
+        segments=(
+            BlockSegment(0, mix_3_c1, 0),
+            BlockSegment(mix_3_c1, mix_3_c2, 1),
+            BlockSegment(mix_3_c2, len(mix_3_text), 2),
+        ),
+    )
+    # 9. GLOSSARY_ONLY block verifying all 8 non-vocabulary difficulty kinds protect A1 hints,
+    #    while `vocabulary` kind does NOT protect an A1 hint when a B1 hint exists.
+    prot_block = _block(
+        "c1",
+        8,
+        "A doctor, bank, park, film, music, sport, taxi, coffee, and telephone stood by a cauldron.",
+    )
+    # 10. Later GLOSSARY_ONLY block in ch2 (> 20 blocks later) with `hamburger`:
+    #     verify `hamburger` was NEVER added to history by earlier filtered blocks -> shown full!
+    filler_blocks = [_block("c1", idx, f"Filler {idx}.") for idx in range(9, 32)]
+    ch2_block = _block("c2", 0, "A hamburger sat on a desk.")
+
+    non_vocab_kinds = (
+        ("doctor", "idiom"),
+        ("bank", "false_friend"),
+        ("park", "cultural_reference"),
+        ("film", "wordplay"),
+        ("music", "parody"),
+        ("sport", "speech_style"),
+        ("taxi", "grammar"),
+        ("coffee", "semantic_relation"),
+    )
+    tr_cold_diff = _difficulty(tr_block, "cold", "wordplay", "d-tr-wordplay", help_kind="lexical_hint")
+    tr_park_diff = _difficulty(tr_block, "park", "vocabulary", "d-tr-vocab", help_kind="lexical_hint")
+    prot_diffs = tuple(
+        _difficulty(prot_block, word, kind, f"d-prot-{kind}", help_kind="lexical_hint")
+        for word, kind in non_vocab_kinds
+    )
+    prot_vocab_diff = _difficulty(
+        prot_block, "telephone", "vocabulary", "d-prot-vocab", help_kind="lexical_hint"
+    )
+    plan = _plan(tr_cold_diff, tr_park_diff, *prot_diffs, prot_vocab_diff)
+
+    tr_h_smile = GlossaryHint("smiled", "улыбнулся")
+    tr_h_burger = GlossaryHint("hamburger", "гамбургер")
+    tr_h_banana_note = GlossaryHint("banana", "банан", "Здесь: жаргонное прозвище.")
+    tr_h_cold_wordplay = GlossaryHint("cold", "холодный")
+    tr_h_park_vocab = GlossaryHint("park", "парк")
+
+    prot_hints = tuple(GlossaryHint(word, f"пер-{word}") for word, _ in non_vocab_kinds)
+    prot_tel_vocab = GlossaryHint("telephone", "телефон")
+    prot_cauldron = GlossaryHint("cauldron", "котёл", "Большой котёл.")
+
+    results = {
+        tr_block.id: BlockProcessingResult(
+            tr_block.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="Он улыбнулся гамбургеру.",
+            glossary_hints=(
+                tr_h_smile,
+                tr_h_burger,
+                tr_h_banana_note,
+                tr_h_cold_wordplay,
+                tr_h_park_vocab,
+            ),
+            content_evidence=ContentEvidence(
+                plan.sha256,
+                (
+                    _hint_ev(tr_cold_diff, tr_block.id, tr_h_cold_wordplay),
+                    _hint_ev(tr_park_diff, tr_block.id, tr_h_park_vocab),
+                ),
+            ),
+        ),
+        gl_with_b1.id: BlockProcessingResult(
+            gl_with_b1.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint("smiled", "улыбнулась"),
+                GlossaryHint("cloak", "плащ", "Длинная накидка."),
+            ),
+        ),
+        gl_rescue_b1.id: BlockProcessingResult(
+            gl_rescue_b1.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint("hamburger", "гамбургер"),
+                GlossaryHint("cloak", "плащ", "Повтор плаща в окне."),
+            ),
+        ),
+        gl_only_a1.id: BlockProcessingResult(
+            gl_only_a1.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint("smiled", "улыбнулся"),
+                GlossaryHint("hamburger", "гамбургер"),
+            ),
+        ),
+        gl_only_a1_repeat.id: BlockProcessingResult(
+            gl_only_a1_repeat.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("smiled", "улыбнулся"),),
+        ),
+        mix_1.id: BlockProcessingResult(
+            mix_1.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="Он держал палочку и ел гамбургер.",
+            segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+            segment_translations=("Он держал палочку и ел гамбургер.", None),
+            glossary_hints=(
+                GlossaryHint("wand", "палочка", "Волшебная палочка."),
+                GlossaryHint("hamburger", "гамбургер"),
+                GlossaryHint("smiled", "улыбнулась"),
+                GlossaryHint("telescopes", "телескопы"),
+            ),
+        ),
+        mix_2.id: BlockProcessingResult(
+            mix_2.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="Они пошли в аэропорт.",
+            segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+            segment_translations=("Они пошли в аэропорт.", None),
+            glossary_hints=(
+                GlossaryHint("airport", "аэропорт"),
+                GlossaryHint("hamburger", "гамбургер"),
+                GlossaryHint("cloak", "плащ", "Снова плащ."),
+            ),
+        ),
+        mix_3.id: BlockProcessingResult(
+            mix_3.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="Он пользовался компьютером.",
+            segment_treatments=(
+                BlockTreatment.GLOSSARY_ONLY,
+                BlockTreatment.TRANSLATE,
+                BlockTreatment.GLOSSARY_ONLY,
+            ),
+            segment_translations=(None, "Он пользовался компьютером.", None),
+            glossary_hints=(
+                GlossaryHint("smiled", "улыбнулась"),
+                GlossaryHint("computer", "компьютер"),
+                GlossaryHint("hotel", "отель"),
+                GlossaryHint("lantern", "фонарь", "Переносной фонарь."),
+            ),
+        ),
+        prot_block.id: BlockProcessingResult(
+            prot_block.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(*prot_hints, prot_tel_vocab, prot_cauldron),
+            content_evidence=ContentEvidence(
+                plan.sha256,
+                (
+                    *(
+                        _hint_ev(diff, prot_block.id, hint)
+                        for diff, hint in zip(prot_diffs, prot_hints, strict=True)
+                    ),
+                    _hint_ev(prot_vocab_diff, prot_block.id, prot_tel_vocab),
+                ),
+            ),
+        ),
+        ch2_block.id: BlockProcessingResult(
+            ch2_block.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("hamburger", "гамбургер", "Первое появление в истории."),),
+        ),
+    }
+
+    sections = (
+        _section(
+            "c1",
+            0,
+            "Chapter 1",
+            (
+                tr_block,
+                gl_with_b1,
+                gl_rescue_b1,
+                gl_only_a1,
+                gl_only_a1_repeat,
+                mix_1,
+                mix_2,
+                mix_3,
+                prot_block,
+                *filler_blocks,
+            ),
+        ),
+        _section("c2", 1, "Chapter 2", (ch2_block,)),
+    )
+    doc = _document(sections)
+    analyses = (_analysis("a-c1", "c1", plan=plan),)
+
+    a2_layout = build_book_layout(_inputs(doc, results, analyses, reader_level="a2"))
+
+    # 1. TRANSLATE keeps only wordplay-protected `cold` and note-protected `banana` (sorted by marker)
+    assert [n.term for n in _notes(a2_layout, tr_block.id)] == ["cold", "banana"]
+    # 2. GLOSSARY_ONLY drops `smiled`, keeps `cloak`
+    assert [n.term for n in _notes(a2_layout, gl_with_b1.id)] == ["cloak"]
+    # 3. GLOSSARY_ONLY drops `hamburger` BEFORE rescue, rescues `cloak` as compact
+    assert [(n.term, n.body) for n in _notes(a2_layout, gl_rescue_b1.id)] == [
+        ("cloak", ("плащ",)),
+    ]
+    # 4 & 5. GLOSSARY_ONLY with ONLY A1 keeps 1 fallback (`smiled` -> `to smile`), drops `hamburger`
+    assert [n.term for n in _notes(a2_layout, gl_only_a1.id)] == ["to smile"]
+    assert [n.term for n in _notes(a2_layout, gl_only_a1_repeat.id)] == ["to smile"]
+    # 6. Mixed block: TRANSLATE keeps B1 `wand` & drops `hamburger`;
+    #    GLOSSARY_ONLY seg has ONLY A1 -> keeps `to smile` fallback, drops `telescopes`!
+    assert [n.term for n in _notes(a2_layout, mix_1.id)] == ["wand", "to smile"]
+    # 7. Mixed block: TRANSLATE drops `airport`, GLOSSARY_ONLY drops `hamburger` and rescues `cloak`!
+    assert [(n.term, n.body) for n in _notes(a2_layout, mix_2.id)] == [
+        ("cloak", ("плащ",)),
+    ]
+    # 8. Mixed block with 2 GLOSSARY_ONLY segments: seg 0 keeps `to smile` fallback, seg 1 drops `computer`,
+    #    seg 2 drops `hotel` and keeps `lantern`!
+    assert [n.term for n in _notes(a2_layout, mix_3.id)] == ["to smile", "lantern"]
+    # 9. All 8 non-vocabulary kinds survive alongside B1 `cauldron`, while `vocabulary` `telephone` is dropped
+    assert [n.term for n in _notes(a2_layout, prot_block.id)] == [
+        *(word for word, _ in non_vocab_kinds),
+        "cauldron",
+    ]
+    # 10. Filtered `hamburger` did NOT consume occurrence 1 in history, so ch2 shows full note!
+    assert [(n.term, n.body) for n in _notes(a2_layout, ch2_block.id)] == [
+        ("hamburger", ("гамбургер", "Первое появление в истории.")),
+    ]
+
+    # Non-A2 reader_level does NOT strip A1 hints!
+    b2_layout = build_book_layout(_inputs(doc, results, analyses, reader_level="b2"))
+    assert [n.term for n in _notes(b2_layout, tr_block.id)] == [
+        "to smile",
+        "hamburger",
+        "cold",
+        "banana",
+        "park",
+    ]
+    b2_single = build_book_layout(
+        _inputs(_document((_section("c1", 0, "Chapter 1", (gl_with_b1,)),)), {gl_with_b1.id: results[gl_with_b1.id]}, reader_level="b2")
+    )
+    assert [n.term for n in _notes(b2_single, gl_with_b1.id)] == ["to smile", "cloak"]

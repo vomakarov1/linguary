@@ -11,6 +11,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from linguary.application.a2_core_vocab import is_trivial_a1_hint
 from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
 from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
@@ -18,7 +19,9 @@ from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import (
     _evidences,
     _find_end,
+    _hint_evidence_keys,
     _hint_only_dropped,
+    _ids_for,
     _note_only_dropped,
     block_notes,
     vocabulary_dedup_key,
@@ -41,7 +44,13 @@ from linguary.domain import (
     TermConcept,
     glossary_key,
 )
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, SourceAnchor
+from linguary.domain.content_plan import (
+    ContentPlan,
+    ContextFact,
+    Difficulty,
+    HelpEvidence,
+    SourceAnchor,
+)
 
 _SHOWN_CERTAINTY = frozenset({"explicit", "inferred"})
 _UNIT_SPEAKER_CERTAINTY = frozenset({"inferred"})
@@ -401,6 +410,8 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     block_seq=block_seq,
                     chapter_num=current_chapter_num,
                     history=hint_history,
+                    plan=plan,
+                    reader_level=inputs.reader_level,
                 )
                 suppressed_notes = _deduplicate_grammar_notes(
                     result,
@@ -1018,6 +1029,25 @@ def _is_dialogue_opener(text: str, index: int, end: int) -> bool:
     return char == "-" and index + 1 < end and text[index + 1] in " —–"
 
 
+def _hint_segment_index(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+    hint: GlossaryHint,
+) -> int | None:
+    """Segment index containing `hint`, or None for whole-block or unmatched hints."""
+    spans = block.segment_spans
+    treatments = result.segment_treatments
+    if not treatments or len(treatments) != len(spans):
+        return None
+    marker_end = _find_end(block.text, hint.original)
+    if marker_end is None:
+        return None
+    for index, span in enumerate(spans):
+        if span.start < marker_end <= span.end:
+            return index
+    return None
+
+
 def _hint_is_glossary_only(
     block: DocumentBlock,
     result: BlockProcessingResult,
@@ -1030,17 +1060,92 @@ def _hint_is_glossary_only(
         return False
     if result.treatment is BlockTreatment.GLOSSARY_ONLY:
         return True
-    spans = block.segment_spans
+    seg_index = _hint_segment_index(block, result, hint)
+    if seg_index is None:
+        return True
+    return result.segment_treatments[seg_index].requires_glossary_hints
+
+
+def _glossary_only_bucket(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+    hint: GlossaryHint,
+) -> int | None:
+    """Bucket key (`None` for whole block, segment index for mixed `GLOSSARY_ONLY` segments)."""
+    if result.treatment is BlockTreatment.GLOSSARY_ONLY:
+        return None
     treatments = result.segment_treatments
-    if not treatments or len(treatments) != len(spans):
+    if not treatments or len(treatments) != len(block.segment_spans):
+        return None
+    glossary_segments = [
+        index for index, mode in enumerate(treatments) if mode.requires_glossary_hints
+    ]
+    if len(glossary_segments) == 1:
+        return glossary_segments[0]
+    return _hint_segment_index(block, result, hint)
+
+
+def _hint_is_protected_a1(
+    hint: GlossaryHint,
+    block_id: str,
+    evidences: Sequence[HelpEvidence],
+    known: Mapping[str, Difficulty],
+    dropped_difficulty_ids: frozenset[str],
+) -> bool:
+    """True when an A1 hint carries a non-empty note or links to a non-`vocabulary` difficulty."""
+    if hint.note and hint.note.strip():
         return True
-    marker_end = _find_end(block.text, hint.original)
-    if marker_end is None:
-        return True
-    for span, mode in zip(spans, treatments, strict=True):
-        if span.start < marker_end <= span.end:
-            return mode.requires_glossary_hints
-    return True
+    if not known:
+        return False
+    raw_ids = _ids_for(evidences, _hint_evidence_keys(hint, block_id))
+    return any(
+        item_id not in dropped_difficulty_ids
+        and item_id in known
+        and known[item_id].kind != "vocabulary"
+        for item_id in raw_ids
+    )
+
+
+def _a1_pre_suppressed_indices(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+    *,
+    requires_hints: bool,
+    evidences: Sequence[HelpEvidence],
+    known: Mapping[str, Difficulty],
+    dropped_difficulty_ids: frozenset[str],
+    only_dropped_by_index: Mapping[int, bool],
+    glossary_only_by_index: Mapping[int, bool],
+    bucket_by_index: Mapping[int, int | None],
+) -> set[int]:
+    """Select unprotected trivial A1 hint indices to drop before history/rescue updates."""
+    droppable_a1: dict[int, bool] = {}
+    glossary_buckets: dict[int | None, list[int]] = {}
+    pre_suppressed: set[int] = set()
+    for index, hint in enumerate(result.glossary_hints):
+        is_droppable = is_trivial_a1_hint(hint.original) and not _hint_is_protected_a1(
+            hint, result.block_id, evidences, known, dropped_difficulty_ids
+        )
+        droppable_a1[index] = is_droppable
+        if not glossary_only_by_index[index]:
+            if is_droppable and not (only_dropped_by_index[index] and not requires_hints):
+                pre_suppressed.add(index)
+        else:
+            glossary_buckets.setdefault(bucket_by_index[index], []).append(index)
+    for indices in glossary_buckets.values():
+        if any(not droppable_a1[idx] for idx in indices):
+            for idx in indices:
+                if droppable_a1[idx]:
+                    pre_suppressed.add(idx)
+        elif indices:
+            keep_idx = next(
+                (idx for idx in indices if not only_dropped_by_index[idx]),
+                indices[0],
+            )
+            for idx in indices:
+                if idx != keep_idx:
+                    pre_suppressed.add(idx)
+    return pre_suppressed
 
 
 def _deduplicate_glossary_hints(
@@ -1051,9 +1156,14 @@ def _deduplicate_glossary_hints(
     block_seq: int,
     chapter_num: int,
     history: dict[str, _HintSeen],
+    plan: ContentPlan | None = None,
+    reader_level: str | None = None,
 ) -> tuple[frozenset[int], frozenset[int]]:
     """Book-wide 3-stage deduplication for glossary hints without mutating `result`.
 
+    - For `reader_level == "a2"`, unprotected trivial A1 hints are filtered before updating
+      `history` or `glossary_only_rescue`, keeping 1 A1 fallback when a `GLOSSARY_ONLY`
+      block or segment has only A1 hints.
     - After a gap > 3 chapters since last shown: reset and reintroduce cleanly.
     - Within a 20-block local window: suppress without inflating occurrence count.
     - 2nd–3rd occurrences: suppress on `TRANSLATE`, strip explanatory note on `GLOSSARY_ONLY`.
@@ -1066,19 +1176,52 @@ def _deduplicate_glossary_hints(
     requires_hints = result.treatment.requires_glossary_hints or any(
         mode.requires_glossary_hints for mode in result.segment_treatments
     )
-    suppressed: set[int] = set()
-    stripped: set[int] = set()
-    glossary_only_indices: set[int] = set()
-    glossary_only_rescue: list[tuple[int, int, int, str]] = []
+    only_dropped_by_index: dict[int, bool] = {}
+    glossary_only_by_index: dict[int, bool] = {}
+    bucket_by_index: dict[int, int | None] = {}
     for index, hint in enumerate(result.glossary_hints):
-        only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
-        if only_dropped and not requires_hints:
-            continue
+        only_dropped_by_index[index] = _hint_only_dropped(
+            hint, result.block_id, evidences, dropped_difficulty_ids
+        )
         hint_glossary_only = _hint_is_glossary_only(
             block, result, hint, requires_hints=requires_hints
         )
+        glossary_only_by_index[index] = hint_glossary_only
         if hint_glossary_only:
-            glossary_only_indices.add(index)
+            bucket_by_index[index] = _glossary_only_bucket(block, result, hint)
+
+    is_a2 = isinstance(reader_level, str) and reader_level.strip().lower() == "a2"
+    known = {} if plan is None else {item.id: item for item in plan.difficulties}
+    pre_suppressed_a1 = (
+        _a1_pre_suppressed_indices(
+            block,
+            result,
+            requires_hints=requires_hints,
+            evidences=evidences,
+            known=known,
+            dropped_difficulty_ids=dropped_difficulty_ids,
+            only_dropped_by_index=only_dropped_by_index,
+            glossary_only_by_index=glossary_only_by_index,
+            bucket_by_index=bucket_by_index,
+        )
+        if is_a2
+        else set()
+    )
+
+    suppressed: set[int] = set(pre_suppressed_a1)
+    stripped: set[int] = set()
+    glossary_only_indices_by_bucket: dict[int | None, set[int]] = {}
+    glossary_only_rescue_by_bucket: dict[int | None, list[tuple[int, int, int, str]]] = {}
+    for index, hint in enumerate(result.glossary_hints):
+        if index in pre_suppressed_a1:
+            continue
+        only_dropped = only_dropped_by_index[index]
+        if only_dropped and not requires_hints:
+            continue
+        hint_glossary_only = glossary_only_by_index[index]
+        bucket = bucket_by_index.get(index)
+        if hint_glossary_only:
+            glossary_only_indices_by_bucket.setdefault(bucket, set()).add(index)
         key = vocabulary_dedup_key(hint.original)
         if not key:
             continue
@@ -1103,12 +1246,16 @@ def _deduplicate_glossary_hints(
         if (block_seq - window_anchor) <= _HINT_LOCAL_WINDOW_BLOCKS:
             suppressed.add(index)
             if hint_glossary_only:
-                glossary_only_rescue.append((1 if only_dropped else 0, state.count, index, key))
+                glossary_only_rescue_by_bucket.setdefault(bucket, []).append(
+                    (1 if only_dropped else 0, state.count, index, key)
+                )
             continue
         if state.count >= 3:
             suppressed.add(index)
             if hint_glossary_only:
-                glossary_only_rescue.append((1 if only_dropped else 0, state.count, index, key))
+                glossary_only_rescue_by_bucket.setdefault(bucket, []).append(
+                    (1 if only_dropped else 0, state.count, index, key)
+                )
             continue
         # 2nd or 3rd occurrence outside the 20-block local window.
         state.count += 1
@@ -1119,19 +1266,17 @@ def _deduplicate_glossary_hints(
             state.last_shown_chapter = chapter_num
         else:
             suppressed.add(index)
-    if (
-        glossary_only_indices
-        and glossary_only_indices <= suppressed
-        and glossary_only_rescue
-    ):
-        _, _, rescue_index, rescue_key = min(glossary_only_rescue)
-        suppressed.discard(rescue_index)
-        stripped.add(rescue_index)
-        state = history.get(rescue_key)
-        if state is not None:
-            state.last_shown_block = block_seq
-            state.last_shown_chapter = chapter_num
-            state.last_counted_block = block_seq
+    for bucket, bucket_indices in glossary_only_indices_by_bucket.items():
+        bucket_rescue = glossary_only_rescue_by_bucket.get(bucket)
+        if bucket_indices and bucket_indices <= suppressed and bucket_rescue:
+            _, _, rescue_index, rescue_key = min(bucket_rescue)
+            suppressed.discard(rescue_index)
+            stripped.add(rescue_index)
+            state = history.get(rescue_key)
+            if state is not None:
+                state.last_shown_block = block_seq
+                state.last_shown_chapter = chapter_num
+                state.last_counted_block = block_seq
     return frozenset(suppressed), frozenset(stripped)
 
 

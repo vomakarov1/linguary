@@ -525,3 +525,107 @@ def test_onomatopoeia_screams_and_added_a2_tokens() -> None:
 
     lower_words = non_core_a2_words("A loud thud, smash, and wham whooshed as it boomed.")
     assert lower_words == ("thud", "smash", "wham", "whooshed", "boomed")
+
+
+def test_a1_trivial_hint_words_compact_and_disjoint_from_borderline_and_overrides() -> None:
+    from linguary.application.a2_core_vocab import A1_TRIVIAL_HINT_WORDS
+
+    assert isinstance(A1_TRIVIAL_HINT_WORDS, frozenset)
+    assert A1_TRIVIAL_HINT_WORDS <= A2_CORE_VOCABULARY
+    assert A1_TRIVIAL_HINT_WORDS.isdisjoint(_NON_CORE_OVERRIDE)
+
+    internationalisms = {
+        "hamburger", "telescope", "taxi", "hotel", "film", "music", "doctor", "bank",
+        "park", "sport", "coffee", "chocolate", "banana", "computer", "internet", "telephone",
+    }
+    assert internationalisms <= A1_TRIVIAL_HINT_WORDS
+
+    borderline_and_excluded = {
+        "handkerchief", "overcoat", "crept", "swore", "stung", "thud", "smash",
+        "hug", "lantern", "cloak", "quill", "cauldron", "goblet", "wand",
+    }
+    assert A1_TRIVIAL_HINT_WORDS.isdisjoint(borderline_and_excluded)
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "hamburger",
+        "telescope",
+        "smiled",
+        "to smile",
+        "To Smile",
+        "  telescopes  ",
+        "telescopes",
+        "smiling",
+        "smiles",
+        "taxi",
+        "hotel",
+        "film",
+        "music",
+        "doctor",
+        "bank",
+        "park",
+        "sport",
+        "coffee",
+        "chocolate",
+        "banana",
+        "computer",
+        "internet",
+        "telephone",
+        "buses",
+        "boxes",
+        "stopped",
+        "carried",
+        "walked",
+        "walking",
+        "children",
+        "went",
+        "bought",
+        "saw",
+    ],
+)
+def test_is_trivial_a1_hint_accepts_core_a1_inflections_and_internationalisms(
+    original: str,
+) -> None:
+    from linguary.application.a2_core_vocab import is_trivial_a1_hint
+
+    assert is_trivial_a1_hint(original) is True
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "handkerchief",
+        "overcoat",
+        "crept",
+        "swore",
+        "stung",
+        "thud",
+        "smash",
+        "wink",
+        "groaned",
+        "chuckled",
+        "willing",
+        "eyed",
+        "handed",
+        "to walk off",
+        "to his surprise",
+        "to make a grab for",
+        "piece of cake",
+        "break a leg",
+        "to saw",
+        "to went",
+        "to him",
+        "well-known",
+        "123",
+        "",
+        "   ",
+    ],
+)
+def test_is_trivial_a1_hint_rejects_borderline_a2_non_core_and_multiword(
+    original: str,
+) -> None:
+    from linguary.application.a2_core_vocab import is_trivial_a1_hint
+
+    assert is_trivial_a1_hint(original) is False
