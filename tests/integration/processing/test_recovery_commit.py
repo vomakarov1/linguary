@@ -48,7 +48,7 @@ async def test_rejected_original_never_partially_accepted_and_children_union_com
     fake = CheckingFake([analysis_reply(2), translation_reply(2, bad=True), translation_reply(2, bad=True), translation_reply(1), translation_reply(1)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app, split_group=split_group)
+        doc, run, _task = await prepare(app, split_group=split_group)
         completed = await drain_tasks(app)
         assert completed[-1].status == TaskStatus.SUCCEEDED, completed[-1].last_error
         with app.unit_of_work.transaction() as transaction:
@@ -77,7 +77,7 @@ async def test_all_transport_and_format_retries_share_durable_counter(tmp_path):
     fake = FakeLLMClient([analysis_reply(2), LLMTransportError('HTTP 503'), FakeReply(content='{'), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        _doc, run, _task = await prepare(app)
         completed = await drain_tasks(app)
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
         with app.unit_of_work.transaction() as transaction:
@@ -97,7 +97,7 @@ async def test_save_failure_is_atomic(tmp_path, monkeypatch):
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        doc, run, _task = await prepare(app)
         original = SqlAlchemyWorkRepository.replace_result_binding
         def fail(*args, **kwargs):
             original(*args, **kwargs)
@@ -133,7 +133,7 @@ async def test_children_notes_may_exceed_original_group_target(tmp_path):
     try:
         settings = replace(app.settings, checks=replace(app.settings.checks, language_notes_per_chapter=2))
         app.runtime_settings.publish(app.runtime_settings.prepare(settings), 1)
-        doc, run, task = await prepare(app)
+        _doc, run, _task = await prepare(app)
         completed = await drain_tasks(app)
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
         children = [r for r in fake.requests if r.stage == LLMCallStage.TRANSLATION_UNIT and len(r.ordered_block_ids) == 1]
@@ -212,7 +212,7 @@ async def test_excess_notes_do_not_bypass_grounding_dedup_or_coverage(tmp_path, 
         checks=CheckSettings(language_notes_per_chapter=2), storage=StorageSettings(data_root=str(tmp_path / 'data'))),
         llm_client=fake, content_plan_profile='content-plan-v3')
     try:
-        doc, run, task = await prepare(app)
+        _doc, run, _task = await prepare(app)
         completed = await drain_tasks(app)
         with app.unit_of_work.transaction() as transaction:
             root, = transaction.work.list_roots('book-1', run_id=run.id)

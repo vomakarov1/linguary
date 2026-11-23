@@ -439,7 +439,7 @@ def test_processing_does_not_start_while_decisions_are_pending() -> None:
     """Processing does not start while there are unresolved items requiring review."""
     unit_of_work = glossary_book(make_analysis_candidate(), hint_candidate())
 
-    with pytest.raises(GlossaryReviewIncompleteError, match="Mr. Bennet"):
+    with pytest.raises(GlossaryReviewIncompleteError, match=r"Mr\. Bennet"):
         start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
 
     book = unit_of_work.books.get(BOOK_ID)

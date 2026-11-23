@@ -41,7 +41,7 @@ async def test_chapter_translation_uses_bounded_source_neighbours(tmp_path):
     fake = FakeLLMClient([analysis_reply(7), *(translation_reply(1) for _ in texts)])
     app = make_app(tmp_path, fake)
     try:
-        document, run, task = await prepare_chapter(app, texts, max_chars=1)
+        document, _run, task = await prepare_chapter(app, texts, max_chars=1)
         assert task.operation_id.startswith('dispatch:') and task.policy_version == ''
         refs = refs_for(app, task)
         assert len(refs) == 7
@@ -113,7 +113,7 @@ async def test_child_request_does_not_append_unbounded_root_in_v2(tmp_path):
     app = make_app(tmp_path, fake)
     try:
         texts = tuple(f'Unique scene {index}. He returned home.' for index in range(7))
-        document, run, task = await prepare_chapter(app, texts, max_chars=12000)
+        _document, _run, _task = await prepare_chapter(app, texts, max_chars=12000)
         completed = await drain_tasks(app)
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
         child = next(r for r in fake.requests if r.stage == LLMCallStage.TRANSLATION_UNIT and len(r.ordered_block_ids) == 3)
@@ -130,7 +130,7 @@ async def test_retry_after_upgrade_resumes_exact_original_roots(tmp_path, monkey
     settings = replace(app.settings, recovery=replace(app.settings.recovery, max_calls=1))
     app.runtime_settings.publish(app.runtime_settings.prepare(settings), 1)
     try:
-        document, run, task = await prepare(app)
+        _document, run, task = await prepare(app)
         refs = refs_for(app, task)
         assert (await drain_tasks(app))[0].status == TaskStatus.FAILED
         with app.unit_of_work.transaction() as transaction:
@@ -158,7 +158,7 @@ async def test_limit_extension_does_not_change_policy(tmp_path, monkeypatch):
     settings = replace(app.settings, recovery=replace(app.settings.recovery, max_calls=1))
     app.runtime_settings.publish(app.runtime_settings.prepare(settings), 1)
     try:
-        document, run, task = await prepare(app)
+        _document, _run, task = await prepare(app)
         assert (await drain_tasks(app))[0].status == TaskStatus.FAILED
         refs = refs_for(app, task)
         with app.unit_of_work.transaction() as transaction:
@@ -180,7 +180,7 @@ async def test_superseded_dispatcher_cannot_recreate_old_work(tmp_path):
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        document, run, task = await prepare(app)
+        _document, _run, task = await prepare(app)
         refs = refs_for(app, task)
         with app.unit_of_work.transaction() as transaction:
             root = transaction.work.get_root(refs[0]['root_id'])
@@ -205,7 +205,7 @@ async def test_explicit_root_ids_limit_resume_without_rebinding_dispatcher(tmp_p
     fake = FakeLLMClient([analysis_reply(3), *(translation_reply(1) for _ in range(3))])
     app = make_app(tmp_path, fake)
     try:
-        document, run, task = await prepare_chapter(app, ('First scene.', 'Second scene.', 'Third scene.'), max_chars=1)
+        document, _run, task = await prepare_chapter(app, ('First scene.', 'Second scene.', 'Third scene.'), max_chars=1)
         refs = refs_for(app, task)
         conditions = app.book_conditions.require('book-1')
         async with app.book_runtime.lease(conditions.id, 'processing') as generation:
@@ -225,7 +225,7 @@ async def test_historical_chapter_dispatch_verifies_legacy_before_request(tmp_pa
     fake = FakeLLMClient([translation_reply(1)])
     app = make_app(tmp_path, fake)
     try:
-        task, conditions, root = setup_old(app, missing=missing)
+        _task, _conditions, root = setup_old(app, missing=missing)
         with app.unit_of_work.transaction() as transaction:
             transaction.books.save(replace(transaction.books.get('book-1'), status=BookStatus.PROCESSING))
         completed = await drain_tasks(app)

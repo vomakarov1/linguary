@@ -10,9 +10,10 @@ it is set (PRD § 23).
 from __future__ import annotations
 
 import ipaddress
+from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from linguary.adapters.config import LLMSettings
@@ -149,7 +150,10 @@ def _is_blocked_metadata_host(hostname: str | None) -> bool:
 async def test_system_config(
     request: Request,
     application: CurrentApplication,
-    body: LLMTestConnectionRequest = LLMTestConnectionRequest(),
+    body: Annotated[
+        LLMTestConnectionRequest,
+        Body(default_factory=LLMTestConnectionRequest, json_schema_extra={"default": {}}),
+    ],
 ) -> LLMTestConnectionResponse:
     current = application.settings.llm
 

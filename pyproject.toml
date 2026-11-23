@@ -55,18 +55,21 @@ ignore = [
     "RUF001",  # Cyrillic characters in Russian UI/analysis strings
     "RUF002",  # Cyrillic characters in docstrings
     "RUF003",  # Cyrillic characters in comments
-    "B008",    # FastAPI Depends() in default arguments
     "S101",    # assert statements
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "B", "ASYNC", "RUF"]
+"tests/**" = ["S", "ASYNC"]
 # SHA-256 pinned in comparison/workspace.py for P14 -> P15 verification
 "src/linguary/comparison/late_metadata.py" = ["RUF021"]
 
 [tool.ty.src]
-include = ["src/linguary"]
+include = ["src/linguary", "alembic"]
 
+# SHA-256 pinned in comparison/workspace.py for P14 -> P15 verification.
 [[tool.ty.overrides]]
 include = ["src/linguary/comparison/late_metadata.py"]
 

@@ -142,7 +142,7 @@ async def test_awaiting_human_candidate_does_not_block_ready_to_export_or_epub_b
     fake = MixedVerdictCorrectionFake(profile="legacy-v1")
     app = make_app(tmp_path / "data", fake, profile="legacy-v1")
     try:
-        document, section, run, _, _ = await prepare(app, fake)
+        _document, section, run, _, _ = await prepare(app, fake)
         await successful(app)
 
         assert fake.correction_calls == 1

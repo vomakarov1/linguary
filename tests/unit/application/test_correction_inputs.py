@@ -796,7 +796,7 @@ def test_request_filters_chapter_context_for_chunk_without_changing_checksums():
         texts=("Block one.", "Block two.", "Block three.", "Block four.", "Block five.", "Block six."),
     )
     doc = make_analysis_document((section,))
-    b1, b2, b3, b4, b5, b6 = section.blocks
+    b1, _b2, b3, _b4, _b5, b6 = section.blocks
 
     plan = TreatmentPlan.of_treatments(
         section.id,

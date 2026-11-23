@@ -1,4 +1,6 @@
 """Optional typed assistance for source fragments."""
+from typing import cast
+
 from alembic import context, op
 import sqlalchemy as sa
 
@@ -25,6 +27,9 @@ def downgrade() -> None:
                 f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)'  # noqa: S608
             )).scalar_one():
                 raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')
-    if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):
+    if (
+        connection.dialect.name == 'sqlite'
+        and cast(tuple[int, ...], connection.dialect.server_version_info) < (3, 35, 0)
+    ):
         raise RuntimeError('для безопасного отката помощи нужен SQLite 3.35 или новее')
     op.drop_column('block_results', 'fragment_assistance_json')

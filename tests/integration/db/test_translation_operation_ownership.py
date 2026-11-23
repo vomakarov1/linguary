@@ -3,6 +3,7 @@ from dataclasses import replace
 from threading import Barrier
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from linguary.application.recovery import RecoveryError
 from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY as CURRENT
@@ -13,7 +14,7 @@ from test_book_work_store import prepare, uid
 
 
 def owner(uow):
-    conditions, old, scope = prepare(uow)
+    _conditions, old, scope = prepare(uow)
     manifest = {'schema_version': 1, 'active_run_id': 'run-1', 'ordered_blocks': ['block-1'],
         'atomic_intervals': [['block-1']], 'historical_coverage': [],
         'policy': {'max_calls': 12, 'max_scope_calls': 3}}
@@ -71,7 +72,10 @@ def test_restart_transaction_failure_preserves_old_owner(unit_of_work):
     old, scope, task, ctx = owner(unit_of_work)
     args = successor(old)
     args['task'] = replace(args['task'], id=task.id)
-    with pytest.raises(Exception), unit_of_work.transaction() as tx:
+    with (
+        pytest.raises(IntegrityError, match=r'UNIQUE constraint failed: processing_tasks\.id'),
+        unit_of_work.transaction() as tx,
+    ):
         tx.work.restart_root(old.id, **args)
     with unit_of_work.transaction() as tx:
         assert tx.work.get_root(old.id).superseded_by is None
@@ -93,7 +97,7 @@ def test_late_validated_response_cannot_commit(unit_of_work):
 
 
 def test_mark_recovery_accepted_handles_none_outcome(unit_of_work):
-    old, scope, task, ctx = owner(unit_of_work)
+    _old, _scope, _task, ctx = owner(unit_of_work)
     with unit_of_work.transaction() as tx:
         tx.work.transition_attempt(ctx.attempt_id, 'sent', expected_state='created')
         tx.work.transition_attempt(ctx.attempt_id, 'validated', expected_state='sent')
@@ -210,7 +214,7 @@ def test_late_validated_response_cannot_use_accept_scope(unit_of_work):
 
 def test_inactive_run_cannot_accept(unit_of_work):
     from linguary.adapters.db.models import ProcessingRunRow
-    old, _, _, ctx = owner(unit_of_work)
+    _old, _, _, ctx = owner(unit_of_work)
     with unit_of_work.transaction() as tx:
         tx.work.transition_attempt(ctx.attempt_id, 'sent', expected_state='created')
         tx.work.transition_attempt(ctx.attempt_id, 'validated', expected_state='sent')

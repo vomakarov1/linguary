@@ -121,7 +121,7 @@ def processing_payload(story, blocks, plan, *, indices=None, regenerated=False, 
     indices = list(range(len(blocks))) if indices is None else indices
     aliases = {blocks[i].id: f'b{n}' for n, i in enumerate(indices, 1)}
     response = dict(blocks=[dict(source_block_id=aliases[blocks[i].id], treatment=story['treatments'][i], translated_text=story['translations'][i], glossary_hints=[]) for i in indices], language_notes=[], content_evidence=[])
-    for number, expected in enumerate(story['difficulties']):
+    for expected in story['difficulties']:
         owner = blocks[expected['owner']].id
         if owner not in aliases:
             continue

@@ -347,7 +347,7 @@ def test_content_downgrade_old_sqlite_fails_before_ddl(engine, content_rows, mon
         monkeypatch.setattr(migration.op, 'get_bind', lambda: connection)
         dropped = []
         monkeypatch.setattr(migration.op, 'drop_column', lambda *args: dropped.append(args))
-        with pytest.raises(RuntimeError, match='SQLite 3.35'):
+        with pytest.raises(RuntimeError, match=r'SQLite 3\.35'):
             migration.downgrade()
         assert dropped == []
         for target, name in CONTENT_COLUMNS:

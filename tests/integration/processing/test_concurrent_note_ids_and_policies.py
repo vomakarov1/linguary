@@ -203,7 +203,8 @@ async def test_concurrent_chapter_regeneration_and_correction_never_collide_on_n
             with unit_of_work.transaction() as tx:
                 corrected, = handler._candidates(tx, inputs, response)
             holder["ids"] = [note.id for note in corrected.language_notes]
-        except Exception as exc:  # noqa: BLE001 - surfaced after the join
+        except Exception as exc:
+            # The main thread checks this after joining the worker.
             holder["error"] = exc
 
     thread = threading.Thread(target=correct)
@@ -370,7 +371,7 @@ async def test_failed_regeneration_superseded_by_new_regeneration_reaches_ready_
     ])
     app = make_app(tmp_path, fake)
     try:
-        document, run, _ = await prepare(app, blocks=1)
+        document, _run, _ = await prepare(app, blocks=1)
         block_id = document.sections[0].blocks[0].id
         completed = await drain_tasks(app)
         assert completed[-1].status is TaskStatus.SUCCEEDED

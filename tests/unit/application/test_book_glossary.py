@@ -408,7 +408,7 @@ def test_pending_items_block_processing() -> None:
     """Pending items requiring review block processing from starting."""
     book = review(chapter_one(make_analysis_candidate(source_text="Mr. Bennet")))
 
-    with pytest.raises(GlossaryReviewIncompleteError, match="Mr. Bennet"):
+    with pytest.raises(GlossaryReviewIncompleteError, match=r"Mr\. Bennet"):
         book.ensure_complete()
 
 

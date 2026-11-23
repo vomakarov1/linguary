@@ -1,5 +1,7 @@
 """Optional content plan and educational assistance evidence."""
 
+from typing import cast
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -25,7 +27,10 @@ def downgrade() -> None:
         )).scalar_one()
         if present:
             raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')
-    if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):
+    if (
+        connection.dialect.name == 'sqlite'
+        and cast(tuple[int, ...], connection.dialect.server_version_info) < (3, 35, 0)
+    ):
         raise RuntimeError('для безопасного отката содержательного плана нужен SQLite 3.35 или новее')
     # Recreating chapter_analyses in batch mode removes child rows via CASCADE.
     op.drop_column('block_results', 'content_evidence_json')

@@ -89,7 +89,7 @@ def test_partial_atomic_interval_rejects_restart():
 
 
 def test_resume_requires_exact_version_and_root():
-    recovery, work, units, roots, _, _ = fixture()
+    recovery, work, units, _roots, _, _ = fixture()
     root_id, = prepare(recovery, work, units)
     with pytest.raises(RecoveryError, match='conditions_unavailable'):
         prepare(recovery, work, units, operation_refs=({'root_id': root_id, 'policy_version': LEGACY},))

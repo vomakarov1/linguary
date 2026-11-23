@@ -554,7 +554,7 @@ async def test_process_unit_skips_llm_for_byr_covered_or_foreign_anchor_read_as_
         },
     )
     section_1 = scenario.section(0)
-    b1, b2, b3, b4, b5, b6 = section_1.ordered_blocks
+    b1, b2, _b3, _b4, _b5, b6 = section_1.ordered_blocks
 
     byr_entry = BeforeYouReadEntry(
         expression="Break a leg",

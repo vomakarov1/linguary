@@ -1146,7 +1146,7 @@ async def test_ac5_ac6_ac7_ac9_validation_and_policy_compat(tmp_path, unit_of_wo
             app, scenario, conditions, dialogue, _block_payload("Она сказала.\n— И замолчала."),
             policy=CURRENT_TRANSLATION_POLICY,
         )
-        for content, truncated in (("", True), ("{", True)):
+        for content in ("", "{"):
             client = FakeLLMClient([FakeReply(content=content, truncated=True)])
             work = _open_call(
                 app, scenario, conditions, client, quoted, policy_version=CURRENT_TRANSLATION_POLICY,
@@ -1293,7 +1293,10 @@ async def test_ac5_ac6_ac7_ac9_validation_and_policy_compat(tmp_path, unit_of_wo
         )
         document = store_imported(interval_app, (texts,))
         ids = [block.id for block in document.sections[0].blocks]
-        _shape_blocks(interval_app, tuple((block_id, block_type.value, None) for block_id, block_type in zip(ids, types)))
+        _shape_blocks(interval_app, tuple(
+            (block_id, block_type.value, None)
+            for block_id, block_type in zip(ids, types, strict=True)
+        ))
         await interval_app.analysis.start("book-1")
         analysed = await drain_tasks(interval_app)
         assert analysed[0].status is TaskStatus.SUCCEEDED, analysed[0].last_error

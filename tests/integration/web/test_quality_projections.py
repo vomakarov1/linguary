@@ -42,7 +42,7 @@ def test_incomplete_book_not_ready(client, application, results):
 
 @pytest.mark.parametrize('state', ['limit', 'unknown', 'stale', 'completed'])
 def test_limit_unknown_stale_distinct(configured_client, configured_application, llm_client, state):
-    scenario, command = setup_review(configured_client, configured_application)
+    scenario, _command = setup_review(configured_client, configured_application)
     manifest = configured_application.quality_review.preview(scenario.book_id)
     with configured_application.unit_of_work.transaction() as tx:
         review = QualityReview(str(uuid4()), scenario.book_id, 'projection', manifest,

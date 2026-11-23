@@ -25,10 +25,10 @@ _ROUNDS = 25
 
 def read_books(unit_of_work: SqlAlchemyUnitOfWork) -> int:
     """Opens transactions sequentially and returns the number of completed reads."""
-    for round_number in range(1, _ROUNDS + 1):
+    for _ in range(_ROUNDS):
         with unit_of_work.transaction() as transaction:
             transaction.books.list_all()
-    return round_number
+    return _ROUNDS
 
 
 def test_parallel_threads_do_not_share_one_transaction(

@@ -469,7 +469,7 @@ def test_missing_or_conflicting_log_unexplained_unlinked_or_incomplete_fragment_
     import sqlite3
     from linguary.comparison.protocol import file_hash
 
-    root, protocol, receipt, evidence = partial_case
+    root, _protocol, receipt, evidence = partial_case
     database = root / "partial/data/linguary.db"
     with sqlite3.connect(database) as db:
         if change == "missing_log":

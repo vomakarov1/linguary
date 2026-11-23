@@ -164,7 +164,7 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
     from linguary.application.block_processing import TranslationCall
     fake = SceneFake(reject=True)
     app = make_app(tmp_path / 'data', fake)
-    document, section, run, task, source_sha = await prepare(app, fake)
+    document, _section, run, task, source_sha = await prepare(app, fake)
     original = TranslationCall.save
     crashed = False
     def after_child(self, **kwargs):

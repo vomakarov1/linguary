@@ -48,7 +48,7 @@ def test_forwarded_headers_denied(application, header):
 
 @pytest.mark.parametrize('peer,host', [('127.0.0.1', 'localhost'), ('::1', '[::1]')])
 def test_local_metadata_and_text_read_delete_idempotent(application, peer, host):
-    scenario, path = seed(application)
+    _scenario, path = seed(application)
     with connect(application, peer, host) as client:
         response = client.get(path)
         assert response.status_code == 200, response.text
