@@ -1058,7 +1058,7 @@ def _hint_is_glossary_only(
     """Whether `hint` serves an untranslated `GLOSSARY_ONLY` block or segment."""
     if not requires_hints:
         return False
-    if result.treatment is BlockTreatment.GLOSSARY_ONLY:
+    if result.treatment is BlockTreatment.GLOSSARY_ONLY and not result.segment_treatments:
         return True
     seg_index = _hint_segment_index(block, result, hint)
     if seg_index is None:
@@ -1072,7 +1072,7 @@ def _glossary_only_bucket(
     hint: GlossaryHint,
 ) -> int | None:
     """Bucket key (`None` for whole block, segment index for mixed `GLOSSARY_ONLY` segments)."""
-    if result.treatment is BlockTreatment.GLOSSARY_ONLY:
+    if result.treatment is BlockTreatment.GLOSSARY_ONLY and not result.segment_treatments:
         return None
     treatments = result.segment_treatments
     if not treatments or len(treatments) != len(block.segment_spans):

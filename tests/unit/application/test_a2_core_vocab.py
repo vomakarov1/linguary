@@ -528,11 +528,12 @@ def test_onomatopoeia_screams_and_added_a2_tokens() -> None:
 
 
 def test_a1_trivial_hint_words_compact_and_disjoint_from_borderline_and_overrides() -> None:
-    from linguary.application.a2_core_vocab import A1_TRIVIAL_HINT_WORDS
+    from linguary.application.a2_core_vocab import A1_TRIVIAL_HINT_WORDS, _A1_IRREGULAR_TO_BASE
 
     assert isinstance(A1_TRIVIAL_HINT_WORDS, frozenset)
     assert A1_TRIVIAL_HINT_WORDS <= A2_CORE_VOCABULARY
     assert A1_TRIVIAL_HINT_WORDS.isdisjoint(_NON_CORE_OVERRIDE)
+    assert set(_A1_IRREGULAR_TO_BASE.values()) <= A1_TRIVIAL_HINT_WORDS
 
     internationalisms = {
         "hamburger", "telescope", "taxi", "hotel", "film", "music", "doctor", "bank",
@@ -580,6 +581,10 @@ def test_a1_trivial_hint_words_compact_and_disjoint_from_borderline_and_override
         "walked",
         "walking",
         "children",
+        "man",
+        "men",
+        "mouse",
+        "mice",
         "went",
         "bought",
         "saw",

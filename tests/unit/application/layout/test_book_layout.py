@@ -2727,3 +2727,40 @@ def test_a2_dedup_filters_trivial_a1_hints_per_segment_with_fallbacks_and_protec
         _inputs(_document((_section("c1", 0, "Chapter 1", (gl_with_b1,)),)), {gl_with_b1.id: results[gl_with_b1.id]}, reader_level="b2")
     )
     assert [n.term for n in _notes(b2_single, gl_with_b1.id)] == ["to smile", "cloak"]
+
+
+def test_a2_dedup_mixed_read_as_is_and_glossary_only_segments_do_not_collapse_buckets() -> None:
+    """Mixed `(READ_AS_IS, GLOSSARY_ONLY, GLOSSARY_ONLY)` keeps per-segment buckets despite `treatment == GLOSSARY_ONLY`."""
+    text = "A taxi waited. She smiled. He held a lantern in the hotel."
+    c1 = text.index(" She smiled")
+    c2 = text.index(" He held")
+    block = _block(
+        "c1",
+        0,
+        text,
+        segments=(
+            BlockSegment(0, c1, 0),
+            BlockSegment(c1, c2, 1),
+            BlockSegment(c2, len(text), 2),
+        ),
+    )
+    result = BlockProcessingResult(
+        block.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        segment_treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.GLOSSARY_ONLY,
+            BlockTreatment.GLOSSARY_ONLY,
+        ),
+        segment_translations=(None, None, None),
+        glossary_hints=(
+            GlossaryHint("taxi", "такси"),
+            GlossaryHint("smiled", "улыбнулась"),
+            GlossaryHint("hotel", "отель"),
+            GlossaryHint("lantern", "фонарь", "Переносной фонарь."),
+        ),
+    )
+    doc = _document((_section("c1", 0, "Chapter 1", (block,)),))
+    layout = build_book_layout(_inputs(doc, {block.id: result}, reader_level="a2"))
+
+    assert [n.term for n in _notes(layout, block.id)] == ["to smile", "lantern"]

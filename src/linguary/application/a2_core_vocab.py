@@ -749,7 +749,7 @@ ice island
 jacket job
 key kitchen knife
 lake lamp leg letter life light lunch
-map market meat milk money moon mother mountain mouth mum mummy
+map market meat milk money moon mother mountain mouth mum mummy man mouse
 name newspaper nose number
 office oil
 page paper parent party pen pencil person pet picture pig plant plate price
