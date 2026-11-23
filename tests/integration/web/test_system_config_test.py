@@ -286,9 +286,7 @@ def test_connection_check_uses_max_completion_tokens_and_falls_back_to_max_token
         ],
     ]
 
-    for idx, replies in enumerate(scenarios):
-        seen_bodies: list[dict] = []
-
+    def make_sequence_handler(replies, seen_bodies):
         class SequenceHandler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
@@ -305,7 +303,12 @@ def test_connection_check_uses_max_completion_tokens_and_falls_back_to_max_token
             def log_message(self, *args):
                 pass
 
-        http = ThreadingHTTPServer(("127.0.0.1", 0), SequenceHandler)
+        return SequenceHandler
+
+    for idx, replies in enumerate(scenarios):
+        seen_bodies: list[dict] = []
+        handler = make_sequence_handler(replies, seen_bodies)
+        http = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = Thread(target=http.serve_forever, daemon=True)
         thread.start()
         try:

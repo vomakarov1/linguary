@@ -11,6 +11,7 @@ in place, so Alembic recreates tables via a temporary copy.
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from alembic import context
 from alembic.autogenerate.api import AutogenContext
@@ -41,7 +42,7 @@ def database_url() -> str:
     return url
 
 
-def render_item(item_type: str, obj: object, autogen_context: AutogenContext) -> str | bool:
+def render_item(item_type: str, obj: object, autogen_context: AutogenContext) -> str | Literal[False]:
     """Renders custom column types using their underlying SQLAlchemy base type.
 
     Otherwise, the migration references `linguary.adapters.db.models` and breaks

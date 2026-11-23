@@ -59,7 +59,7 @@ def restart(app, root, *, acknowledge=False):
 
 
 async def test_restart_only_unfinished_safe_scope_with_current_policy(tmp_path):
-    app, fake, document, run, old_task, root, accepted, unfinished = await make_partial_root(tmp_path)
+    app, fake, document, _run, old_task, root, accepted, unfinished = await make_partial_root(tmp_path)
     try:
         result = restart(app, root)
         with app.unit_of_work.transaction() as transaction:
@@ -113,7 +113,7 @@ async def test_restart_keeps_accepted_text_and_historical_origin(tmp_path):
 
 
 async def test_restart_then_crash_resumes_new_operation(tmp_path):
-    app, fake, _, run, _, root, _, _ = await make_partial_root(tmp_path)
+    app, _fake, _, run, _, root, _, _ = await make_partial_root(tmp_path)
     result = restart(app, root)
     with app.unit_of_work.transaction() as transaction:
         successor = transaction.work.get_root(result.successor_root_id)

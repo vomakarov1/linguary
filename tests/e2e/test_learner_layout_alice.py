@@ -279,7 +279,7 @@ def _quote_for(block_id: str, targets: Targets) -> tuple[str, str] | None:
 class AliceModel(FakeLLMClient):
     """One reply per request, scripted from the imported blocks."""
 
-    __slots__ = ("document", "blocks", "front_ids", "notes_ids", "targets")
+    __slots__ = ("blocks", "document", "front_ids", "notes_ids", "targets")
 
     def __init__(self) -> None:
         super().__init__()

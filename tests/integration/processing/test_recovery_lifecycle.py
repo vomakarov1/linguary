@@ -17,7 +17,7 @@ from test_recovery_commit import analysis_reply, translation_reply, prepare
 async def test_restart_and_manual_retry_keep_scope_limit(tmp_path):
     fake = FakeLLMClient([analysis_reply(2), FakeReply(content='{'), FakeReply(content='{'), FakeReply(content='{')])
     app = make_app(tmp_path, fake)
-    doc, run, task = await prepare(app)
+    _doc, run, task = await prepare(app)
     completed = await drain_tasks(app)
     assert completed[0].status == TaskStatus.FAILED
     with app.unit_of_work.transaction() as transaction:
@@ -46,7 +46,7 @@ async def test_restart_keeps_root_manifest_and_rejects_incompatible_notes_policy
 
     fake = FakeLLMClient([analysis_reply(2), FakeReply(content='{'), FakeReply(content='{'), FakeReply(content='{')])
     app = make_app(tmp_path, fake)
-    doc, run, task = await prepare(app)
+    _doc, run, task = await prepare(app)
     assert (await drain_tasks(app))[0].status == TaskStatus.FAILED
     with app.unit_of_work.transaction() as transaction:
         before, = transaction.work.list_roots('book-1', run_id=run.id)
@@ -81,7 +81,7 @@ async def test_reset_preserves_historical_counter_and_creates_new_operation(tmp_
                           translation_reply(1), translation_reply(1), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        _doc, run, _task = await prepare(app)
         assert (await drain_tasks(app))[0].status == TaskStatus.SUCCEEDED
         with app.unit_of_work.transaction() as transaction:
             before, = transaction.work.list_roots('book-1', run_id=run.id)
@@ -125,7 +125,7 @@ async def test_crash_boundaries_do_not_reset_counter_or_repeat_unknown(tmp_path,
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        _doc, run, task = await prepare(app)
         root_id, context = await prepared_root(app, run, task)
         with app.unit_of_work.transaction() as transaction:
             if state in {'sent', 'validated'}:
@@ -155,7 +155,7 @@ async def test_crash_after_commit_before_task_succeed_does_not_send_again(tmp_pa
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        _doc, run, task = await prepare(app)
         original = app.task_queue.save
         async def crash(task):
             if task.task_type.value == 'process_translation_unit' and task.status == TaskStatus.SUCCEEDED:
@@ -193,7 +193,7 @@ async def test_global_root_limit_stops_finite_tree(tmp_path):
     fake = Dynamic()
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app, blocks=8)
+        _doc, run, _task = await prepare(app, blocks=8)
         completed = await drain_tasks(app)
         assert completed[0].status == TaskStatus.FAILED
         with app.unit_of_work.transaction() as transaction:
@@ -210,7 +210,7 @@ async def test_resume_only_unresolved_child_after_saved_child_crash(tmp_path, mo
     from linguary.application.block_processing import TranslationCall
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2, bad=True), translation_reply(2, bad=True), translation_reply(1)])
     app = make_app(tmp_path, fake)
-    doc, run, task = await prepare(app)
+    _doc, run, task = await prepare(app)
     original = TranslationCall.save
     crashed = False
     def crash_after_first_child(self, **kwargs):
@@ -290,8 +290,8 @@ async def test_complete_requires_union_not_task_success(tmp_path):
     from linguary.domain import BookStatus, TaskType
     app = make_app(tmp_path, FakeLLMClient([analysis_reply(2)]))
     try:
-        doc, run, task = await prepare(app)
-        root_id, context = await prepared_root(app, run, task)
+        _doc, run, task = await prepare(app)
+        root_id, _context = await prepared_root(app, run, task)
         with app.unit_of_work.transaction() as transaction:
             transaction.tasks.save(replace(transaction.tasks.get(task.id), status=TaskStatus.SUCCEEDED))
         with pytest.raises(RecoveryError):
@@ -331,7 +331,7 @@ async def test_regeneration_stales_review_and_preserves_root_coverage(tmp_path):
         translated_text='Он возвратился домой.', glossary_hints=[])], language_notes=[]))
     app = make_app(tmp_path, FakeLLMClient([analysis_reply(2), translation_reply(2), changed]))
     try:
-        doc, run, task = await prepare(app)
+        doc, run, _task = await prepare(app)
         assert (await drain_tasks(app))[0].status == TaskStatus.SUCCEEDED
         conditions = app.book_conditions.require('book-1')
         review_id = str(uuid4())

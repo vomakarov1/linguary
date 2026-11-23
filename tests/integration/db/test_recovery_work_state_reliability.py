@@ -106,7 +106,7 @@ def _successor(old):
 def test_stop_root_and_split_scope_reject_stale_generation(unit_of_work):
     conditions, _, _ = prepare(unit_of_work)
     with unit_of_work.transaction() as tx:
-        root, scope, task = _plant(tx, conditions)
+        root, scope, _task = _plant(tx, conditions)
         other, other_scope, other_task = _plant(tx, conditions, scope_blocks=("block-1",))
         generation = root.generation
         with pytest.raises(WorkStateError):
@@ -409,7 +409,7 @@ def test_reconcile_recovery_attempts_handles_claimed_edge_cases_and_correction_r
         tx.work._session.flush()
 
         # 3. claimed with no attempts (latest is None) -> scope->pending
-        empty_root, empty_scope, _ = _plant(tx, conditions, scope_blocks=("block-1",))
+        _empty_root, empty_scope, _ = _plant(tx, conditions, scope_blocks=("block-1",))
         tx.work.claim_scope(empty_scope.id, expected_generation=empty_scope.generation)
 
         # 4. claimed on stopped root and superseded root -> scope->stopped without mutating root

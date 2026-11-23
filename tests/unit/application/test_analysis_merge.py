@@ -1201,7 +1201,7 @@ def test_deduplicate_book_before_you_read_preserves_card_required_by_chapter_pla
     )
 
     doc = make_analysis_document((s1, s2))
-    res1, res2 = deduplicate_book_before_you_read(doc, (a1, a2))
+    _res1, res2 = deduplicate_book_before_you_read(doc, (a1, a2))
 
     assert len(res2.before_you_read) == 1
     assert res2.before_you_read[0].expression == "make a grab"
@@ -2014,9 +2014,9 @@ def test_plan_fragments_balances_long_chapter_without_single_block_tail() -> Non
     # Oversized block in the middle stays isolated as its own 1-block fragment; sides stay balanced.
     oversized = make_analysis_block(section_id=SECTION_ID, order=50, text="H" * 25_000)
     with_huge = (
-        tuple(make_analysis_block(section_id=SECTION_ID, order=i, text="a" * 50) for i in range(50))
-        + (oversized,)
-        + tuple(make_analysis_block(section_id=SECTION_ID, order=51 + i, text="b" * 50) for i in range(50))
+        *(make_analysis_block(section_id=SECTION_ID, order=i, text="a" * 50) for i in range(50)),
+        oversized,
+        *(make_analysis_block(section_id=SECTION_ID, order=51 + i, text="b" * 50) for i in range(50)),
     )
     around_huge = plan_fragments(with_huge, max_blocks=40)
     assert [len(f.blocks) for f in around_huge] == [25, 25, 1, 25, 25]

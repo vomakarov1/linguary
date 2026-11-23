@@ -717,10 +717,11 @@ def test_name_method_shown_only_for_mixed_and_creative() -> None:
         ("creative-name", "Creative", NameTranslationMethod.CREATIVE),
         ("uncertain-name", "Uncertain", NameTranslationMethod.UNCERTAIN),
     )
-    analysis = _analysis("a1", section.id, tuple(
-        _candidate("a1", candidate_id, source, ConceptType.PERSON, source, method=method)
-        for candidate_id, source, method in methods
-    ) + (
+    analysis = _analysis("a1", section.id, (
+        *(
+            _candidate("a1", candidate_id, source, ConceptType.PERSON, source, method=method)
+            for candidate_id, source, method in methods
+        ),
         _candidate("a1", "plain", "Plain", ConceptType.PERSON, "Простой"),
     ))
 

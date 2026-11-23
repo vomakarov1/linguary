@@ -161,7 +161,7 @@ async def test_shutdown_rejects_new_save_and_reset(tmp_path):
 
 async def test_shutdown_collects_all_clients_and_internal_tasks(tmp_path, monkeypatch):
     app = build(tmp_path)
-    close_started, disposed, handles = track_close(app, monkeypatch)
+    _close_started, disposed, handles = track_close(app, monkeypatch)
     old_client = app.runtime_settings.current.configured_client
     original = old_client.aclose
     async def fail_close():

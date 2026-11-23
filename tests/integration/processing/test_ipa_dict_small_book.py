@@ -47,7 +47,7 @@ def _candidates(text):
 async def _small_book(tmp_path, variant):
     replies = [analysis_reply(treatment='TRANSLATE'), analysis_reply(treatment='TRANSLATE')]
     replies += [processing_reply(_candidates(text), treatment='TRANSLATE', translated_text=translation)
-                for text, translation in zip(TEXTS, TRANSLATIONS)]
+                for text, translation in zip(TEXTS, TRANSLATIONS, strict=True)]
     replies += [processing_reply(_candidates(TEXTS[0]), treatment='TRANSLATE', translated_text=TRANSLATIONS[0])] * 2
     fake = FakeLLMClient(replies)
     app = build_application(settings=AppSettings(

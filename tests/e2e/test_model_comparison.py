@@ -36,7 +36,10 @@ class Factory:
             for payload in payloads:
                 for block in payload["blocks"]:
                     block["translated_text"] += " Рен Колдер."
-            selected = tuple(replace(reply, content=json.dumps(payload, ensure_ascii=False)) for reply, payload in zip(selected, payloads))
+            selected = tuple(
+                replace(reply, content=json.dumps(payload, ensure_ascii=False))
+                for reply, payload in zip(selected, payloads, strict=True)
+            )
         client = FakeLLMClient.replying([replace(reply, model=model) for reply in selected])
         self.clients.append(client)
         return client

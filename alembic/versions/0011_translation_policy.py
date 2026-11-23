@@ -1,5 +1,7 @@
 """Persist translation operation policy without rewriting historical work."""
 
+from typing import cast
+
 from alembic import context, op
 import sqlalchemy as sa
 
@@ -44,7 +46,7 @@ def upgrade() -> None:
     ))
 
 
-def _refuse_earlier_data_loss(connection) -> None:
+def _refuse_earlier_data_loss(connection: sa.Connection) -> None:
     """Preserve older migrations' refusal before this revision performs any DDL."""
     target = context.get_revision_argument()
     if target == "0010":
@@ -92,7 +94,10 @@ def downgrade() -> None:
         if connection.execute(sa.text(query)).scalar_one():
             raise RuntimeError("нельзя удалить сохранённую историю операций перевода")
     _refuse_earlier_data_loss(connection)
-    if connection.dialect.name == "sqlite" and connection.dialect.server_version_info < (3, 35, 0):
+    if (
+        connection.dialect.name == "sqlite"
+        and cast(tuple[int, ...], connection.dialect.server_version_info) < (3, 35, 0)
+    ):
         raise RuntimeError("для безопасного отката политики нужен SQLite 3.35 или новее")
     with op.batch_alter_table("processing_tasks", recreate="always") as batch:
         batch.drop_constraint(NEW_TASK_KEY, type_="unique")

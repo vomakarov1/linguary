@@ -192,7 +192,7 @@ def test_enforce_diagnostics_policy_evicts_by_byte_length_without_loading_untouc
     assert len(select_statements) == 2
     projection_sql, _ = select_statements[0]
     assert 'CAST(' in projection_sql.upper()
-    row_load_sql, row_load_params = select_statements[1]
+    _row_load_sql, row_load_params = select_statements[1]
     assert 'call-0' in repr(row_load_params)
     assert 'call-1' not in repr(row_load_params)
     assert 'call-2' not in repr(row_load_params)

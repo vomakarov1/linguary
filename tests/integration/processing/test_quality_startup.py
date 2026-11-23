@@ -13,7 +13,7 @@ from test_quality_review import make_review_app, command
 
 
 async def test_startup_reconciles_attempts_not_cost_zero(tmp_path):
-    app, fake, _, _ = await make_review_app(tmp_path)
+    app, _fake, _, _ = await make_review_app(tmp_path)
     created = await app.quality_review.start(command(app))
     budget = QualityBudget(app.unit_of_work)
     attempt = budget.reserve(created['review_id'], 800, price={'schema_version': 1}, expected_revision=0)

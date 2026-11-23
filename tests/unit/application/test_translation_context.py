@@ -305,7 +305,7 @@ def build_context(
 def test_fragment_translation_regeneration_receive_pinned_strategy():
     policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
     builder = ContextBuilder(name_translation_policy=policy)
-    context, unit = build_context(builder=builder)
+    context, _unit = build_context(builder=builder)
     assert 'непрозрачные части' in context.request.instructions
     assert context.request.name_translation_policy_version == 1
     section = make_section(make_blocks(2))

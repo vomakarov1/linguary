@@ -76,7 +76,7 @@ def command(app, *, scope='all', key='review-1', budget=100000):
 
 
 async def test_default_off_no_calls_and_explicit_queue_is_idempotent(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         count = len(fake.requests)
         assert app.quality_review.get('book-1')['state'] == 'not-requested'
@@ -106,7 +106,7 @@ async def test_default_off_no_calls_and_explicit_queue_is_idempotent(tmp_path):
 @pytest.mark.parametrize('mode,state', [('finding', 'completed-with-findings'), ('missing', 'partial'),
     ('omitted', 'partial'), ('bad-anchor', 'partial'), ('transport', 'unknown')])
 async def test_review_only_returns_findings_and_validates_coverage(tmp_path, mode, state):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, run = await make_review_app(tmp_path)
     try:
         with app.unit_of_work.transaction() as tx:
             before_results = tx.results.list_for_run(run.id)
@@ -132,7 +132,7 @@ async def test_review_only_returns_findings_and_validates_coverage(tmp_path, mod
 
 
 async def test_explicit_scope_and_partial_manifest(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path, complete=False)
+    app, fake, doc, _run = await make_review_app(tmp_path, complete=False)
     try:
         block_id = doc.sections[0].blocks[0].id
         created = await app.quality_review.start(command(app, scope=(block_id,)))
@@ -147,7 +147,7 @@ async def test_explicit_scope_and_partial_manifest(tmp_path):
 
 
 async def test_every_retry_reserves_and_format_error_settles_usage(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         fake.mode = 'schema'
         created = await app.quality_review.start(command(app))
@@ -164,7 +164,7 @@ async def test_every_retry_reserves_and_format_error_settles_usage(tmp_path):
 
 
 async def test_unpriced_model_has_no_request(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path, priced=False)
+    app, fake, _doc, _run = await make_review_app(tmp_path, priced=False)
     try:
         created = await app.quality_review.start(command(app))
         finished = await drain_tasks(app)
@@ -176,7 +176,7 @@ async def test_unpriced_model_has_no_request(tmp_path):
 
 
 async def test_regeneration_during_review_stales(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, run = await make_review_app(tmp_path)
     try:
         def change_body():
             with app.unit_of_work.transaction() as tx:
@@ -194,7 +194,7 @@ async def test_regeneration_during_review_stales(tmp_path):
 
 
 async def test_regeneration_after_reservation_cancels_unsent_attempt(tmp_path, monkeypatch):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, run = await make_review_app(tmp_path)
     try:
         created = await app.quality_review.start(command(app))
         reserve = app.quality_review.budget.reserve
@@ -250,7 +250,7 @@ async def test_local_registry_is_used_by_build_application(tmp_path, monkeypatch
 
 
 async def test_changed_route_attestation_cannot_send_queued_review(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         created = await app.quality_review.start(command(app))
         app.quality_review.routes['test-route', 'review-model'] = replace(route(), price_version='changed')
@@ -262,7 +262,7 @@ async def test_changed_route_attestation_cannot_send_queued_review(tmp_path):
 
 
 async def test_limit_before_send_and_over_estimate_stop(tmp_path):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         created = await app.quality_review.start(command(app, budget=1))
         await drain_tasks(app)
@@ -299,7 +299,7 @@ async def test_stale_detects_unselected_artifact_change_without_explicit_marker(
 @pytest.mark.parametrize('mode,budget,state', [('transport', 100000, 'unknown'),
     ('valid', 1, 'limit'), ('valid', 100000, 'completed-without-findings')])
 async def test_repeated_terminal_review_task_does_not_send_or_reserve(tmp_path, mode, budget, state):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         fake.mode = mode
         created = await app.quality_review.start(command(app, budget=budget))
@@ -322,7 +322,7 @@ async def test_quality_review_passes_previous_validation_error_into_repair_turn(
     from hashlib import sha256
     from linguary.application.quality_context import INSTRUCTIONS
 
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, fake, _doc, _run = await make_review_app(tmp_path)
     try:
         fake.mode = 'schema'
         await app.quality_review.start(command(app))
@@ -631,7 +631,7 @@ async def test_chunked_quality_review_resumes_without_rebilling_checked_chunks_a
 
 
 async def test_quality_review_populates_missing_after_reconciled_unknown_and_preserves_unknown_reason(tmp_path, monkeypatch):
-    app, fake, doc, run = await make_review_app(tmp_path)
+    app, _fake, _doc, run = await make_review_app(tmp_path)
     try:
         manifest = app.quality_review.preview('book-1')
         all_manifest_shas = [a['artifact_sha'] for a in manifest['artifacts']]

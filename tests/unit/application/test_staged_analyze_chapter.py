@@ -2245,16 +2245,17 @@ def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_
             BlockSegment(cut, len(winked), 0),
         ),
     )
-    ordered = blocks + (glossary_block,) + stay_blocks + (kept_glossary, split)
+    ordered = (*blocks, glossary_block, *stay_blocks, kept_glossary, split)
     aliases = {f'b{index + 1}': block.id for index, block in enumerate(ordered)}
     glossary_alias = f'b{len(blocks) + 1}'
     split_alias = f'b{len(ordered)}'
     point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
     payload = PedagogicalAnalysisResponse(
-        treatment_plan=tuple(
-            TreatmentPlanItemResponse(f'b{index + 1}', BlockTreatment.READ_AS_IS)
-            for index in range(len(ordered) - 2)
-        ) + (
+        treatment_plan=(
+            *(
+                TreatmentPlanItemResponse(f'b{index + 1}', BlockTreatment.READ_AS_IS)
+                for index in range(len(ordered) - 2)
+            ),
             TreatmentPlanItemResponse(f'b{len(ordered) - 1}', BlockTreatment.GLOSSARY_ONLY),
             TreatmentPlanItemResponse(split_alias, BlockTreatment.READ_AS_IS, (
                 SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),

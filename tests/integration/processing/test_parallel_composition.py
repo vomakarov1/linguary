@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -140,7 +141,7 @@ async def test_requests_per_minute_spaces_calls_of_all_workers(
     await drain_tasks(application)
 
     assert len(client.started) == 3
-    gaps = [later - earlier for earlier, later in zip(client.started, client.started[1:])]
+    gaps = [later - earlier for earlier, later in pairwise(client.started)]
     assert all(gap >= 0.09 for gap in gaps), gaps
 
 

@@ -201,7 +201,7 @@ async def test_system_settings_input_parses_split_models_and_inference():
         temperature=0.7,
         timeout_seconds=90.0,
     )
-    json_update, json_revision = await read_settings_update(request(values), current_settings=CURRENT)
+    json_update, _json_revision = await read_settings_update(request(values), current_settings=CURRENT)
     assert json_update.analysis_model == "analysis-model"
     assert json_update.processing_model == "proc-model"
     assert json_update.temperature == 0.7
@@ -214,7 +214,7 @@ async def test_system_settings_input_parses_split_models_and_inference():
         timeout_seconds="90.0",
         requests_per_minute="",
     )
-    form_update, form_revision = await read_settings_update(
+    form_update, _form_revision = await read_settings_update(
         request(form_values, 'application/x-www-form-urlencoded'),
         current_settings=CURRENT,
     )

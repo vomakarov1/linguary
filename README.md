@@ -136,6 +136,16 @@ The configuration screen (`GET /system/config`) — and `uv run python -m lingua
 
 ## Testing
 
+Run Ruff, ty (application code and Alembic migrations), and the architecture tests with:
+
+```sh
+make check
+```
+
+The command uses the dependencies pinned in `uv.lock`. GitHub Actions runs the same command on Python 3.15.
+
+Run the full test suite with:
+
 ```sh
 uv run pytest -v
 ```

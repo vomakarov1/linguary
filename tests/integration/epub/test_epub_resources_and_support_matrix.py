@@ -274,7 +274,7 @@ def test_archive_larger_than_the_limit_is_fatal(
         root=storage_root, limits=ExtractionLimits(max_total_bytes=1024)
     )
 
-    with pytest.raises(EpubImportFatalError, match="превыш|заявлено"):
+    with pytest.raises(EpubImportFatalError, match=r"превыш|заявлено"):
         _store(reader, store, source)
 
     assert not storage_root.exists()

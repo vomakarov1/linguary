@@ -1,4 +1,6 @@
 """Persist exact pronunciation occurrences and their evidence."""
+from typing import cast
+
 from alembic import context, op
 import sqlalchemy as sa
 
@@ -30,6 +32,9 @@ def downgrade() -> None:
         if connection.execute(sa.text(
                 f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)')).scalar_one():  # noqa: S608
             raise RuntimeError(message)
-    if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):
+    if (
+        connection.dialect.name == 'sqlite'
+        and cast(tuple[int, ...], connection.dialect.server_version_info) < (3, 35, 0)
+    ):
         raise RuntimeError('для безопасного отката произношений нужен SQLite 3.35 или новее')
     op.drop_column('block_results', 'pronunciation_assistances_json')
