@@ -274,6 +274,7 @@ def test_quotes_helpers_handle_dialect_apostrophes_outer_open_and_direct_speech(
     """Shared British quote helpers parse adjacent/final dialect apostrophes, outer open quote, and direct speech."""
     from linguary.application.validators.quotes import (
         _outer_unclosed_open,
+        british_quote_counts,
         has_direct_speech_quotes,
         has_unclosed_british_quote,
     )
@@ -289,6 +290,29 @@ def test_quotes_helpers_handle_dialect_apostrophes_outer_open_and_direct_speech(
     )
     assert has_unclosed_british_quote("‘Look at the boys’ coats in the hall.") is True
     assert has_unclosed_british_quote("‘Go there’, he said.") is False
+
+    # Inline single-quoted words/nested quotes before lowercase continuation must still close cleanly.
+    inline_word = "The word ‘magic’ was forbidden."
+    assert british_quote_counts(inline_word) == (1, 1)
+    assert has_unclosed_british_quote(inline_word) is False
+    assert _outer_unclosed_open(inline_word, len(inline_word)) is None
+
+    nested_inline = "‘It’s called ‘quidditch’ and you fly,’ said Wood."
+    assert british_quote_counts(nested_inline) == (2, 2)
+    assert has_unclosed_british_quote(nested_inline) is False
+    assert _outer_unclosed_open(nested_inline, len(nested_inline)) is None
+
+    # Capitalized proper names ending in `-in` are not treated as dialect `-in’` stems.
+    for proper_name in ("Martin", "Kevin", "Justin", "Colin", "Austin", "Darwin"):
+        proper_quote = f"‘Ask {proper_name}’, she said."
+        assert british_quote_counts(proper_quote) == (1, 1)
+        assert has_unclosed_british_quote(proper_quote) is False
+        assert _outer_unclosed_open(proper_quote, len(proper_quote)) is None
+
+    # Known elided auxiliaries remain apostrophes in unclosed quotes.
+    unclosed_aux = "‘I couldn’ believe he wouldn’ go, an’ didn’ say why."
+    assert british_quote_counts(unclosed_aux) == (1, 0)
+    assert has_unclosed_british_quote(unclosed_aux) is True
 
     monologue = "‘An’ he was killin’ ’em. Tell Harry.’"
     assert _outer_unclosed_open(monologue, 0) is None
@@ -507,3 +531,41 @@ def test_dialogue_validator_strict_v3_allows_non_quote_prose_and_abbreviations(
 ) -> None:
     """Under strict_v3=True, bare apostrophes, leading-dash lines, and English/Russian abbreviations pass."""
     assert _check(translated_text, source_text=source_text, strict_v3=True) is None
+
+
+def test_dialogue_validator_strict_v3_checks_inline_dash_per_segment_without_joining_across_gaps() -> None:
+    """Segmented [T, G, T] / [T, R, T] narration followed by a dialogue segment is not falsely rejected."""
+    parts = ("Harry walked in.", " The giant smiled.", ' "Hello!" he said.')
+    for middle_mode in (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS):
+        unit, block = _segmented_unit(
+            parts, (BlockTreatment.TRANSLATE, middle_mode, BlockTreatment.TRANSLATE)
+        )
+        ok_payload = make_response(
+            (
+                BlockResultResponse(
+                    source_block_id=block.id,
+                    treatment=BlockTreatment.TRANSLATE,
+                    translated_text=None,
+                    segments=(
+                        SegmentTranslationResponse(index=1, translated_text="Он вошёл."),
+                        SegmentTranslationResponse(index=3, translated_text="— Привет! — сказал он."),
+                    ),
+                ),
+            )
+        )
+        assert dialogue_violation(ok_payload, target_language="ru", unit=unit, strict_v3=True) is None
+
+        bad_payload = make_response(
+            (
+                BlockResultResponse(
+                    source_block_id=block.id,
+                    treatment=BlockTreatment.TRANSLATE,
+                    translated_text=None,
+                    segments=(
+                        SegmentTranslationResponse(index=1, translated_text="Он вошёл."),
+                        SegmentTranslationResponse(index=3, translated_text="Он улыбнулся. — Привет!"),
+                    ),
+                ),
+            )
+        )
+        assert dialogue_violation(bad_payload, target_language="ru", unit=unit, strict_v3=True) is not None

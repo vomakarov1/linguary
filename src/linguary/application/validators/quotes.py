@@ -16,6 +16,24 @@ _DIALECT_FINAL_WORDS = frozenset({"an", "o", "don", "las", "ol", "jus", "mus"})
 #: Capitalized forms of fixed dialect words that still count as apostrophes before punctuation.
 _DIALECT_CAPITALIZED_BEFORE_PUNCT = frozenset({"An", "Las", "Ol", "Jus", "Mus"})
 
+#: Known negative/auxiliary contractions whose final `t` is elided (`couldn’`, `didn’`, ...).
+_ELIDED_AUXILIARIES = frozenset(
+    {
+        "ain",
+        "aren",
+        "couldn",
+        "didn",
+        "hadn",
+        "hasn",
+        "haven",
+        "isn",
+        "shouldn",
+        "wasn",
+        "weren",
+        "wouldn",
+    }
+)
+
 #: Standard English `-in` words (length >= 4, not `-ain`) that are not `-ing -> -in’` dialect forms.
 _NON_DIALECT_IN_WORDS = frozenset(
     {
@@ -115,11 +133,23 @@ def _is_dialect_stem(word: str, *, before_punct: bool) -> bool:
             return False
         return True
     return (
-        len(lower) >= 4
+        word.islower()
+        and len(lower) >= 4
         and lower.endswith("in")
         and not lower.endswith("ain")
         and lower not in _NON_DIALECT_IN_WORDS
     )
+
+
+def _can_be_word_final_apostrophe(
+    word: str, *, allow_plural_s: bool, before_punct: bool
+) -> bool:
+    if not word:
+        return False
+    lower = word.lower()
+    if allow_plural_s and lower.endswith("s"):
+        return True
+    return lower in _ELIDED_AUXILIARIES or _is_dialect_stem(word, before_punct=before_punct)
 
 
 def _is_word_final_apostrophe(text: str, idx: int) -> bool:
@@ -129,11 +159,11 @@ def _is_word_final_apostrophe(text: str, idx: int) -> bool:
     word = _word_before(text, idx)
     rest = text[idx + 1 :]
     if _FOLLOWS_LOWER_WORD_OR_ELISION.match(rest) is not None:
-        return True
-    if _is_dialect_stem(word, before_punct=False) and _FOLLOWS_WORD_OR_ELISION.match(rest) is not None:
-        return True
-    if (not rest or rest[0] in ",;:.!?…—–-") and _is_dialect_stem(word, before_punct=True):
-        return True
+        return _can_be_word_final_apostrophe(word, allow_plural_s=True, before_punct=False)
+    if _FOLLOWS_WORD_OR_ELISION.match(rest) is not None:
+        return _can_be_word_final_apostrophe(word, allow_plural_s=False, before_punct=False)
+    if not rest or rest[0] in ",;:.!?…—–-":
+        return _can_be_word_final_apostrophe(word, allow_plural_s=False, before_punct=True)
     return False
 
 
@@ -162,6 +192,9 @@ def _british_single_quote_events(text: str) -> list[tuple[str, int]]:
                 and idx > 0
                 and _is_word_char(text[idx - 1])
                 and (idx + 1 == len(text) or text[idx + 1] in _TRAILING_QUOTE_CONTINUATORS)
+                and _can_be_word_final_apostrophe(
+                    _word_before(text, idx), allow_plural_s=True, before_punct=False
+                )
             ):
                 continue
             seg_closes.append(idx)
@@ -224,18 +257,7 @@ def _matched_straight_single_quotes(text: str) -> list[tuple[int, int]]:
         if next_is_word:
             continue
         if _is_word_final_apostrophe(text, idx):
-            if not open_candidates:
-                continue
-            word = _word_before(text, idx)
-            if _is_dialect_stem(word, before_punct=True) or word.lower().endswith("s"):
-                continue
-            if any(
-                text[later] == "'"
-                and (later + 1 == length or not _is_word_char(text[later + 1]))
-                and not _is_word_final_apostrophe(text, later)
-                for later in range(idx + 1, length)
-            ):
-                continue
+            continue
         if open_candidates:
             pairs.append((open_candidates.pop(), idx))
     return pairs

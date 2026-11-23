@@ -184,7 +184,7 @@ def _text_dialogue_violation(
             f"в переводе блока {block_id} лишнее тире «— » между предложениями одного говорящего "
             "без слов автора: в цельной реплике не ставь тире перед следующим предложением"
         )
-    if strict_v3 and _has_inline_dialogue_dash(text, source_text=source_text):
+    if strict_v3 and _has_block_inline_dialogue_dash(text, block=block, source_text=source_text):
         return (
             f"в переводе блока {block_id} лишнее тире «— » в строке после точки без переноса строки: "
             "прямую речь после слов автора начинай с новой строки и «— » либо оформляй через двоеточие"
@@ -294,6 +294,21 @@ def _has_stray_dialogue_dash(text: str, *, source_text: str | None) -> bool:
             continue
         return True
     return False
+
+
+def _has_block_inline_dialogue_dash(
+    text: str,
+    *,
+    block: BlockResultResponse | None,
+    source_text: str | None,
+) -> bool:
+    """Checks non-leading inline dash per segment when `block.segments` is non-empty."""
+    if block is not None and block.segments:
+        return any(
+            _has_inline_dialogue_dash(segment.translated_text, source_text=source_text)
+            for segment in sorted(block.segments, key=lambda segment: segment.index)
+        )
+    return _has_inline_dialogue_dash(text, source_text=source_text)
 
 
 def _has_inline_dialogue_dash(text: str, *, source_text: str | None) -> bool:
