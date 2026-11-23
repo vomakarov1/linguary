@@ -1892,6 +1892,56 @@ async def test_openai_client_forwards_block_aliases_to_parse_payload() -> None:
     assert caught.value.violation.block_ids == ("uuid-2",)
 
 
+@pytest.mark.parametrize(
+    ("usage_payload", "expected_outcome"),
+    [
+        pytest.param(
+            {"prompt_tokens": 50, "completion_tokens": 0, "completion_tokens_details": {"reasoning_tokens": 0}},
+            "known_transient",
+            id="zero-completion-zero-reasoning",
+        ),
+        pytest.param(
+            {"prompt_tokens": 50, "completion_tokens": 0},
+            "known_transient",
+            id="zero-completion-no-reasoning",
+        ),
+        pytest.param(None, "unknown", id="usage-missing"),
+        pytest.param(
+            {"prompt_tokens": 50, "completion_tokens": 5, "completion_tokens_details": {"reasoning_tokens": 0}},
+            "unknown",
+            id="nonzero-completion",
+        ),
+        pytest.param(
+            {"prompt_tokens": 50, "completion_tokens": 0, "completion_tokens_details": {"reasoning_tokens": 12}},
+            "unknown",
+            id="nonzero-reasoning",
+        ),
+        pytest.param(
+            {"prompt_tokens": 50},
+            "unknown",
+            id="completion-missing",
+        ),
+    ],
+)
+async def test_finish_reason_error_empty_content_transient_only_on_strict_zero_usage(
+    usage_payload: dict[str, Any] | None,
+    expected_outcome: str,
+) -> None:
+    """finish_reason='error' with empty content is known_transient only when usage proves 0 completion & 0 reasoning tokens."""
+    doc: dict[str, Any] = {
+        "choices": [{"finish_reason": "error", "message": {"content": ""}}],
+    }
+    if usage_payload is not None:
+        doc["usage"] = usage_payload
+    client = client_over(responding(doc))
+    try:
+        with pytest.raises(LLMTransportError) as caught:
+            await client.generate(_translation_request())
+        assert caught.value.outcome == expected_outcome
+    finally:
+        await client.aclose()
+
+
 
 
 

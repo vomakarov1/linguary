@@ -469,8 +469,12 @@ class ProcessChapter:
                                 recovery=(root_id, scope.id),
                                 root=roots_by_id.get(root_id),
                             )
-                        except RecoverySplit:
-                            self._recovery.split(root_id, scope.id)
+                        except RecoverySplit as split_error:
+                            self._recovery.split(
+                                root_id,
+                                scope.id,
+                                failing_block_ids=split_error.failing_block_ids,
+                            )
                             continue
                         if root_result.discarded:
                             if self._discarded_root_may_finish(root_id, work):

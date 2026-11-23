@@ -41,6 +41,7 @@ from linguary.application.book_overview import (
 from linguary.application.errors import ApplicationError
 from linguary.application.diagnostics import DiagnosticNotFoundError
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.recovery import RecoveryError
 from linguary.application.glossary_review import (
     GlossaryNotFoundError,
     GlossaryReviewError,
@@ -115,6 +116,7 @@ _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (BookStatusTransitionError, status.HTTP_409_CONFLICT),
     (TaskTransitionError, status.HTTP_409_CONFLICT),
     (LLMConfigurationError, status.HTTP_409_CONFLICT),
+    (RecoveryError, status.HTTP_409_CONFLICT),
     (GlossaryReviewError, status.HTTP_409_CONFLICT),
     (RegenerateBlockError, status.HTTP_409_CONFLICT),
     (ResetProcessingError, status.HTTP_404_NOT_FOUND),

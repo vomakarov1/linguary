@@ -213,8 +213,12 @@ class RegenerateBlock:
                     for block in work.section.blocks
                 },
             )
-        except RecoverySplit:
-            self._recovery.split(root.id, scope.id)
+        except RecoverySplit as split_error:
+            self._recovery.split(
+                root.id,
+                scope.id,
+                failing_block_ids=split_error.failing_block_ids,
+            )
             raise
         except RecoveryError:
             with self._unit_of_work.transaction() as transaction:

@@ -183,9 +183,18 @@ class OpenAICompatibleLLMClient(LLMClient):
             if finish_reason == "error":
                 raw_message_content = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(raw_message_content, str) or not raw_message_content.strip():
+                    outcome: TransportOutcome = (
+                        "known_transient"
+                        if (
+                            usage is not None
+                            and usage.completion_tokens == 0
+                            and (usage.reasoning_tokens is None or usage.reasoning_tokens == 0)
+                        )
+                        else "unknown"
+                    )
                     raise LLMTransportError(
                         f"провайдер {self._settings.provider} завершил генерацию с ошибкой (finish_reason=error)",
-                        outcome="unknown",
+                        outcome=outcome,
                     )
             content = _content(
                 choice,

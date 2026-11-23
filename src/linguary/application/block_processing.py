@@ -27,7 +27,7 @@ from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import (
     LLMClient, LLMConfigurationError, LLMContextCapacityError, LLMProviderError,
-    LLMResponse, LLMResponseFormatError, LLMTransportError,
+    LLMResponse, LLMResponseFormatError, LLMTransportError, TransportOutcome,
 )
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
@@ -46,6 +46,7 @@ from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_content_coverage, resolve_response_evidence, validate_content_coverage
 from linguary.domain.book_conditions import WorkStateError
 from linguary.domain.content_plan import ContentEvidence
+from linguary.domain.llm_log import Violation
 from linguary.domain import (
     LLMCallStage,
     BlockProcessingResult,
@@ -217,6 +218,7 @@ class TranslationCall:
         )
         attempts = 0
         capacity_retries = 0
+        last_error: Exception | None = None
         while True:
             attempts += 1
             response = None
@@ -227,6 +229,7 @@ class TranslationCall:
                     from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
                     diagnostics_for(self._unit_of_work).ensure_available()
                     stopped_reason = None
+                    persisted_last_error: Exception | None = None
                     try:
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
@@ -254,6 +257,10 @@ class TranslationCall:
                                     if stopped is not None
                                     else None
                                 ) or 'limit'
+                                if last_error is None and stopped_reason in {'limit', 'scope_limit'}:
+                                    persisted_last_error = _attempt_original_error(
+                                        transaction.work, recovery[0], recovery[1]
+                                    )
                     except RecoveryError:
                         raise
                     except Exception as error:
@@ -261,7 +268,11 @@ class TranslationCall:
                             raise
                         diagnostics_for(self._unit_of_work).fail()
                     if physical_context is None:
-                        raise RecoveryError(stopped_reason or 'limit', recovery[0])
+                        raise RecoveryError(
+                            stopped_reason or 'limit',
+                            recovery[0],
+                            original_error=last_error if last_error is not None else persisted_last_error,
+                        )
                     request = replace(request, call_context=physical_context,
                                       scope_id=physical_context.scope_id)
                 if (
@@ -475,7 +486,12 @@ class TranslationCall:
                             raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                     if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
-                        raise RecoverySplit(*recovery) from None
+                        failing_ids = (
+                            tuple(violation.block_ids)
+                            if violation is not None and violation.scope == "local"
+                            else ()
+                        )
+                        raise RecoverySplit(*recovery, failing_block_ids=failing_ids) from None
                 elif outcome == 'unknown' and recovery is not None:
                     raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
                 if isinstance(error, LLMContextCapacityError):
@@ -533,6 +549,7 @@ class TranslationCall:
                             raise RecoveryError('context_capacity', recovery[0], original_error=error) from error
                         raise
                     capacity_retries += 1
+                    last_error = error
                     context = context.without_optional_neighbours()
                     request = replace(request, input_text=context.request.input_text, attempt=request.attempt + 1)
                     continue
@@ -554,6 +571,7 @@ class TranslationCall:
                     raise
                 if decision.backoff_seconds > 0 and self._sleep is not None:
                     await self._sleep(decision.backoff_seconds)
+                last_error = error
                 request = decision.next_request(request)
                 continue
             self._validated_response.set(response)
@@ -1182,6 +1200,56 @@ def _with_allocated_note_ids(transaction, results, *, run_id: str, chapter_num: 
         ) if result.language_notes else result
         for result in results
     )
+
+
+def _attempt_original_error(work, root_id: str, scope_id: str) -> Exception | None:
+    """Reconstruct last failed attempt's error type after restart when in-memory last_error is absent."""
+    list_root_attempts = getattr(work, "list_root_attempts", None)
+    if not callable(list_root_attempts):
+        return None
+    attempts = [
+        item
+        for item in list_root_attempts(root_id)
+        if getattr(item, "state", None) in {"rejected", "failed", "unknown"}
+    ]
+    if not attempts:
+        return None
+    scope_attempts = [item for item in attempts if getattr(item, "scope_id", None) == scope_id]
+    latest = max(scope_attempts or attempts, key=lambda item: getattr(item, "ordinal", 0))
+    raw_violation = (getattr(latest, "outcome", None) or {}).get("violation")
+    if not isinstance(raw_violation, Mapping):
+        if getattr(latest, "state", None) == "rejected":
+            return ResultValidationError("Превышен лимит попыток восстановления")
+        return None
+    rule = str(raw_violation.get("rule_code") or "unknown")
+    msg = str(raw_violation.get("safe_message") or "Превышен лимит попыток восстановления")
+    stage = str(raw_violation.get("stage") or "translation_unit")
+    scope = str(raw_violation.get("scope") or "unknown")
+    block_ids = tuple(str(b) for b in (raw_violation.get("block_ids") or ()) if b)
+    if scope not in {"local", "unit", "global", "unknown"} or (scope == "local" and not block_ids):
+        scope = "unknown"
+        block_ids = ()
+    violation = Violation(rule, stage, scope=scope, block_ids=block_ids, safe_message=msg)
+    if rule == "provider_truncated":
+        return LLMResponseFormatError(msg, truncated=True, violation=violation)
+    if rule in {
+        "response_schema",
+        "response_parse",
+        "response_format",
+        "response_domain",
+        "response_coverage",
+        "provider_refusal",
+        "provider_content_filter",
+    }:
+        return LLMResponseFormatError(msg, violation=violation)
+    if rule.startswith("transport_"):
+        t_outcome: TransportOutcome = (
+            "unknown"
+            if rule == "transport_unknown"
+            else ("not_sent" if rule == "transport_not_sent" else "known_transient")
+        )
+        return LLMTransportError(msg, outcome=t_outcome)
+    return ResultValidationError(msg, violation=violation)
 
 
 def _aliased_violation(violation, context: TranslationContext):

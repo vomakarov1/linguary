@@ -22,6 +22,58 @@ from linguary.domain.correction import (
 )
 from linguary.domain.content_plan import canonical_sha
 
+_SPLITTABLE_FAILURE_RULES = frozenset(
+    {
+        "response_schema",
+        "response_parse",
+        "response_format",
+        "response_domain",
+        "domain_validation",
+        "treatment_mismatch",
+        "content_violation",
+        "paragraph_count_mismatch",
+        "extra_paragraphs",
+        "foreign_footnote_marker",
+        "terminal_punctuation",
+        "quote_balance",
+        "bracket_balance",
+        "wrong_target_language",
+        "service_message_leak",
+        "mixed_script_leak",
+        "dialogue_punctuation",
+        "glossary_hint_spelling",
+        "note_language_leak",
+        "note_quote_missing",
+        "note_duplicate",
+        "content_plan",
+    }
+)
+_NON_SPLITTABLE_RULES = frozenset(
+    {
+        "provider_refusal",
+        "provider_content_filter",
+        "provider_truncated",
+        "unknown",
+    }
+)
+
+
+def _is_splittable_violation(violation: object) -> bool:
+    """True only for model output / validation violations where splitting the scope can help."""
+    if violation is None:
+        return False
+    if isinstance(violation, Mapping):
+        rule_code = violation.get("rule_code")
+        stage = violation.get("stage")
+    else:
+        rule_code = getattr(violation, "rule_code", None)
+        stage = getattr(violation, "stage", None)
+    if rule_code in _SPLITTABLE_FAILURE_RULES:
+        return True
+    if not isinstance(rule_code, str) or rule_code in _NON_SPLITTABLE_RULES or rule_code.startswith("transport_"):
+        return False
+    return stage == "reader_text"
+
 
 def _json(value):
     value = thaw(value)
@@ -1622,23 +1674,38 @@ class SqlAlchemyWorkRepository:
             LLMAttemptRow.state == attempt.state).values(state=state, outcome_json=outcome))
         self._session.execute(update(RecoveryScopeRow).where(RecoveryScopeRow.id == scope.id,
             RecoveryScopeRow.generation == attempt.generation, RecoveryScopeRow.status == 'claimed').values(status='pending'))
-        previous = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id,
-            LLMAttemptRow.state != 'cancelled').order_by(LLMAttemptRow.ordinal.desc()).limit(2)).all()
+        previous = self._session.scalars(
+            select(LLMAttemptRow)
+            .where(LLMAttemptRow.scope_id == scope.id, LLMAttemptRow.state != 'cancelled')
+            .order_by(LLMAttemptRow.ordinal.desc())
+        ).all()
         self._session.flush()
+        policy = root.manifest['policy']
         is_truncated = (
             violation is not None and violation.rule_code == "provider_truncated"
         )
-        if not is_truncated and not (
+        recent_two = previous[:2]
+        repeated_local = bool(
             signature
-            and len(previous) == 2
+            and len(recent_two) == 2
             and all(
-                row.state == "rejected"
-                and row.outcome_json.get("failure_signature") == signature
-                for row in previous
+                row.state in {"rejected", "failed"}
+                and (row.outcome_json or {}).get("failure_signature") == signature
+                for row in recent_two
             )
-        ):
+        )
+        splittable_attempts = [
+            row
+            for row in previous
+            if row.state in {"rejected", "failed"}
+            and _is_splittable_violation((row.outcome_json or {}).get("violation"))
+        ]
+        fallback_split = (
+            _is_splittable_violation(violation)
+            and len(splittable_attempts) >= max(2, policy["max_scope_calls"] - 1)
+        )
+        if not is_truncated and not repeated_local and not fallback_split:
             return False
-        policy = root.manifest['policy']
         scopes = self.list_scopes(root.id)
         by_id = {item.id: item for item in scopes}
         depth, parent = 0, scope

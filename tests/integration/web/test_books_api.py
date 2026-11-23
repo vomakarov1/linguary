@@ -401,3 +401,31 @@ def test_unknown_book_gives_404(client: TestClient) -> None:
     assert response.status_code == 404
     assert "unknown" in response.json()["detail"]
 
+
+def test_recovery_error_returns_409_conflict_in_fastapi_app(
+    client: TestClient, application: Application, monkeypatch
+) -> None:
+    """RecoveryError is no longer an LLMConfigurationError and maps explicitly to 409 Conflict."""
+    from linguary.application.ports.llm import LLMConfigurationError
+    from linguary.application.recovery import RecoveryError
+
+    assert not issubclass(RecoveryError, LLMConfigurationError)
+
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+
+    async def fail_with_recovery_error(_book_id: str, _block_id: str) -> object:
+        raise RecoveryError("conditions_unavailable")
+
+    monkeypatch.setattr(application.regeneration, "start", fail_with_recovery_error)
+    block_id = scenario.block_ids()[0]
+
+    json_resp = client.post(f"/books/{scenario.book_id}/blocks/{block_id}/regenerate")
+    assert json_resp.status_code == 409
+    assert "conditions_unavailable" in json_resp.json()["detail"]
+
+    html_resp = client.post(
+        f"/books/{scenario.book_id}/blocks/{block_id}/regenerate",
+        headers=HTML_HEADERS,
+    )
+    assert html_resp.status_code == 409
+

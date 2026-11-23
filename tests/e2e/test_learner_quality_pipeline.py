@@ -107,8 +107,12 @@ class SceneFake(FakeLLMClient):
                 payload['language_notes'][0]['note'] = '[b17]'
                 payload['content_evidence'][0]['body_excerpt'] = '[b17]'
             elif self.defect == 'ambiguous_error':
-                self.default = FakeReply(content='{')
-                return await super().generate(request)
+                from linguary.application.retry_policy import ResultValidationError
+                self.requests.append(request)
+                raise ResultValidationError(
+                    'неизвестная ошибка кавычек',
+                    violation=Violation('quotes', 'translation_unit', 'unknown'),
+                )
             self.default = FakeReply.of_payload(payload)
         response = await super().generate(request)
         if self.after_response is not None and request.kind == LLMResponseKind.QUALITY_REVIEW:

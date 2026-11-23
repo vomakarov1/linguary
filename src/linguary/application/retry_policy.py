@@ -328,6 +328,24 @@ def _give_up_without_automatic_retry(error: Exception) -> bool:
     return not any(isinstance(error, error_type) for error_type, _task_type in _ERROR_TYPES)
 
 
+_RECOVERY_REASON_ERROR_TYPES: dict[str, ErrorType] = {
+    "conditions_unavailable": ErrorType.CONFIGURATION,
+    "unsafe_partition": ErrorType.CONFIGURATION,
+    "configuration_error": ErrorType.CONFIGURATION,
+    "provider_error": ErrorType.CONFIGURATION,
+    "validation_error": ErrorType.VALIDATION,
+    "unknown_outcome": ErrorType.TRANSIENT,
+    "interrupted": ErrorType.TRANSIENT,
+    "transient_error": ErrorType.TRANSIENT,
+    "superseded": ErrorType.TRANSIENT,
+    "limit": ErrorType.MODEL_OUTPUT,
+    "scope_limit": ErrorType.MODEL_OUTPUT,
+    "output_truncated": ErrorType.MODEL_OUTPUT,
+    "provider_refusal": ErrorType.MODEL_OUTPUT,
+    "context_capacity": ErrorType.MODEL_OUTPUT,
+}
+
+
 def classify_error(error: BaseException) -> TaskError:
     """Typed task error derived from use case exception (ALG-05).
 
@@ -335,9 +353,18 @@ def classify_error(error: BaseException) -> TaskError:
     is futile, preserving the user's ability to re-run the task.
     """
     from linguary.application.recovery import RecoveryError
-    if isinstance(error, RecoveryError) and error.original_error is not None:
-        original = classify_error(error.original_error)
-        return TaskError(type=original.type, message=str(error), detail=f'{type(error).__module__}.{type(error).__name__}')
+    if isinstance(error, RecoveryError):
+        if error.original_error is not None:
+            original = classify_error(error.original_error)
+            return TaskError(
+                type=original.type,
+                message=str(error),
+                detail=f"{type(error).__module__}.{type(error).__name__}",
+            )
+        return _task_error(
+            _RECOVERY_REASON_ERROR_TYPES.get(error.reason, ErrorType.TRANSIENT),
+            error,
+        )
     for error_type, task_error_type in _ERROR_TYPES:
         if isinstance(error, error_type):
             return _task_error(task_error_type, error)

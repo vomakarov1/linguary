@@ -862,3 +862,51 @@ def test_retry_policy_and_worded_for_the_model_emit_local_repair_for_response_fo
     assert "uuid-3" not in decision.repair_instruction
     for untouched in ("- b1:", "- b2:", "- b4:", "- b5:", "- b6:"):
         assert untouched not in decision.repair_instruction
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_type"),
+    [
+        ("conditions_unavailable", ErrorType.CONFIGURATION),
+        ("unsafe_partition", ErrorType.CONFIGURATION),
+        ("configuration_error", ErrorType.CONFIGURATION),
+        ("provider_error", ErrorType.CONFIGURATION),
+        ("validation_error", ErrorType.VALIDATION),
+        ("unknown_outcome", ErrorType.TRANSIENT),
+        ("interrupted", ErrorType.TRANSIENT),
+        ("transient_error", ErrorType.TRANSIENT),
+        ("superseded", ErrorType.TRANSIENT),
+        ("limit", ErrorType.MODEL_OUTPUT),
+        ("scope_limit", ErrorType.MODEL_OUTPUT),
+        ("output_truncated", ErrorType.MODEL_OUTPUT),
+        ("provider_refusal", ErrorType.MODEL_OUTPUT),
+        ("context_capacity", ErrorType.MODEL_OUTPUT),
+    ],
+)
+def test_classify_error_maps_recovery_error_reasons_deterministically(
+    reason: str, expected_type: ErrorType
+) -> None:
+    """RecoveryError without original_error maps all stop/pause reasons deterministically."""
+    from linguary.application.errors import ApplicationError
+    from linguary.application.recovery import RecoveryError
+
+    assert issubclass(RecoveryError, ApplicationError)
+    assert not issubclass(RecoveryError, LLMConfigurationError)
+
+    classified = classify_error(RecoveryError(reason, "root-1"))
+    assert classified.type is expected_type
+    assert reason in classified.message
+
+
+def test_classify_error_prefers_recovery_original_error_type() -> None:
+    from linguary.application.recovery import RecoveryError
+
+    wrapped_transient = RecoveryError(
+        "scope_limit", "root-1", original_error=LLMTransportError("HTTP 429")
+    )
+    assert classify_error(wrapped_transient).type is ErrorType.TRANSIENT
+
+    wrapped_validation = RecoveryError(
+        "limit", "root-1", original_error=ResultValidationError("bad language")
+    )
+    assert classify_error(wrapped_validation).type is ErrorType.VALIDATION

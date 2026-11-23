@@ -106,7 +106,11 @@ async def test_child_request_does_not_append_unbounded_root_in_v2(tmp_path):
     class SplittingClient(FakeLLMClient):
         async def generate(self, request):
             count = len(request.ordered_block_ids)
-            self.default = analysis_reply(7) if request.stage == LLMCallStage.CHAPTER_ANALYSIS else translation_reply(count, bad=count > 3)
+            self.default = (
+                analysis_reply(7)
+                if request.stage == LLMCallStage.CHAPTER_ANALYSIS
+                else (FakeReply(content='{') if count > 3 else translation_reply(count))
+            )
             return await super().generate(request)
 
     fake = SplittingClient()

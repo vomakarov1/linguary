@@ -2318,6 +2318,221 @@ def test_task_store_claim_retries_transient_sqlite_busy(tmp_path, monkeypatch: p
         engine.dispose()
 
 
+def test_recovery_split_isolates_middle_atom_with_leaf_budget_and_2way_fallback(tmp_path) -> None:
+    """Recovery.split uses 3-way isolation when leaves + 2 <= max_leaves, else 2-way boundary cut."""
+    from datetime import UTC, datetime
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.application.ports.persistence import BookRecord
+    from linguary.application.recovery import Recovery, RecoveryPolicy, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain import BookMetadata, BookStatus
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+
+    engine = create_database_engine(tmp_path / "split_isolation.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        cond_id = "00000000-0000-0000-0000-000000000001"
+        blocks = ("b1", "b2", "b3", "b4", "b5")
+
+        def plant_root(root_id: str, scope_id: str, *, max_leaves: int, extra_scopes: tuple[RecoveryScope, ...] = ()) -> None:
+            manifest = root_manifest(
+                book_id="book-1",
+                conditions_id=cond_id,
+                glossary_sha="g",
+                analysis_sha="a",
+                plan_sha=None,
+                ordered_blocks=blocks,
+                treatments=("TRANSLATE",) * len(blocks),
+                boundaries=(blocks,),
+                atomic_intervals=tuple((b,) for b in blocks),
+                max_source_chars=500,
+                policy=RecoveryPolicy(max_leaves=max_leaves),
+            )
+            with uow.transaction() as tx:
+                tx.work.add_root(
+                    RecoveryRoot(
+                        root_id, "book-1", cond_id, f"key-{root_id}", manifest,
+                        policy_version=CURRENT_TRANSLATION_POLICY,
+                    )
+                )
+                tx.work.add_scope(RecoveryScope(scope_id, root_id, blocks))
+                for extra in extra_scopes:
+                    tx.work.add_scope(extra)
+
+        with uow.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    "book-1", BookMetadata("Book", ("Author",)), "en", "ru",
+                    BookStatus.PROCESSING, "book.epub", datetime.now(UTC),
+                )
+            )
+            tx.work.add_conditions(
+                BookConditions(
+                    cond_id, "book-1", 1,
+                    {"schema_version": 1, "models": {"processing": "gpt-test"}},
+                    datetime.now(UTC),
+                )
+            )
+
+        recovery = Recovery(uow)
+
+        # 1. Middle failing atom with ample max_leaves (1 + 2 <= 8) -> 3 children [left], [bad], [right]
+        r_3way = "00000000-0000-0000-0000-000000000101"
+        s_3way = "00000000-0000-0000-0000-000000000201"
+        plant_root(r_3way, s_3way, max_leaves=8)
+        recovery.split(r_3way, s_3way, failing_block_ids=("b3",))
+        with uow.transaction() as tx:
+            children = [s.ordered_blocks for s in tx.work.list_scopes(r_3way) if s.status == "pending"]
+        assert children == [("b1", "b2"), ("b3",), ("b4", "b5")]
+
+        # 2. Middle failing atom when leaves + 2 > max_leaves (1 + 2 = 3 > 2) -> 2-way boundary cut (+1 leaf)
+        r_2way = "00000000-0000-0000-0000-000000000102"
+        s_2way = "00000000-0000-0000-0000-000000000202"
+        plant_root(r_2way, s_2way, max_leaves=2)
+        recovery.split(r_2way, s_2way, failing_block_ids=("b3",))
+        with uow.transaction() as tx:
+            children_2way = [s.ordered_blocks for s in tx.work.list_scopes(r_2way) if s.status == "pending"]
+        assert len(children_2way) == 2
+        assert tuple(b for g in children_2way for b in g) == blocks
+        assert ("b1", "b2", "b3") in children_2way or ("b3", "b4", "b5") in children_2way
+
+        # 3. Edge failing atom (first / last) -> 2 children
+        r_edge = "00000000-0000-0000-0000-000000000103"
+        s_edge = "00000000-0000-0000-0000-000000000203"
+        plant_root(r_edge, s_edge, max_leaves=8)
+        recovery.split(r_edge, s_edge, failing_block_ids=("b1",))
+        with uow.transaction() as tx:
+            children_edge = [s.ordered_blocks for s in tx.work.list_scopes(r_edge) if s.status == "pending"]
+        assert children_edge == [("b1",), ("b2", "b3", "b4", "b5")]
+
+        # 4. Non-contiguous failing atoms -> isolates first failing atom cleanly without empty children
+        r_noncontig = "00000000-0000-0000-0000-000000000104"
+        s_noncontig = "00000000-0000-0000-0000-000000000204"
+        plant_root(r_noncontig, s_noncontig, max_leaves=8)
+        recovery.split(r_noncontig, s_noncontig, failing_block_ids=("b2", "b4"))
+        with uow.transaction() as tx:
+            children_nc = [s.ordered_blocks for s in tx.work.list_scopes(r_noncontig) if s.status == "pending"]
+        assert children_nc == [("b1",), ("b2",), ("b3", "b4", "b5")]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_process_chapter_and_regenerate_block_forward_failing_block_ids_to_recovery_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ProcessChapter and RegenerateBlock pass RecoverySplit.failing_block_ids to Recovery.split."""
+    from contextlib import nullcontext
+    from dataclasses import dataclass, replace as dc_replace
+    from types import SimpleNamespace
+    from linguary.application.recovery import RecoverySplit
+    from linguary.application.use_cases.process_chapter import ProcessChapter, ProcessChapterResult
+    from linguary.application.use_cases.regenerate_block import RegenerateBlock, RegenerateBlockCommand
+    from linguary.domain import BlockTreatment, BlockType, ChapterAnalysis, DocumentBlock, DocumentSection, GlossarySnapshot, SourceReference, TreatmentPlan
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+
+    recorded_splits: list[tuple[str, str, tuple[str, ...]]] = []
+
+    class SpyRecovery:
+        def __init__(self, scopes_list):
+            self._scopes = list(scopes_list)
+
+        def plan_unresolved(self, root_id: str):
+            return tuple(self._scopes)
+
+        def split(self, root_id: str, scope_id: str, *, failing_block_ids: tuple[str, ...] = ()):
+            recorded_splits.append((root_id, scope_id, failing_block_ids))
+            self._scopes.clear()
+
+        def assert_complete(self, root_id: str):
+            pass
+
+    b1 = DocumentBlock("b1", "sec-1", BlockType.PARAGRAPH, 0, "Alpha.", SourceReference("ch1.xhtml", "/html/body/p[1]"))
+    b2 = DocumentBlock("b2", "sec-1", BlockType.PARAGRAPH, 1, "Beta.", SourceReference("ch1.xhtml", "/html/body/p[2]"))
+    section = DocumentSection("sec-1", "book-1", "Ch 1", 0, "ch1.xhtml", blocks=(b1, b2))
+    plan = TreatmentPlan.of_treatments("sec-1", (("b1", BlockTreatment.TRANSLATE), ("b2", BlockTreatment.TRANSLATE)))
+    analysis = ChapterAnalysis.create(
+        id="an-1",
+        section_id="sec-1",
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=("b1", "b2"),
+    )
+    root_id = "00000000-0000-0000-0000-000000000001"
+    cond_id = "00000000-0000-0000-0000-000000000002"
+    scope_id = "00000000-0000-0000-0000-000000000003"
+    root_rb_id = "00000000-0000-0000-0000-000000000004"
+    scope_rb_id = "00000000-0000-0000-0000-000000000005"
+    doc = SimpleNamespace(id="book-1", target_language="ru", sections=(section,))
+    root_obj = RecoveryRoot(
+        root_id, "book-1", cond_id, "rk-1",
+        {"schema_version": 1, "ordered_blocks": ["b1", "b2"], "atomic_intervals": [["b1"], ["b2"]], "policy": {"max_calls": 6, "max_scope_calls": 3, "max_depth": 3, "max_leaves": 8}},
+        policy_version="translation-reliability-v3",
+    )
+    scope_obj = RecoveryScope(scope_id, root_id, ("b1", "b2"))
+
+    pc = ProcessChapter.__new__(ProcessChapter)
+    pc._unit_of_work = SimpleNamespace(
+        transaction=lambda: nullcontext(
+            SimpleNamespace(work=SimpleNamespace(get_root=lambda rid: root_obj))
+        )
+    )
+    pc._recovery = SpyRecovery([scope_obj])
+    pc._max_concurrent_units = 1
+
+    async def fake_process_unit(*args, **kwargs):
+        raise RecoverySplit(root_id, scope_id, failing_block_ids=("b2",))
+
+    monkeypatch.setattr(pc, "_process_unit", fake_process_unit)
+    work_pc = SimpleNamespace(
+        document=doc, section=section, analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        target_language="ru", chapter_number=1, source_texts={"b1": "Alpha.", "b2": "Beta."},
+        book_candidates=(), task_id=None,
+    )
+    await pc._process_roots((root_id,), work=work_pc, note_ids=lambda: "ln-1", result=ProcessChapterResult(section_id="sec-1", run_id="run-1"))
+    assert recorded_splits == [(root_id, scope_id, ("b2",))]
+
+    recorded_splits.clear()
+    rb = RegenerateBlock.__new__(RegenerateBlock)
+    rb._unit_of_work = SimpleNamespace(
+        transaction=lambda: nullcontext(
+            SimpleNamespace(runs=SimpleNamespace(active_for_book=lambda _b: SimpleNamespace(id="run-1")))
+        )
+    )
+    @dataclass
+    class _StubContext:
+        request: object
+
+    rb._recovery = SpyRecovery([RecoveryScope(scope_rb_id, root_rb_id, ("b1",))])
+    rb._context_builder = SimpleNamespace(
+        for_block_regeneration=lambda **kw: _StubContext(
+            request=SimpleNamespace(with_logging=lambda **lkw: SimpleNamespace())
+        )
+    )
+
+    async def fake_request(*args, **kwargs):
+        raise RecoverySplit(root_rb_id, scope_rb_id, failing_block_ids=("b1",))
+
+    rb._call = SimpleNamespace(request=fake_request)
+    work_rb = SimpleNamespace(
+        document=doc, section=section, block=b1, analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        book_candidates=(), task_id=None, target_language="ru",
+        chapter_number=1, used_note_ids=(),
+    )
+    monkeypatch.setattr(rb, "_load", lambda cmd: work_rb)
+    monkeypatch.setattr(rb, "_prepare_root", lambda w, cmd: dc_replace(root_obj, id=root_rb_id))
+    with pytest.raises(RecoverySplit):
+        await rb(RegenerateBlockCommand(book_id="book-1", block_id="b1"))
+    assert recorded_splits == [(root_rb_id, scope_rb_id, ("b1",))]
+
+
 
 
 

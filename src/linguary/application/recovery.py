@@ -6,7 +6,7 @@ from itertools import pairwise
 import json
 from uuid import uuid4
 
-from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.errors import ApplicationError
 from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY, require_policy
 from linguary.domain.book_conditions import thaw
 from linguary.domain.document import BlockType
@@ -16,7 +16,7 @@ from linguary.domain.recovery import RecoveryRoot, RecoveryScope
 NOTES_POLICY = "grounded-notes-v1"
 
 
-class RecoveryError(LLMConfigurationError):
+class RecoveryError(ApplicationError):
     def __init__(self, reason, root_id=None, *, original_error=None):
         self.reason, self.root_id = reason, root_id
         self.original_error = original_error
@@ -24,8 +24,9 @@ class RecoveryError(LLMConfigurationError):
 
 
 class RecoverySplit(RecoveryError):
-    def __init__(self, root_id, scope_id):
+    def __init__(self, root_id, scope_id, failing_block_ids: tuple[str, ...] = ()):
         self.scope_id = scope_id
+        self.failing_block_ids = tuple(failing_block_ids)
         super().__init__('split', root_id)
 
 
@@ -341,7 +342,7 @@ class Recovery:
             order = {block: index for index, block in enumerate(root.manifest['ordered_blocks'])}
             return tuple(sorted((scope for scope in scopes if scope.status == 'pending'), key=lambda s: order[s.ordered_blocks[0]]))
 
-    def split(self, root_id, scope_id):
+    def split(self, root_id, scope_id, *, failing_block_ids: tuple[str, ...] = ()):
         with self.uow.transaction() as transaction:
             root = transaction.work.get_root(root_id)
             scope = transaction.work.get_scope(scope_id)
@@ -362,9 +363,13 @@ class Recovery:
                 transaction.work.stop_root(root_id, 'unsafe_partition', expected_generation=root.generation)
                 reason = 'unsafe_partition'
             else:
-                middle = len(atoms) // 2
-                children = tuple(tuple(block for atom in part for block in atom)
-                    for part in (atoms[:middle], atoms[middle:]))
+                parts = _split_atom_parts(
+                    atoms,
+                    failing_block_ids=failing_block_ids,
+                    leaves=leaves,
+                    max_leaves=policy['max_leaves'],
+                )
+                children = tuple(tuple(block for atom in part for block in atom) for part in parts)
                 transaction.work.split_scope(
                     scope_id, expected_generation=scope.generation, children=children,
                     expected_root_generation=root.generation)
@@ -376,4 +381,33 @@ class Recovery:
         with self.uow.transaction() as transaction:
             if not transaction.work.root_coverage_complete(root_id):
                 raise RecoveryError('unsafe_partition', root_id)
+
+
+def _split_atom_parts(
+    atoms: list[tuple[str, ...]],
+    *,
+    failing_block_ids: tuple[str, ...],
+    leaves: int,
+    max_leaves: int,
+) -> tuple[list[tuple[str, ...]], ...]:
+    """Isolate a failing atom/interval when it is a strict subset; else split evenly in half."""
+    failing_set = set(failing_block_ids)
+    bad_indices = [idx for idx, atom in enumerate(atoms) if failing_set.intersection(atom)]
+    if not bad_indices or len(bad_indices) == len(atoms):
+        middle = len(atoms) // 2
+        return (atoms[:middle], atoms[middle:])
+    bad_set = set(bad_indices)
+    start = bad_indices[0]
+    end = start
+    while end + 1 in bad_set:
+        end += 1
+    if start == 0:
+        return (atoms[:end + 1], atoms[end + 1:])
+    if end == len(atoms) - 1:
+        return (atoms[:start], atoms[start:])
+    if leaves + 2 <= max_leaves:
+        return (atoms[:start], atoms[start:end + 1], atoms[end + 1:])
+    if start <= len(atoms) - 1 - end:
+        return (atoms[:end + 1], atoms[end + 1:])
+    return (atoms[:start], atoms[start:])
 

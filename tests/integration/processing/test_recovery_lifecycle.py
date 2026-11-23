@@ -15,7 +15,14 @@ from test_recovery_commit import analysis_reply, translation_reply, prepare
 
 
 async def test_restart_and_manual_retry_keep_scope_limit(tmp_path):
-    fake = FakeLLMClient([analysis_reply(2), FakeReply(content='{'), FakeReply(content='{'), FakeReply(content='{')])
+    from linguary.application.ports.llm import LLMTransportError
+
+    fake = FakeLLMClient([
+        analysis_reply(2),
+        LLMTransportError('HTTP 503'),
+        LLMTransportError('HTTP 503'),
+        LLMTransportError('HTTP 503'),
+    ])
     app = make_app(tmp_path, fake)
     _doc, run, task = await prepare(app)
     completed = await drain_tasks(app)
@@ -43,8 +50,14 @@ async def test_restart_and_manual_retry_keep_scope_limit(tmp_path):
 @pytest.mark.parametrize('policy_changed', [False, True])
 async def test_restart_keeps_root_manifest_and_rejects_incompatible_notes_policy(tmp_path, monkeypatch, policy_changed):
     from linguary.application import recovery
+    from linguary.application.ports.llm import LLMTransportError
 
-    fake = FakeLLMClient([analysis_reply(2), FakeReply(content='{'), FakeReply(content='{'), FakeReply(content='{')])
+    fake = FakeLLMClient([
+        analysis_reply(2),
+        LLMTransportError('HTTP 503'),
+        LLMTransportError('HTTP 503'),
+        LLMTransportError('HTTP 503'),
+    ])
     app = make_app(tmp_path, fake)
     _doc, run, task = await prepare(app)
     assert (await drain_tasks(app))[0].status == TaskStatus.FAILED
@@ -187,8 +200,10 @@ async def test_global_root_limit_stops_finite_tree(tmp_path):
         async def generate(self, request):
             if request.stage == LLMCallStage.CHAPTER_ANALYSIS:
                 self.default = analysis_reply(8)
+            elif len(request.ordered_block_ids) > 1:
+                self.default = FakeReply(content='{')
             else:
-                self.default = translation_reply(len(request.ordered_block_ids), bad=len(request.ordered_block_ids) > 1)
+                self.default = translation_reply(1, bad=False)
             return await super().generate(request)
     fake = Dynamic()
     app = make_app(tmp_path, fake)
