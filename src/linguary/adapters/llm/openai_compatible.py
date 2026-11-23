@@ -100,7 +100,11 @@ class OpenAICompatibleLLMClient(LLMClient):
     """Model invocation via OpenAI-compatible HTTP API."""
 
     def __init__(
-        self, *, settings: LLMSettings, http_client: httpx.AsyncClient | None = None
+        self,
+        *,
+        settings: LLMSettings,
+        http_client: httpx.AsyncClient | None = None,
+        allow_explicit_prompt_cache: bool = True,
     ) -> None:
         """Creates the client; unconfigured LLM settings prevent creation altogether.
 
@@ -110,6 +114,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         """
         settings.ensure_ready()
         self._settings = settings
+        self._allow_explicit_prompt_cache = bool(allow_explicit_prompt_cache)
         urls = ()
         if settings.proxy_mode == 'custom':
             urls = (settings.proxy_url,)
@@ -131,7 +136,13 @@ class OpenAICompatibleLLMClient(LLMClient):
     ) -> LLMResponse[PayloadT]:
         """Executes request and returns parsed structured response."""
         try:
-            document = await self._post(_body(request, settings=self._settings))
+            document = await self._post(
+                _body(
+                    request,
+                    settings=self._settings,
+                    explicit_cache=self._uses_explicit_prompt_cache(self._settings),
+                )
+            )
         except LLMContextCapacityError as error:
             error.provider = self._settings.provider
             error.model = self._safe(self._settings.model)
@@ -238,13 +249,28 @@ class OpenAICompatibleLLMClient(LLMClient):
     def _safe(self, text: str) -> str:
         return safe_detail(text, api_key=self._settings.api_key, secrets=self._proxy_secrets)
 
-    @staticmethod
-    def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
-        return _build_messages(request)
+    def _uses_explicit_prompt_cache(self, settings: LLMSettings) -> bool:
+        model = settings.model.strip().lower()
+        return (
+            self._allow_explicit_prompt_cache
+            and _is_openrouter_url(settings.base_url)
+            and ("anthropic/" in model or model.startswith("claude"))
+        )
 
     @staticmethod
-    def _build_request_body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
-        return _body(request, settings=settings)
+    def _build_messages(
+        request: LLMRequest[Any], *, explicit_cache: bool = False
+    ) -> list[dict[str, Any]]:
+        return _build_messages(request, explicit_cache=explicit_cache)
+
+    @staticmethod
+    def _build_request_body(
+        request: LLMRequest[Any],
+        *,
+        settings: LLMSettings,
+        explicit_cache: bool = False,
+    ) -> dict[str, Any]:
+        return _body(request, settings=settings, explicit_cache=explicit_cache)
 
     @staticmethod
     def _raise_for_status(
@@ -346,11 +372,36 @@ def _headers(settings: LLMSettings) -> dict[str, str]:
     }
 
 
-def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
+def _cached_text_content(text: str) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+def _build_messages(
+    request: LLMRequest[Any], *, explicit_cache: bool = False
+) -> list[dict[str, Any]]:
     """Builds the message list for the completions endpoint including repair turns."""
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": request.instructions},
-        {"role": "user", "content": request.input_text},
+    cache_first_user = explicit_cache and bool(
+        request.repair_turns
+        or request.repair_instructions
+        or len(request.input_text) >= 1024
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "system",
+            "content": (
+                _cached_text_content(request.instructions)
+                if explicit_cache
+                else request.instructions
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                _cached_text_content(request.input_text)
+                if cache_first_user
+                else request.input_text
+            ),
+        },
     ]
     if request.repair_turns:
         for assistant_content, user_content in request.repair_turns:
@@ -372,11 +423,16 @@ def _is_openrouter_url(base_url: str) -> bool:
     return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
 
-def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
+def _body(
+    request: LLMRequest[Any],
+    *,
+    settings: LLMSettings,
+    explicit_cache: bool = False,
+) -> dict[str, Any]:
     """Request payload: message list and required structured output schema."""
     body: dict[str, Any] = {
         "model": settings.model,
-        "messages": _build_messages(request),
+        "messages": _build_messages(request, explicit_cache=explicit_cache),
         "response_format": {
             "type": "json_schema",
             "json_schema": {

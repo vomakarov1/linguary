@@ -1755,5 +1755,102 @@ async def test_embedded_gateway_errors_on_gzip_compressed_200_responses() -> Non
         await client.aclose()
 
 
+@pytest.mark.parametrize("model", ["anthropic/claude-haiku-5.5", "claude-sonnet-4.6"])
+async def test_openrouter_claude_enables_explicit_prompt_cache_on_system_and_long_or_repair_user(
+    model: str,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(as_content(translation_payload())))
+
+    client = client_over(
+        handler,
+        base_url="https://openrouter.ai/api/v1",
+        model=model,
+    )
+    try:
+        short_req = LLMRequest.for_translation(instructions="Translate.", input_text="b1: short text")
+        await client.generate(short_req)
+
+        long_input = "x" * 1024
+        long_req = LLMRequest.for_translation(instructions="Translate.", input_text=long_input)
+        await client.generate(long_req)
+
+        repair_req = replace(
+            short_req,
+            repair_turns=(('{"broken": true}', "Fix formatting"),),
+        )
+        await client.generate(repair_req)
+    finally:
+        await client.aclose()
+
+    assert captured[0]["messages"] == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Translate.", "cache_control": {"type": "ephemeral"}}],
+        },
+        {"role": "user", "content": "b1: short text"},
+    ]
+    assert captured[1]["messages"] == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Translate.", "cache_control": {"type": "ephemeral"}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": long_input, "cache_control": {"type": "ephemeral"}}],
+        },
+    ]
+    assert captured[2]["messages"] == [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Translate.", "cache_control": {"type": "ephemeral"}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "b1: short text", "cache_control": {"type": "ephemeral"}}],
+        },
+        {"role": "assistant", "content": '{"broken": true}'},
+        {"role": "user", "content": "Fix formatting"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "model", "allow_cache"),
+    [
+        ("https://openrouter.ai/api/v1", "deepseek/deepseek-v4.1-flash-1017", True),
+        ("https://api.openai.com/v1", "anthropic/claude-haiku-5.5", True),
+        ("https://api.anthropic.com/v1", "claude-sonnet-4.6", True),
+        ("https://openrouter.ai/api/v1", "anthropic/claude-haiku-5.5", False),
+    ],
+)
+async def test_explicit_prompt_cache_omitted_for_non_claude_non_openrouter_or_disabled(
+    base_url: str, model: str, allow_cache: bool
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(as_content(translation_payload())))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatibleLLMClient(
+            settings=settings(base_url=base_url, model=model),
+            http_client=http,
+            allow_explicit_prompt_cache=allow_cache,
+        )
+        req = replace(
+            LLMRequest.for_translation(instructions="Translate.", input_text="x" * 1024),
+            repair_instructions=("Fix it",),
+        )
+        await client.generate(req)
+
+    assert len(captured) == 1
+    assert all(isinstance(msg["content"], str) for msg in captured[0]["messages"])
+
+
+
 
 

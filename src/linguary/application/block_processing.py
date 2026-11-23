@@ -39,6 +39,7 @@ from linguary.application.retry_policy import (
 )
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
+from linguary.application.token_budget import recommended_unit_max_completion_tokens
 from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
@@ -263,6 +264,20 @@ class TranslationCall:
                         raise RecoveryError(stopped_reason or 'limit', recovery[0])
                     request = replace(request, call_context=physical_context,
                                       scope_id=physical_context.scope_id)
+                if (
+                    loaded_conditions is not None
+                    and unit is not None
+                    and request.max_completion_tokens is None
+                ):
+                    raw_params = loaded_conditions.payload.get("llm_parameters")
+                    llm_params = raw_params if isinstance(raw_params, Mapping) else {}
+                    limit = recommended_unit_max_completion_tokens(
+                        sum(len(item.block.text) for item in unit.items),
+                        max_output_tokens=llm_params.get("max_output_tokens"),
+                        reasoning_effort=llm_params.get("reasoning_effort"),
+                        reasoning_max_tokens=llm_params.get("reasoning_max_tokens"),
+                    )
+                    request = replace(request, max_completion_tokens=limit)
                 response = await self._llm_client.generate(request)
                 if physical_context is not None:
                     with self._unit_of_work.transaction() as transaction:

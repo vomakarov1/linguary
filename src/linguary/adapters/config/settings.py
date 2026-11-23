@@ -20,21 +20,12 @@ from urllib.parse import quote, unquote, urlsplit
 from linguary.application.analysis_merge import fragment_blocks_for
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.token_budget import REASONING_EFFORT_RESERVE_PCT
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.domain.name_translation import NameTranslationStrategy
 
 #: Supported reasoning effort levels for reasoning-capable LLM endpoints.
 SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
-
-#: Share of `max_output_tokens` reserved for reasoning tokens when only `reasoning_effort`
-#: is configured (integer percent, used to size analysis fragments safely).
-_REASONING_EFFORT_RESERVE_PCT: dict[str, int] = {
-    "none": 0,
-    "minimal": 15,
-    "low": 35,
-    "medium": 55,
-    "high": 75,
-}
 
 #: Provider of the initial implementation: HTTP API compatible with OpenAI chat completions
 #: and structured outputs (ADR § 3). The same adapter serves compatible gateways and local
@@ -239,7 +230,7 @@ class LLMSettings:
         if self.reasoning_max_tokens is not None:
             return max(1, total_output_tokens - self.reasoning_max_tokens)
         if self.reasoning_effort is not None:
-            reserve_pct = _REASONING_EFFORT_RESERVE_PCT[self.reasoning_effort]
+            reserve_pct = REASONING_EFFORT_RESERVE_PCT[self.reasoning_effort]
             return max(1, (total_output_tokens * (100 - reserve_pct)) // 100)
         return total_output_tokens
 

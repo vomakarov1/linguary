@@ -1038,3 +1038,49 @@ async def test_absent_fixed_concept_is_not_invented(tmp_path):
     workspace = prepare_workspace(tmp_path / 'comparison', [tmp_path / 'production'], value)
     result = await run_comparison(value, workspace, Factory())
     assert all(branch.completed for branch in result.variants)
+
+
+async def test_observed_claude_openrouter_preserves_output_cap_and_plain_messages():
+    from decimal import Decimal
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.application.ports.llm import LLMRequest, LLMResponseFormatError
+    from linguary.comparison.llm import BudgetGuard, ObservationLedger, ObservedLLMClient
+    from linguary.comparison.protocol import CostBounds, RouteMetadata
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            'model': 'anthropic/claude-haiku-5.5',
+            'provider': 'mock-route',
+            'id': 'gen-1',
+            'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 10, 'prompt_tokens_details': {'cached_tokens': 0}},
+            'choices': [{'message': {'content': '{'}}],
+        })
+
+    bounds = CostBounds(max_request_bytes=100000, max_input_tokens=100000, input_price_per_mtok=1, output_price_per_mtok=1,
+                        output_includes_reasoning=True, input_bound_method='synthetic', evidence='MockTransport only')
+    metadata = RouteMetadata(provider_names=('mock-route',), model_versions=('anthropic/claude-haiku-5.5',))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(
+            settings=LLMSettings(base_url='https://openrouter.ai/api/v1', model='anthropic/claude-haiku-5.5', max_output_tokens=8000, api_key='synthetic'),
+            route='mock-route',
+            http_client=http,
+            ledger=ObservationLedger(),
+            budget=BudgetGuard(Decimal('1')),
+            max_call_cost=Decimal('.5'),
+            cost_bounds=bounds,
+            route_metadata=metadata,
+        )
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(replace(
+                LLMRequest.for_translation(instructions='translate', input_text='x' * 1500),
+                max_completion_tokens=2048,
+            ))
+
+    assert len(seen) == 1
+    assert seen[0]['max_completion_tokens'] == 8000
+    assert all(isinstance(msg['content'], str) for msg in seen[0]['messages'])
+

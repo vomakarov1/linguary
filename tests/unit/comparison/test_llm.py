@@ -619,3 +619,52 @@ async def test_unknown_context_cache_stops_followup_and_preserves_paid_receipt(t
     assert item.context_cache is None and item.cost == guard.spent == Decimal('.2')
     stored = json.loads(next(tmp_path.glob('*.json')).read_text())
     assert stored['cost'] == '0.2' and stored['context_cache'] is None and stored['generation_id'] == 'paid-generation'
+
+
+async def test_observed_client_resets_max_completion_tokens_and_disables_explicit_prompt_cache():
+    from dataclasses import replace
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+
+    seen_bodies = []
+
+    def handler(request):
+        seen_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            'model': 'model', 'provider': 'route', 'id': 'gen', 'full_response_cache': False,
+            'usage': {'cost': .2, 'prompt_tokens': 100, 'completion_tokens': 10,
+                      'prompt_tokens_details': {'cached_tokens': 0}},
+            'choices': [{'message': {'content': '{'}}],
+        })
+
+    ledger = ObservationLedger()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(
+            cost_bounds=BOUNDS,
+            route_metadata=METADATA,
+            settings=LLMSettings(
+                base_url='https://openrouter.ai/api/v1',
+                model='anthropic/claude-haiku-5.5',
+                max_output_tokens=8000,
+                api_key='synthetic',
+            ),
+            route='route',
+            http_client=http,
+            ledger=ledger,
+            budget=BudgetGuard(Decimal('1')),
+            max_call_cost=Decimal('.5'),
+        )
+        req = replace(
+            LLMRequest.for_translation(instructions='translate', input_text='x' * 2048),
+            max_completion_tokens=2048,
+            repair_instructions=('Fix formatting',),
+        )
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(req)
+
+    assert len(seen_bodies) == 1
+    assert seen_bodies[0]['max_completion_tokens'] == 8000
+    assert all(isinstance(msg['content'], str) for msg in seen_bodies[0]['messages'])
+

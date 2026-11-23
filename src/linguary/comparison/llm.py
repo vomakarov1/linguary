@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -463,7 +463,11 @@ class ObservedLLMClient:
         self._http = http_client
         receipt_http = ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing, temperature_policy=temperature_policy, cost_bounds=cost_bounds, route_metadata=route_metadata)
         receipt_http.max_output_tokens = settings.max_output_tokens
-        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=cast(Any, receipt_http))
+        self.inner = OpenAICompatibleLLMClient(
+            settings=settings,
+            http_client=cast(Any, receipt_http),
+            allow_explicit_prompt_cache=False,
+        )
 
     async def generate(self, request):
         self.ledger.ensure_open()
@@ -483,6 +487,7 @@ class ObservedLLMClient:
         token = _current.set(item)
         started = time.monotonic()
         try:
+            request = replace(request, max_completion_tokens=None)
             result = await self.inner.generate(request)
             self.ledger.finish(item, result)
             return result
