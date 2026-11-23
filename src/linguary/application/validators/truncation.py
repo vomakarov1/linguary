@@ -16,10 +16,10 @@ A block with several segments is checked per `TRANSLATE` slice, not as one strin
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator, Mapping
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
+from linguary.application.validators.quotes import has_unclosed_british_quote
 from linguary.application.validators.treatment import planned_segment_modes
 from linguary.domain import (
     BlockTreatment,
@@ -39,9 +39,6 @@ _BRACKETS: tuple[tuple[str, str], ...] = (("(", ")"), ("[", "]"), ("{", "}"))
 
 #: Symmetric quotation mark: pairing is determined by the parity of occurrence count.
 _SYMMETRIC_QUOTE = '"'
-
-#: Intraword typographic apostrophe (`don’t`, `Bennet’s`), distinct from a closing single quote `’`.
-_INTRAWORD_APOSTROPHE = re.compile(r"(?<=[^\W_])’(?=[^\W_])")
 
 
 def truncation_violation(
@@ -137,10 +134,7 @@ def _unbalanced(text: str, *, source: str) -> str | None:
 
 def _has_british_unclosed_opening_quote(source: str) -> bool:
     """Whether `source` opens British single-quoted dialogue left unclosed at paragraph end."""
-    if not source.lstrip().startswith("‘"):
-        return False
-    closing_quotes = source.count("’") - len(_INTRAWORD_APOSTROPHE.findall(source))
-    return source.count("‘") > closing_quotes
+    return has_unclosed_british_quote(source)
 
 
 def _balances(text: str) -> Mapping[str, int]:

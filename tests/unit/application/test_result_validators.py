@@ -2951,5 +2951,93 @@ def test_resolve_response_evidence_binds_collocation_with_source_texts() -> None
 
 
 
+def test_truncation_allows_british_dialect_apostrophes_and_unclosed_quotes() -> None:
+    """British dialect elisions (`killin’ ’em`, `An’ ’em`, `-in’`, `o’`, etc.) preserve open-quote parity."""
+    from linguary.application.validators.truncation import _unbalanced, truncation_diagnostic
+
+    unclosed_dialect = "‘An’ he was killin’ ’em, an’ I couldn’ stop ’im."
+    open_translation = "«Ну вот, он их убивал, а я не мог его остановить."
+    assert _unbalanced(open_translation, source=unclosed_dialect) is None
+
+    block_open = make_block(order=0, text=unclosed_dialect)
+    unit_open = make_unit((block_open,))
+    payload_open = make_response(
+        (make_block_result(block_open, translated_text=open_translation),)
+    )
+    assert validate(payload_open, unit=unit_open)[0].translated_text == open_translation
+    assert truncation_diagnostic(payload_open, unit=unit_open, truncated=False) is None
+
+    many_dialect = (
+        "‘An’ ’em, o’ course, don’ know las’ night ol’ Hagrid jus’ mus’ be tellin’ ’em "
+        "by the boys’ gate."
+    )
+    assert _unbalanced("«Да и они, конечно, не знают…", source=many_dialect) is None
+
+    closed_dialect = "‘An’ he was killin’ ’em.’"
+    assert _unbalanced("«Ну вот, он их убивал.", source=closed_dialect) == "кавычки"
+    block_closed = make_block(order=0, text=closed_dialect)
+    unit_closed = make_unit((block_closed,))
+    broken_closed = make_response(
+        (make_block_result(block_closed, translated_text="«Ну вот, он их убивал."),)
+    )
+    err = rejection(broken_closed, unit=unit_closed)
+    assert err.violation is not None
+    assert err.violation.rule_code == "quote_balance"
+
+
+def test_validation_policy_v3_enforces_strict_dialogue_checks_preserving_v2() -> None:
+    """validation_policy='v3' passes normalized_payload and strict_v3=True to dialogue_violation without breaking v2."""
+    # 1. Segmented [T, G, T] inside same unclosed quote after author attribution
+    parts_tgt = ("‘First,’ he said, ‘second part.", " Easy middle.", " Third part.’")
+    unit_tgt, block_tgt = _segmented(
+        parts_tgt,
+        (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+    )
+    bad_tgt = _segmented_response(
+        block_tgt,
+        ((1, "— Первая, — сказал он, вторая часть."), (3, "— Третья часть.")),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="Easy", translation="лёгкая"),),
+    )
+    assert validate(bad_tgt, unit=unit_tgt, validation_policy="v2")
+    err_tgt = rejection(bad_tgt, unit=unit_tgt, validation_policy="v3")
+    assert err_tgt.violation is not None
+    assert err_tgt.violation.rule_code == "dialogue_punctuation"
+
+    good_tgt = _segmented_response(
+        block_tgt,
+        ((1, "— Первая, — сказал он, вторая часть."), (3, "Третья часть.")),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="Easy", translation="лёгкая"),),
+    )
+    assert validate(good_tgt, unit=unit_tgt, validation_policy="v3")
+
+    # 2. Non-leading inline dash when source has direct speech quotes
+    inline_block = make_block(order=0, text='Harry walked in. "Hello! How are you?"')
+    inline_unit = make_unit((inline_block,))
+    inline_bad = make_response(
+        (make_block_result(inline_block, translated_text="Гарри вошёл. — Привет! Как дела?"),)
+    )
+    assert validate(inline_bad, unit=inline_unit, validation_policy="v2")
+    err_inline = rejection(inline_bad, unit=inline_unit, validation_policy="v3")
+    assert err_inline.violation is not None
+    assert err_inline.violation.rule_code == "dialogue_punctuation"
+
+    # 3. Unclosed British dialect monologue passes under v3
+    dialect_block = make_block(
+        order=0, text="‘An’ he was killin’ ’em, an’ I couldn’ stop ’im."
+    )
+    dialect_unit = make_unit((dialect_block,))
+    dialect_payload = make_response(
+        (
+            make_block_result(
+                dialect_block,
+                translated_text="«Ну вот, он их убивал, а я не мог его остановить.",
+            ),
+        )
+    )
+    assert validate(dialect_payload, unit=dialect_unit, validation_policy="v3")
+
+
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from processing_fakes import (
     make_block,
@@ -12,7 +14,16 @@ from processing_fakes import (
 
 from linguary.application.llm_dto import BlockResultResponse, SegmentTranslationResponse
 from linguary.application.validators.dialogue import dialogue_violation
-from linguary.domain import BlockTreatment, BlockType
+from linguary.domain import (
+    BlockSegment,
+    BlockTreatment,
+    BlockType,
+    DocumentBlock,
+    TranslationUnit,
+    TreatmentPlan,
+    TreatmentPlanItem,
+)
+from linguary.domain.treatment import strongest_treatment
 
 
 def _check(
@@ -22,6 +33,7 @@ def _check(
     target_language: str = "ru",
     block_type: BlockType = BlockType.PARAGRAPH,
     pass_unit: bool = True,
+    strict_v3: bool = False,
 ) -> str | None:
     block = make_block(order=0, text=source_text, type=block_type)
     unit = make_unit((block,))
@@ -32,6 +44,7 @@ def _check(
         payload,
         target_language=target_language,
         unit=unit if pass_unit else None,
+        strict_v3=strict_v3,
     )
 
 
@@ -230,3 +243,267 @@ def test_dialogue_validator_checks_segmented_translations() -> None:
         )
     )
     assert dialogue_violation(payload, target_language="ru", unit=unit) is not None
+
+
+def _segmented_unit(
+    parts: tuple[str, ...],
+    treatments: tuple[BlockTreatment, ...],
+) -> tuple[TranslationUnit, DocumentBlock]:
+    text = "".join(parts)
+    offset = 0
+    spans: list[BlockSegment] = []
+    for index, part in enumerate(parts):
+        spans.append(BlockSegment(offset, offset + len(part), index))
+        offset += len(part)
+    block = replace(make_block(order=0, text=text), segments=tuple(spans))
+    plan = TreatmentPlan(
+        section_id=block.section_id,
+        items=(
+            TreatmentPlanItem(
+                block_id=block.id,
+                treatment=strongest_treatment(treatments),
+                segment_treatments=treatments,
+                sentence_indexes=tuple(range(len(treatments))),
+            ),
+        ),
+    )
+    return TranslationUnit.of_blocks(id="u-seg", blocks=(block,), plan=plan), block
+
+
+def test_quotes_helpers_handle_dialect_apostrophes_outer_open_and_direct_speech() -> None:
+    """Shared British quote helpers parse adjacent/final dialect apostrophes, outer open quote, and direct speech."""
+    from linguary.application.validators.quotes import (
+        _outer_unclosed_open,
+        has_direct_speech_quotes,
+        has_unclosed_british_quote,
+    )
+
+    unclosed_dialect = "‘An’ he was killin’ ’em, an’ I couldn’ stop ’im."
+    assert has_unclosed_british_quote(unclosed_dialect) is True
+    assert has_unclosed_british_quote("‘An’ he was killin’ ’em.’") is False
+    assert (
+        has_unclosed_british_quote(
+            "‘An’ ’em, o’ course, don’ know las’ night ol’ Hagrid jus’ mus’ be tellin’ ’em."
+        )
+        is True
+    )
+    assert has_unclosed_british_quote("‘Look at the boys’ coats in the hall.") is True
+    assert has_unclosed_british_quote("‘Go there’, he said.") is False
+
+    monologue = "‘An’ he was killin’ ’em. Tell Harry.’"
+    assert _outer_unclosed_open(monologue, 0) is None
+    mid = len("‘An’ he was killin’ ’em.")
+    assert _outer_unclosed_open(monologue, mid) is not None
+    assert _outer_unclosed_open(monologue, mid) == _outer_unclosed_open(monologue, mid + 1)
+    assert _outer_unclosed_open(monologue, len(monologue)) is None
+
+    # Split inside `killin’ ’em` must still see ` ’em` ahead and not close at `killin’`.
+    before_em = len("‘An’ he was killin’")
+    assert _outer_unclosed_open(monologue, before_em) == _outer_unclosed_open(monologue, mid)
+
+    # Nested quote preserves the outer opening mark/offset.
+    nested = '‘He told me, “Wait here. Don’t go.” And left.’'
+    inside_inner = len('‘He told me, “Wait here.')
+    after_inner = len('‘He told me, “Wait here. Don’t go.”')
+    assert _outer_unclosed_open(nested, inside_inner) == _outer_unclosed_open(nested, after_inner)
+
+    # Different speeches produce distinct open markers.
+    two_speeches = "‘First part one. First part two.’ ‘Second part one. Second part two.’"
+    end_first = len("‘First part one.")
+    start_second = len("‘First part one. First part two.’ ‘Second part one.")
+    open_first = _outer_unclosed_open(two_speeches, end_first)
+    open_second = _outer_unclosed_open(two_speeches, start_second)
+    assert open_first is not None and open_second is not None and open_first != open_second
+
+    # Direct speech detection: quotes vs bare apostrophes.
+    assert has_direct_speech_quotes("‘Hello.’") is True
+    assert has_direct_speech_quotes("“Hello.”") is True
+    assert has_direct_speech_quotes('"Hello."') is True
+    assert has_direct_speech_quotes("'Hello,' he said.") is True
+    assert has_direct_speech_quotes("Harry's owl flew away.") is False
+    assert has_direct_speech_quotes("Harry’s owl flew away.") is False
+    assert has_direct_speech_quotes("The boys’ coats were wet.") is False
+    assert has_direct_speech_quotes("Tell ’em it's fine.") is False
+    assert has_direct_speech_quotes("'Tis Harry's owl.") is False
+
+
+def test_dialogue_validator_handles_british_dialect_apostrophes_and_unclosed_monologues() -> None:
+    """British dialect apostrophes (`killin’ ’em`, `An’ ’em`) work in unclosed and closed quotes."""
+    unclosed = "‘An’ he was killin’ ’em, an’ I couldn’ stop ’im."
+    assert _check("«Ну вот, он их убивал, а я не мог его остановить.", source_text=unclosed) is None
+    assert _check("— Ну вот, он их убивал. — Я не мог его остановить.", source_text=unclosed) is not None
+
+    closed = "‘An’ he was killin’ ’em. Tell Harry.’"
+    assert _check("«Ну вот, он их убивал. Скажи Гарри.", source_text=closed) is not None
+    assert _check("— Ну вот, он их убивал. — Скажи Гарри.", source_text=closed) is not None
+
+
+def test_dialogue_validator_strict_v3_rejects_leading_dash_in_segmented_monologue() -> None:
+    """Under strict_v3=True, consecutive translated segments inside one unclosed quote cannot repeat leading dash."""
+    # [T, T] with preceding READ_AS_IS narration (`[R, T, T]`): Rule (d) does not cover it, strict_v3 does.
+    parts_rtt = ("He smiled. ", "‘I’m tellin’ yeh, Harry.", " An’ a thumpin’ good’un.’")
+    unit_rtt, block_rtt = _segmented_unit(
+        parts_rtt, (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE)
+    )
+    bad_rtt = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_rtt.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=2, translated_text="— Говорю тебе, Гарри."),
+                    SegmentTranslationResponse(index=3, translated_text="— И чертовски хороший."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(bad_rtt, target_language="ru", unit=unit_rtt, strict_v3=False) is None
+    assert dialogue_violation(bad_rtt, target_language="ru", unit=unit_rtt, strict_v3=True) is not None
+
+    # En-dash `–` in non-first segment is also rejected, even when segments are unsorted.
+    bad_en_dash = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_rtt.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=3, translated_text=" – И чертовски хороший."),
+                    SegmentTranslationResponse(index=2, translated_text="— Говорю тебе, Гарри."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(bad_en_dash, target_language="ru", unit=unit_rtt, strict_v3=True) is not None
+
+    # Plain continuation without leading dash passes.
+    good_rtt = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_rtt.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=2, translated_text="— Говорю тебе, Гарри."),
+                    SegmentTranslationResponse(index=3, translated_text="И чертовски хороший."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(good_rtt, target_language="ru", unit=unit_rtt, strict_v3=True) is None
+
+    # [T, G, T] across a GLOSSARY_ONLY middle segment in the same unclosed quote.
+    parts_tgt = ("‘First,’ he said, ‘second part.", " Easy middle.", " Third part.’")
+    unit_tgt, block_tgt = _segmented_unit(
+        parts_tgt, (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE)
+    )
+    bad_tgt = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_tgt.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=1, translated_text="— Первая, — сказал он, вторая часть."),
+                    SegmentTranslationResponse(index=3, translated_text="— Третья часть."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(bad_tgt, target_language="ru", unit=unit_tgt, strict_v3=False) is None
+    assert dialogue_violation(bad_tgt, target_language="ru", unit=unit_tgt, strict_v3=True) is not None
+
+    # [T, G, T] across two DIFFERENT quotes is allowed to start the second speech with `— `.
+    parts_diff = ("‘First part one.", " First part two.’ ‘Second part one.", " Second part two.’")
+    unit_diff, block_diff = _segmented_unit(
+        parts_diff, (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE)
+    )
+    ok_diff = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_diff.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=1, translated_text="— Первая часть."),
+                    SegmentTranslationResponse(index=3, translated_text="— Вторая часть."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(ok_diff, target_language="ru", unit=unit_diff, strict_v3=True) is None
+
+    # Blocks containing `\n` in source_text are not falsely rejected by the segmented check.
+    parts_nl = ("He smiled.\n‘First line.\n", "Second line.’")
+    unit_nl, block_nl = _segmented_unit(
+        parts_nl, (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE)
+    )
+    ok_nl = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block_nl.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(index=1, translated_text="Он улыбнулся.\n— Первая строка."),
+                    SegmentTranslationResponse(index=2, translated_text="— Вторая строка."),
+                ),
+            ),
+        )
+    )
+    assert dialogue_violation(ok_nl, target_language="ru", unit=unit_nl, strict_v3=True) is None
+
+
+@pytest.mark.parametrize(
+    ("source_text", "translated_text"),
+    [
+        pytest.param('Harry walked in. "Hello!"', "Гарри вошёл. — Привет!", id="period-double-quote"),
+        pytest.param("Harry walked in. ‘Hello!’", "Гарри вошёл. – Привет!", id="en-dash-british"),
+        pytest.param("He blinked… “Wait!”", "Он моргнул… — Подожди!", id="ellipsis-curly-quote"),
+        pytest.param("What? 'Stop!'", "Что? — Стой!", id="question-matched-single"),
+        pytest.param('It was me. "Hello!"', "Это была я. — Привет!", id="lowercase-single-letter-before-dot"),
+        pytest.param('Mr. D. smiled. "Hello!"', "Мистер Д. — Гарри знал его. — Привет!", id="second-match-after-abbrev"),
+    ],
+)
+def test_dialogue_validator_strict_v3_catches_non_leading_inline_dash_with_source_quotes(
+    source_text: str, translated_text: str
+) -> None:
+    """Under strict_v3=True, non-leading inline dialogue dash fires when source has direct speech quotes."""
+    assert _check(translated_text, source_text=source_text, strict_v3=False) is None
+    assert _check(translated_text, source_text=source_text, strict_v3=True) is not None
+
+
+@pytest.mark.parametrize(
+    ("source_text", "translated_text"),
+    [
+        pytest.param("Harry's owl blinked. What happened?", "Сова Гарри моргнула. — Что случилось?", id="bare-straight-apostrophe"),
+        pytest.param("Harry’s owl blinked. What happened?", "Сова Гарри моргнула. — Что случилось?", id="bare-curly-apostrophe"),
+        pytest.param("The boys’ coats fell. What happened?", "Пальто мальчиков упали. — Что случилось?", id="bare-plural-apostrophe"),
+        pytest.param("'Tis Harry's owl. What happened?", "Это сова Гарри. — Что случилось?", id="elision-and-apostrophe"),
+        pytest.param('Harry walked in. "Hello!"', "Гарри вошёл.\n— Привет!", id="newline-before-dash"),
+        pytest.param('Mr. Dursley smiled. "Hi!"', "Мистер Mr. — Гарри вздрогнул.", id="abbrev-mr"),
+        pytest.param('Mrs. Dursley smiled. "Hi!"', "Mrs. — Гарри вздрогнул.", id="abbrev-mrs"),
+        pytest.param('Ms. Dursley smiled. "Hi!"', "Ms. — Гарри вздрогнул.", id="abbrev-ms"),
+        pytest.param('Dr. Brown smiled. "Hi!"', "Dr. — Гарри вздрогнул.", id="abbrev-dr"),
+        pytest.param('St. Jude was near. "Hi!"', "St. — Гарри вздрогнул.", id="abbrev-st"),
+        pytest.param('Prof. McGonagall spoke. "Hi!"', "Prof. — Гарри вздрогнул.", id="abbrev-prof"),
+        pytest.param('Etc. "Hi!"', "И т. д. — Гарри вздрогнул.", id="abbrev-td"),
+        pytest.param('Etc. "Hi!"', "И т. п. — Гарри вздрогнул.", id="abbrev-tp"),
+        pytest.param('That is. "Hi!"', "Т. е. — Гарри вздрогнул.", id="abbrev-te"),
+        pytest.param('AD. "Hi!"', "До н. э. — Гарри вздрогнул.", id="abbrev-ne"),
+        pytest.param('Year 1991. "Hi!"', "В 1991 г. — Гарри вздрогнул.", id="abbrev-g"),
+        pytest.param('Saint. "Hi!"', "Св. — Георгий победил.", id="abbrev-sv"),
+        pytest.param('Others. "Hi!"', "И др. — Гарри вздрогнул.", id="abbrev-dr-ru"),
+        pytest.param('Example. "Hi!"', "См. пр. — Гарри вздрогнул.", id="abbrev-pr"),
+        pytest.param('Page. "Hi!"', "На стр. — Гарри вздрогнул.", id="abbrev-str"),
+        pytest.param('Chapter. "Hi!"', "В гл. — Гарри вздрогнул.", id="abbrev-gl"),
+        pytest.param('Mr. J. K. spoke. "Hi!"', "Дж. К. — Гарри вздрогнул.", id="single-capital-initial-ru"),
+        pytest.param('J. K. spoke. "Hi!"', "J. — Гарри вздрогнул.", id="single-capital-initial-en"),
+    ],
+)
+def test_dialogue_validator_strict_v3_allows_non_quote_prose_and_abbreviations(
+    source_text: str, translated_text: str
+) -> None:
+    """Under strict_v3=True, bare apostrophes, leading-dash lines, and English/Russian abbreviations pass."""
+    assert _check(translated_text, source_text=source_text, strict_v3=True) is None

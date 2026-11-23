@@ -278,10 +278,15 @@ class TranslationResultValidator:
                 safe_message="В тексте обнаружено смешение алфавитов внутри слова",
             )
         if not historical:
-            for block in text_payload.blocks:
-                single = replace(text_payload, blocks=(block,))
+            for block in normalized_payload.blocks:
+                single = replace(normalized_payload, blocks=(block,))
                 self._ensure_block(
-                    dialogue_violation(single, target_language=target_language, unit=unit),
+                    dialogue_violation(
+                        single,
+                        target_language=target_language,
+                        unit=unit,
+                        strict_v3=policy_level >= 3,
+                    ),
                     expected,
                     block_id=block.source_block_id,
                     rule_code="dialogue_punctuation",
