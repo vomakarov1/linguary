@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.correction_dto import ChapterCorrectionResponse, ChapterCorrectionReviewResponse
@@ -126,6 +126,7 @@ class LLMResponseFormatError(LLMError):
         violation: Violation | None = None,
         body_meta: dict | None = None,
         call_context: CallContext | None = None,
+        expectation: Any = None,
     ) -> None:
         super().__init__(message)
         self.truncated = truncated
@@ -137,6 +138,7 @@ class LLMResponseFormatError(LLMError):
         self.violation = violation
         self.body_meta = body_meta
         self.call_context = call_context
+        self.expectation = expectation
         self.call_id = None
 
 
@@ -288,6 +290,7 @@ class LLMRequest[PayloadT: LLMPayload]:
         cls, *, instructions: str, input_text: str, contract_version: int = 1,
         name_translation_policy_version: int | None = None,
         pronunciation_candidates_version: int | None = None,
+        block_aliases: tuple[tuple[str, str], ...] = (),
     ) -> LLMRequest[TranslationResultResponse]:
         """Request for block group or single block processing (PRD § 10, § 14)."""
         return LLMRequest[TranslationResultResponse](
@@ -297,6 +300,7 @@ class LLMRequest[PayloadT: LLMPayload]:
             input_text=input_text,
             contract_version=contract_version,
             name_translation_policy_version=name_translation_policy_version,
+            block_aliases=block_aliases,
         )
 
 

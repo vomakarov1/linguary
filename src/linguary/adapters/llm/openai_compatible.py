@@ -193,7 +193,15 @@ class OpenAICompatibleLLMClient(LLMClient):
                 finish_reason=finish_reason,
                 stage=request.kind.value,
             )
-            payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
+            payload = parse_payload(
+                request.kind,
+                content,
+                contract_version=request.contract_version,
+                name_translation_policy_version=request.name_translation_policy_version,
+                pronunciation_candidates_version=request.pronunciation_candidates_version,
+                truncated=truncated,
+                block_aliases=dict(request.block_aliases) if request.block_aliases else None,
+            )
             if (
                 request.kind == LLMResponseKind.CHAPTER_CORRECTION
                 and request.block_aliases

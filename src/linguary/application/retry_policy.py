@@ -488,9 +488,7 @@ def _truncated_by_output_limit(error: Exception) -> bool:
 
 def _expectation_of(error: Exception) -> ResultExpectation | None:
     """Expected result information if carried by error."""
-    if isinstance(error, ResultValidationError):
-        return error.expectation
-    return None
+    return getattr(error, "expectation", None)
 
 
 def _task_error(error_type: ErrorType, error: BaseException) -> TaskError:

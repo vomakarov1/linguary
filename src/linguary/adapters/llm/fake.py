@@ -119,7 +119,15 @@ class FakeLLMClient(LLMClient):
         self.requests.append(request)
         if isinstance(step, Exception):
             raise step
-        payload = parse_payload(request.kind, step.content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=step.truncated)
+        payload = parse_payload(
+            request.kind,
+            step.content,
+            contract_version=request.contract_version,
+            name_translation_policy_version=request.name_translation_policy_version,
+            pronunciation_candidates_version=request.pronunciation_candidates_version,
+            truncated=step.truncated,
+            block_aliases=dict(request.block_aliases) if request.block_aliases else None,
+        )
         return LLMResponse(
             payload=cast(PayloadT, payload),
             provider=self.provider,

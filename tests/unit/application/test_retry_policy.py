@@ -770,3 +770,95 @@ def test_retry_policy_never_retries_unknown_transport_or_provider_refusal() -> N
     assert violation_of(not_sent).rule_code == "transport_not_sent"
     assert violation_of(known).rule_code == "transport_transient"
     assert violation_of(unknown).rule_code == "transport_unknown"
+
+
+def test_retry_policy_and_worded_for_the_model_emit_local_repair_for_response_format_error() -> None:
+    """_worded_for_the_model clones LLMResponseFormatError with aliases & expectation without mutating original."""
+    from decimal import Decimal
+    from linguary.application.block_processing import _worded_for_the_model
+    from linguary.application.context_builder import TranslationContext
+    from linguary.domain import TokenUsage
+    from linguary.domain.llm_log import CallContext, Violation
+
+    aliases = {f"b{idx}": f"uuid-{idx}" for idx in range(1, 7)}
+    six_blocks = expectation(
+        blocks=tuple(
+            ExpectedBlock(block_id=f"b{idx}", treatment=BlockTreatment.TRANSLATE)
+            for idx in range(1, 7)
+        )
+    )
+    ctx = TranslationContext(
+        section_id="sec-1",
+        unit_id="unit-1",
+        request=LLMRequest.for_translation(
+            instructions="Переводи",
+            input_text="\n".join(f"b{idx}: text {idx}" for idx in range(1, 7)),
+            block_aliases=tuple(aliases.items()),
+        ),
+        block_ids_by_alias=aliases,
+        expectation=six_blocks,
+    )
+    call_ctx = CallContext(
+        conditions_id="00000000-0000-0000-0000-000000000001",
+        stage="translation_unit",
+        scope_id="scope-1",
+        ordered_block_ids=tuple(aliases.values()),
+        attempt_id="00000000-0000-0000-0000-000000000002",
+        generation=0,
+        assigned_model="claude-test",
+        prompt_hash="a" * 64,
+    )
+    raw = '{"blocks": [{"source_block_id": "b3"}]}'
+    usage = TokenUsage(prompt_tokens=10, completion_tokens=5)
+    body_meta = {"body_status": "available"}
+    original_violation = Violation(
+        "response_schema",
+        "translation_result",
+        scope="local",
+        block_ids=("uuid-3",),
+        safe_message="Ответ не соответствует формату",
+    )
+    original_error = LLMResponseFormatError(
+        "ошибка схемы для uuid-3",
+        truncated=False,
+        raw_content=raw,
+        usage=usage,
+        cost=Decimal("0.001"),
+        provider="openrouter",
+        model="claude-test",
+        violation=original_violation,
+        body_meta=body_meta,
+        call_context=call_ctx,
+    )
+
+    reworded = _worded_for_the_model(original_error, ctx)
+
+    assert reworded is not original_error
+    assert isinstance(reworded, LLMResponseFormatError)
+    assert reworded.expectation == six_blocks
+    assert reworded.violation is not None
+    assert reworded.violation.block_ids == ("b3",)
+    assert reworded.truncated is False
+    assert reworded.raw_content == raw
+    assert reworded.usage == usage
+    assert reworded.cost == Decimal("0.001")
+    assert reworded.provider == "openrouter"
+    assert reworded.model == "claude-test"
+    assert reworded.body_meta == body_meta
+    assert reworded.call_context == call_ctx
+    assert "b3" in str(reworded)
+    assert "uuid-3" not in str(reworded)
+
+    # Original error and its violation remain untouched with real UUID.
+    assert original_error.expectation is None
+    assert original_error.violation is original_violation
+    assert original_error.violation.block_ids == ("uuid-3",)
+
+    decision = policy(max_attempts=3).decide(reworded, attempts=1)
+    assert decision.action is RetryAction.RETRY_WITH_REPAIR
+    assert decision.assistant_response == raw
+    assert decision.repair_instruction is not None
+    assert "- b3: режим обработки TRANSLATE" in decision.repair_instruction
+    assert "uuid-3" not in decision.repair_instruction
+    for untouched in ("- b1:", "- b2:", "- b4:", "- b5:", "- b6:"):
+        assert untouched not in decision.repair_instruction

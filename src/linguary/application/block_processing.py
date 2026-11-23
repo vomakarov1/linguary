@@ -1184,6 +1184,18 @@ def _with_allocated_note_ids(transaction, results, *, run_id: str, chapter_num: 
     )
 
 
+def _aliased_violation(violation, context: TranslationContext):
+    if violation is not None and violation.block_ids:
+        aliases_by_block_id = {
+            block_id: alias
+            for alias, block_id in (getattr(context, "block_ids_by_alias", None) or {}).items()
+        }
+        aliased_ids = tuple(aliases_by_block_id.get(b, b) for b in violation.block_ids)
+        if aliased_ids != violation.block_ids:
+            return replace(violation, block_ids=aliased_ids)
+    return violation
+
+
 def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
     """Same error rephrased using block aliases seen by the model (ALG-05).
 
@@ -1192,21 +1204,31 @@ def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exce
     populated by the validator. Outwardly — into logs and task state — the original error
     with real block IDs is propagated.
     """
+    if isinstance(error, LLMResponseFormatError):
+        violation = getattr(error, "violation", None)
+        if violation is None or violation.scope != "local" or not violation.block_ids:
+            return error
+        cloned = LLMResponseFormatError(
+            context.to_aliases(str(error)),
+            truncated=error.truncated,
+            raw_content=error.raw_content,
+            usage=error.usage,
+            cost=error.cost,
+            provider=error.provider,
+            model=error.model,
+            violation=_aliased_violation(violation, context),
+            body_meta=error.body_meta,
+            call_context=error.call_context,
+            expectation=getattr(error, "expectation", None) or getattr(context, "expectation", None),
+        )
+        cloned.call_id = getattr(error, "call_id", None)
+        return cloned
     if not isinstance(error, ResultValidationError):
         return error
-    violation = getattr(error, "violation", None)
-    if violation is not None and violation.block_ids:
-        aliases_by_block_id = {
-            block_id: alias
-            for alias, block_id in (getattr(context, "block_ids_by_alias", None) or {}).items()
-        }
-        aliased_ids = tuple(aliases_by_block_id.get(b, b) for b in violation.block_ids)
-        if aliased_ids != violation.block_ids:
-            violation = replace(violation, block_ids=aliased_ids)
     return ResultValidationError(
         context.to_aliases(str(error)),
         expectation=error.expectation or getattr(context, "expectation", None),
-        violation=violation,
+        violation=_aliased_violation(getattr(error, "violation", None), context),
     )
 
 

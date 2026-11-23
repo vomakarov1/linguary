@@ -1477,6 +1477,7 @@ class ContextBuilder:
                 name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
                 input_text=input_text,
+                block_aliases=tuple(aliases.items()),
             ),
             block_ids_by_alias=aliases,
             expectation=ResultExpectation(

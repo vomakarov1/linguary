@@ -188,10 +188,79 @@ def _strip_markdown_fence(content: str) -> str:
     return content
 
 
+def _translation_validation_violation(
+    kind: LLMResponseKind,
+    *,
+    error: ValidationError,
+    raw_object: object,
+    truncated: bool,
+    block_aliases: Mapping[str, str] | None,
+) -> Violation:
+    """Builds structured violation, localizing `blocks[i]` errors on non-truncated translation payloads."""
+    if truncated:
+        return Violation(
+            "provider_truncated",
+            kind.value,
+            safe_message="Ответ не соответствует формату",
+        )
+    errors = error.errors(include_input=False, include_context=False)
+    if any(item["type"] == "json_invalid" for item in errors):
+        return Violation(
+            "response_parse",
+            kind.value,
+            safe_message="Ответ не соответствует формату",
+        )
+    if kind == LLMResponseKind.TRANSLATION_RESULT and errors and isinstance(raw_object, Mapping):
+        raw_blocks = raw_object.get("blocks")
+        if isinstance(raw_blocks, list) and raw_blocks:
+            known_values = set(block_aliases.values()) if block_aliases is not None else None
+            resolved: list[str] = []
+            for item in errors:
+                loc = item.get("loc", ())
+                if (
+                    len(loc) < 2
+                    or loc[0] != "blocks"
+                    or type(loc[1]) is not int
+                    or not (0 <= loc[1] < len(raw_blocks))
+                ):
+                    break
+                entry = raw_blocks[loc[1]]
+                if not isinstance(entry, Mapping):
+                    break
+                raw_id = entry.get("source_block_id")
+                if not isinstance(raw_id, str) or not raw_id.strip():
+                    break
+                if block_aliases is not None:
+                    assert known_values is not None
+                    if raw_id in block_aliases:
+                        resolved.append(block_aliases[raw_id])
+                    elif raw_id in known_values:
+                        resolved.append(raw_id)
+                    else:
+                        break
+                else:
+                    resolved.append(raw_id)
+            else:
+                if resolved:
+                    return Violation(
+                        "response_schema",
+                        kind.value,
+                        scope="local",
+                        block_ids=tuple(dict.fromkeys(resolved)),
+                        safe_message="Ответ не соответствует формату",
+                    )
+    return Violation(
+        "response_schema",
+        kind.value,
+        safe_message="Ответ не соответствует формату",
+    )
+
+
 def parse_payload(
     kind: LLMResponseKind, content: str, *, contract_version: int = 1,
     name_translation_policy_version: int | None = None, truncated: bool = False,
     pronunciation_candidates_version: int | None = None,
+    block_aliases: Mapping[str, str] | None = None,
 ) -> LLMPayload:
     """Parses model response text and returns application layer DTO.
 
@@ -249,8 +318,13 @@ def parse_payload(
             _format_error(kind, error=error, truncated=truncated),
             truncated=truncated,
             raw_content=content,
-            violation=Violation('provider_truncated' if truncated else ('response_parse' if any(item['type'] == 'json_invalid' for item in error.errors(include_input=False, include_context=False)) else 'response_schema'), kind.value,
-                                safe_message='Ответ не соответствует формату'),
+            violation=_translation_validation_violation(
+                kind,
+                error=error,
+                raw_object=raw_object,
+                truncated=truncated,
+                block_aliases=block_aliases,
+            ),
         ) from None
     try:
         result = _to_dto(validated)

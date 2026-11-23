@@ -2735,6 +2735,8 @@ def test_regeneration_input_lists_segments() -> None:
     assert "[b2]" not in regenerated.request.input_text
     assert _SEGMENT_TRANSLATION_RULE in regenerated.request.instructions
     assert _POEM_TRANSLATION_RULE not in regenerated.request.instructions
+    assert regenerated.request.block_aliases == tuple(regenerated.block_ids_by_alias.items())
+    assert translated.request.block_aliases == tuple(translated.block_ids_by_alias.items())
 
 
 

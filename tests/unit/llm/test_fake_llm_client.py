@@ -189,3 +189,33 @@ async def test_pronunciation_clients_share_item_isolation(version):
     assert len(response.payload.pronunciation_candidates) == 1
     assert response.payload.blocks[0].translated_text
     assert client.call_count == 1
+
+
+async def test_fake_llm_client_forwards_block_aliases_to_parse_payload() -> None:
+    """FakeLLMClient.generate passes request.block_aliases to parse_payload."""
+    bad_payload = translation_payload(
+        blocks=[
+            block_payload(source_block_id="b1"),
+            {
+                "source_block_id": "b2",
+                "treatment": "TRANSLATE",
+                "translated_text": None,
+                "glossary_hints": [],
+            },
+        ],
+        language_notes=[],
+    )
+    client = FakeLLMClient.always(FakeReply.of_payload(bad_payload))
+    request = LLMRequest.for_translation(
+        instructions="Переводи",
+        input_text="b1: one\nb2: two",
+        block_aliases=(("b1", "uuid-1"), ("b2", "uuid-2")),
+    )
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        await client.generate(request)
+
+    assert caught.value.violation is not None
+    assert caught.value.violation.rule_code == "response_schema"
+    assert caught.value.violation.scope == "local"
+    assert caught.value.violation.block_ids == ("uuid-2",)

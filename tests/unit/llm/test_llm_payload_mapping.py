@@ -758,3 +758,99 @@ def test_format_error_adds_schema_hints_for_too_short_and_string_too_short() -> 
     assert "подсказки схемы: reader_chapter_summary: строка не может быть пустой, минимум 1" in ped_message
     ped_suffix = ped_message.split("подсказки схемы:", 1)[1]
     assert "(" not in ped_suffix and ")" not in ped_suffix
+
+
+def test_parse_payload_localizes_translation_result_validation_error_with_block_aliases() -> None:
+    aliases = {"b1": "uuid-1", "b2": "uuid-2"}
+    bad_block = {
+        "blocks": [
+            block_payload(source_block_id="b1"),
+            {
+                "source_block_id": "b2",
+                "treatment": "TRANSLATE",
+                "translated_text": None,
+                "glossary_hints": [],
+            },
+        ],
+        "language_notes": [],
+    }
+    with pytest.raises(LLMResponseFormatError) as localized:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(bad_block),
+            block_aliases=aliases,
+        )
+    assert localized.value.violation is not None
+    assert localized.value.violation.rule_code == "response_schema"
+    assert localized.value.violation.scope == "local"
+    assert localized.value.violation.block_ids == ("uuid-2",)
+
+    # UUID directly in raw payload is also accepted when in block_aliases.values().
+    bad_block["blocks"][1]["source_block_id"] = "uuid-2"
+    with pytest.raises(LLMResponseFormatError) as uuid_localized:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(bad_block),
+            block_aliases=aliases,
+        )
+    assert uuid_localized.value.violation is not None
+    assert uuid_localized.value.violation.scope == "local"
+    assert uuid_localized.value.violation.block_ids == ("uuid-2",)
+
+    # When truncated=True, provider_truncated is preserved and never localized.
+    bad_block["blocks"][1]["source_block_id"] = "b2"
+    with pytest.raises(LLMResponseFormatError) as truncated_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(bad_block),
+            truncated=True,
+            block_aliases=aliases,
+        )
+    assert truncated_err.value.truncated is True
+    assert truncated_err.value.violation is not None
+    assert truncated_err.value.violation.rule_code == "provider_truncated"
+    assert truncated_err.value.violation.scope == "unknown"
+
+    # Unknown alias falls back to scope="unknown".
+    unknown_alias_block = {
+        "blocks": [
+            {
+                "source_block_id": "b99",
+                "treatment": "TRANSLATE",
+                "translated_text": None,
+                "glossary_hints": [],
+            }
+        ],
+        "language_notes": [],
+    }
+    with pytest.raises(LLMResponseFormatError) as unknown_alias_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(unknown_alias_block),
+            block_aliases=aliases,
+        )
+    assert unknown_alias_err.value.violation is not None
+    assert unknown_alias_err.value.violation.rule_code == "response_schema"
+    assert unknown_alias_err.value.violation.scope == "unknown"
+
+    # Non-block error (e.g. language_notes) falls back to scope="unknown".
+    non_block_err = {
+        "blocks": [block_payload(source_block_id="b1")],
+        "language_notes": [
+            {
+                "source_block_id": "b1",
+                "original_excerpt": "truth",
+                "translated_excerpt": None,
+                "note": "",
+            }
+        ],
+    }
+    with pytest.raises(LLMResponseFormatError) as note_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(non_block_err),
+            block_aliases=aliases,
+        )
+    assert note_err.value.violation is not None
+    assert note_err.value.violation.rule_code == "response_schema"
+    assert note_err.value.violation.scope == "unknown"

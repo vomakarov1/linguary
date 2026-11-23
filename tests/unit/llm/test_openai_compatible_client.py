@@ -1851,6 +1851,47 @@ async def test_explicit_prompt_cache_omitted_for_non_claude_non_openrouter_or_di
     assert all(isinstance(msg["content"], str) for msg in captured[0]["messages"])
 
 
+async def test_openai_client_forwards_block_aliases_to_parse_payload() -> None:
+    """Pydantic ValidationError in TRANSLATION_RESULT is localized via request.block_aliases."""
+    bad_response = completion(
+        json.dumps(
+            {
+                "blocks": [
+                    {
+                        "source_block_id": "b1",
+                        "treatment": "TRANSLATE",
+                        "translated_text": "Первый.",
+                        "glossary_hints": [],
+                    },
+                    {
+                        "source_block_id": "b2",
+                        "treatment": "TRANSLATE",
+                        "translated_text": None,
+                        "glossary_hints": [],
+                    },
+                ],
+                "language_notes": [],
+            }
+        )
+    )
+    client = client_over(responding(bad_response))
+    try:
+        request = LLMRequest.for_translation(
+            instructions="Переводи.",
+            input_text="b1: one\nb2: two",
+            block_aliases=(("b1", "uuid-1"), ("b2", "uuid-2")),
+        )
+        with pytest.raises(LLMResponseFormatError) as caught:
+            await client.generate(request)
+    finally:
+        await client.aclose()
+
+    assert caught.value.violation is not None
+    assert caught.value.violation.rule_code == "response_schema"
+    assert caught.value.violation.scope == "local"
+    assert caught.value.violation.block_ids == ("uuid-2",)
+
+
 
 
 
