@@ -423,6 +423,7 @@ def _block_result(schema: BlockResultSchema) -> BlockResultResponse:
         segments=tuple(
             SegmentTranslationResponse(item.index, item.translated_text)
             for item in schema.segments
+            if item.translated_text and item.translated_text.strip()
         ),
     )
 

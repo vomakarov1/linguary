@@ -2269,9 +2269,12 @@ def test_scene_note_budget_reserves_allowance_for_translate_explanation_and_rege
 
 
 _SEGMENT_TRANSLATION_RULE = (
-    "Для блока, показанного строками сегментов, верни segments с переводом "
-    "каждого сегмента в режиме TRANSLATE, оставь translated_text null и не "
-    "переноси смысл между сегментами."
+    "Для блока, показанного строками сегментов, включай в segments только сегменты "
+    "в режиме TRANSLATE, оставь translated_text null и не переноси смысл между сегментами; "
+    "сегменты GLOSSARY_ONLY и READ_AS_IS в segments не включай (или передай для них "
+    "translated_text: null). Если одна непрерывная реплика диалога разбита на несколько "
+    "сегментов, ставь тире «— » только в начале первого сегмента реплики, не повторяя "
+    "«— » в последующих сегментах того же монолога."
 )
 _POEM_TRANSLATION_RULE = (
     "Стихотворный блок переводи построчно, без рифмы, с тем же числом строк, "
@@ -2580,7 +2583,7 @@ def test_retry_instructions_list_segments_and_treatments() -> None:
     repair = build_repair_instruction(context.expectation)
     assert (
         "- b1: режим обработки TRANSLATE\n"
-        "  - 1: режим GLOSSARY_ONLY\n"
+        "  - 1: режим GLOSSARY_ONLY (не включай в segments)\n"
         "  - 2: режим TRANSLATE"
     ) in repair
     assert (
@@ -2590,7 +2593,7 @@ def test_retry_instructions_list_segments_and_treatments() -> None:
     ) in repair
     assert (
         "- b3: режим обработки TRANSLATE\n"
-        "  - 1: режим READ_AS_IS\n"
+        "  - 1: режим READ_AS_IS (не включай в segments)\n"
         "  - 2: режим TRANSLATE"
     ) in repair
     assert "- b5" not in repair

@@ -458,10 +458,9 @@ def _format_block_lines(blocks: Sequence[ExpectedBlock]) -> list[str]:
             lines.append(f"- {block.block_id}")
         else:
             lines.append(f"- {block.block_id}: режим обработки {block.treatment}")
-        lines.extend(
-            f"  - {index}: режим {treatment}"
-            for index, treatment in enumerate(block.segment_treatments, start=1)
-        )
+        for index, treatment in enumerate(block.segment_treatments, start=1):
+            suffix = "" if treatment.requires_translation else " (не включай в segments)"
+            lines.append(f"  - {index}: режим {treatment}{suffix}")
     return lines
 
 

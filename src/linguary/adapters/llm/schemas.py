@@ -15,10 +15,18 @@ response they indicate that the model did not adhere to the schema.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import copy
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from linguary.domain import BlockTreatment, ConceptType
 from linguary.domain.name_translation import NameTranslationMethod, NameTranslationReviewReason
@@ -169,7 +177,29 @@ class SegmentTranslationSchema(_ResponseModel):
     """Перевод одного сегмента. Индекс начинается с 1."""
 
     index: int = Field(ge=1, strict=True)
-    translated_text: str = Field(min_length=1)
+    translated_text: str | None
+
+    @field_validator("translated_text")
+    @classmethod
+    def _reject_blank_translation(cls, value: str | None) -> str | None:
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("пустой перевод сегмента")
+        return value
+
+
+def _is_valid_empty_segment(item: object) -> bool:
+    """Whether `item` is a well-formed empty/null segment safe to drop before validation."""
+    if isinstance(item, SegmentTranslationSchema):
+        return item.translated_text is None
+    if not isinstance(item, dict) or set(item) != {"index", "translated_text"}:
+        return False
+    index = item["index"]
+    translated_text = item["translated_text"]
+    if type(index) is not int or index < 1:
+        return False
+    return translated_text is None or (
+        isinstance(translated_text, str) and not translated_text.strip()
+    )
 
 
 class BlockResultSchema(_ResponseModel):
@@ -181,6 +211,22 @@ class BlockResultSchema(_ResponseModel):
     glossary_hints: list[GlossaryHintSchema]
     # Пустой список сохраняет проверку состава по режиму блока.
     segments: list[SegmentTranslationSchema] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_valid_empty_segments(cls, data: object) -> object:
+        """Drop valid empty/null segments and exact empty block translation on a dict copy."""
+        if not isinstance(data, Mapping):
+            return data
+        copied = dict(data)
+        if copied.get("translated_text") == "":
+            copied["translated_text"] = None
+        segments = copied.get("segments")
+        if isinstance(segments, list):
+            copied["segments"] = [
+                item for item in segments if not _is_valid_empty_segment(item)
+            ]
+        return copied
 
     @model_validator(mode="after")
     def _check_treatment_composition(self) -> BlockResultSchema:

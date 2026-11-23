@@ -285,7 +285,8 @@ def _segmented_content(
         if not mode.requires_translation:
             return (
                 f"для сегмента {index} блока {block.source_block_id} "
-                f"с режимом {mode} перевод недопустим"
+                f"с режимом {mode} перевод недопустим: "
+                f"удали элемент с index={index} из segments (или передай null)"
             )
     for index, mode in enumerate(modes, start=1):
         if mode.requires_translation and index not in seen:
