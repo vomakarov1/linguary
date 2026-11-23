@@ -111,7 +111,10 @@ def treatment_violation(
 
 
 def content_violation(
-    payload: TranslationResultResponse, *, unit: TranslationUnit
+    payload: TranslationResultResponse,
+    *,
+    unit: TranslationUnit,
+    strict_v3: bool = False,
 ) -> str | None:
     """Violation description of result content mismatching the planned treatment, or `None`."""
     items = {item.block.id: item for item in unit.items}
@@ -119,7 +122,7 @@ def content_violation(
         item = items.get(block.source_block_id)
         if item is None:
             continue
-        violation = _block_content_violation(block, item=item)
+        violation = _block_content_violation(block, item=item, strict_v3=strict_v3)
         if violation is not None:
             return violation
     return None
@@ -200,6 +203,8 @@ def _word_stems(word: str) -> set[str]:
 
 
 def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...]) -> bool:
+    from linguary.application.layout.notes import _infinitive_end
+
     normalized_hint = _normalize_match_text(original).strip(".,;:!?\"'«»“”‘’()[]")
     if not normalized_hint:
         return False
@@ -210,12 +215,14 @@ def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...])
             candidates.append(bare)
     normalized_texts = tuple(_normalize_match_text(text) for text in glossary_texts)
     text_words: set[str] = set()
-    for text in normalized_texts:
+    for raw_text, text in zip(glossary_texts, normalized_texts, strict=True):
         words = _WORD_RE.findall(text)
         text_words.update(words)
         for candidate in candidates:
             if re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", text):
                 return True
+        if _infinitive_end(raw_text, normalized_hint) is not None:
+            return True
     content_text_words = {
         word for word in text_words if len(word) >= 3 and word not in _HINT_STOPWORDS
     }
@@ -238,7 +245,10 @@ def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...])
 
 
 def _block_content_violation(
-    block: BlockResultResponse, *, item: TranslationUnitItem
+    block: BlockResultResponse,
+    *,
+    item: TranslationUnitItem,
+    strict_v3: bool = False,
 ) -> str | None:
     """Result content of a single block relative to its planned treatment mode (PRD § 15)."""
     modes = planned_segment_modes(item)
@@ -248,8 +258,8 @@ def _block_content_violation(
                 f"для блока {block.source_block_id} без нескольких сегментов "
                 "список segments недопустим"
             )
-        return _legacy_content(block, planned=item.treatment)
-    return _segmented_content(block, item=item, modes=modes)
+        return _legacy_content(block, planned=item.treatment, strict_v3=strict_v3)
+    return _segmented_content(block, item=item, modes=modes, strict_v3=strict_v3)
 
 
 def _segmented_content(
@@ -257,6 +267,7 @@ def _segmented_content(
     *,
     item: TranslationUnitItem,
     modes: tuple[BlockTreatment, ...],
+    strict_v3: bool = False,
 ) -> str | None:
     """Multi-segment content check against per-span planned treatments."""
     if block.translated_text is not None:
@@ -297,20 +308,28 @@ def _segmented_content(
     if any(mode is BlockTreatment.GLOSSARY_ONLY for mode in modes):
         if not block.glossary_hints:
             return f"для блока {block.source_block_id} обязательны словарные подсказки"
-        if any(mode.requires_translation for mode in modes):
-            glossary_texts = tuple(
-                item.block.text[spans[i].start : spans[i].end]
-                for i, mode in enumerate(modes)
-                if mode is BlockTreatment.GLOSSARY_ONLY
+        glossary_texts = tuple(
+            item.block.text[spans[i].start : spans[i].end]
+            for i, mode in enumerate(modes)
+            if mode is BlockTreatment.GLOSSARY_ONLY
+        )
+        if any(mode.requires_translation for mode in modes) and not any(
+            _hint_matches_glossary_texts(hint.original, glossary_texts)
+            for hint in block.glossary_hints
+        ):
+            return (
+                f"для блока {block.source_block_id} ни одна словарная подсказка "
+                "не относится к сегменту GLOSSARY_ONLY"
             )
-            if not any(
-                _hint_matches_glossary_texts(hint.original, glossary_texts)
-                for hint in block.glossary_hints
-            ):
-                return (
-                    f"для блока {block.source_block_id} ни одна словарная подсказка "
-                    "не относится к сегменту GLOSSARY_ONLY"
-                )
+        if strict_v3 and any(mode is not BlockTreatment.GLOSSARY_ONLY for mode in modes):
+            for hint in block.glossary_hints:
+                if not (hint.note and hint.note.strip()) and not _hint_matches_glossary_texts(
+                    hint.original, glossary_texts
+                ):
+                    return (
+                        f"для блока {block.source_block_id} словарная подсказка "
+                        f"«{hint.original}» без note не относится к сегменту GLOSSARY_ONLY"
+                    )
     elif (
         all(mode is BlockTreatment.READ_AS_IS for mode in modes)
         and block.glossary_hints
@@ -319,11 +338,20 @@ def _segmented_content(
             f"для блока {block.source_block_id} с режимом {BlockTreatment.READ_AS_IS} "
             "словарные подсказки недопустимы"
         )
+    elif strict_v3 and any(mode.requires_translation for mode in modes):
+        if any(not (hint.note and hint.note.strip()) for hint in block.glossary_hints):
+            return (
+                f"для блока {block.source_block_id} с переводом словарные подсказки "
+                "без содержательного note недопустимы"
+            )
     return None
 
 
 def _legacy_content(
-    block: BlockResultResponse, *, planned: BlockTreatment
+    block: BlockResultResponse,
+    *,
+    planned: BlockTreatment,
+    strict_v3: bool = False,
 ) -> str | None:
     """Whole-block content check used when the block has a single span."""
     has_translation = bool(block.translated_text and block.translated_text.strip())
@@ -343,6 +371,15 @@ def _legacy_content(
         return (
             f"для блока {block.source_block_id} с режимом {planned} "
             "словарные подсказки недопустимы"
+        )
+    if (
+        strict_v3
+        and planned.requires_translation
+        and any(not (hint.note and hint.note.strip()) for hint in block.glossary_hints)
+    ):
+        return (
+            f"для блока {block.source_block_id} с режимом {planned} "
+            "словарные подсказки без содержательного note недопустимы"
         )
     return None
 

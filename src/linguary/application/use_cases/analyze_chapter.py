@@ -750,6 +750,16 @@ class AnalyzeChapter:
             for value in templates.values()
         )
 
+    def _byr_enabled(self, context: ChapterAnalysisContext) -> bool:
+        limit = context.before_you_read_limit
+        if limit is not None and limit <= 0:
+            return False
+        return not (
+            self._is_a2_reader()
+            and not self._context_builder._english_help
+            and self._context_builder._content_plan_profile == "content-plan-v3"
+        )
+
     def _validate_pedagogical(
         self, payload: ChapterAnalysisResponse, context: ChapterAnalysisContext,
         blocks: Sequence[DocumentBlock], *, source_offsets: bool = False,
@@ -757,6 +767,7 @@ class AnalyzeChapter:
     ) -> ContentPlan | None:
         return validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
             english_help=self._context_builder._english_help,
+            byr_enabled=self._byr_enabled(context),
             before_you_read_limit=context.before_you_read_limit,
             language_notes_per_chapter=context.language_notes_per_chapter,
             note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits,
@@ -1714,6 +1725,7 @@ class AnalyzeChapter:
                         plan = validate_content_plan(
                             response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
                             english_help=self._context_builder._english_help,
+                            byr_enabled=self._byr_enabled(context),
                             before_you_read_limit=context.before_you_read_limit,
                             language_notes_per_chapter=context.language_notes_per_chapter,
                             note_limits_by_block=context.note_limits_by_block,

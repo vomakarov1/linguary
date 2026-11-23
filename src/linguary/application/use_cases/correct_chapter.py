@@ -995,6 +995,7 @@ class CorrectChapter:
                     (candidate,),
                     byr,
                     owner_block_ids=(candidate.block_id,),
+                    source_texts=source_texts,
                 )
                 if a2_v4:
                     checked, unresolved = resolve_content_coverage(

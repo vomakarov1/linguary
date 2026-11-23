@@ -1648,7 +1648,7 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             {"source_block_id": "b4", "treatment": "TRANSLATE"},
             {"source_block_id": "b5", "treatment": "TRANSLATE"},
             # Stranded preposition + state-change idiom ("What are you waiting for?" / "turned pale")
-            # marked GLOSSARY_ONLY with only lexical_hint -> promoted to TRANSLATE and hint -> explanation.
+            # marked GLOSSARY_ONLY with only vocabulary lexical_hint -> promoted to TRANSLATE and hint dropped.
             {"source_block_id": "b6", "treatment": "GLOSSARY_ONLY"},
         ],
         "before_you_read": [],
@@ -1878,17 +1878,15 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             assert "leaf" in lief_candidate.description
             assert lief_candidate.name_translation_evidence is not None
             assert lief_candidate.name_translation_evidence.observations[0].assessment.opaque_name is False
-            # Ch. 2 b6 promoted from GLOSSARY_ONLY -> TRANSLATE and lexical_hint -> explanation.
+            # Ch. 2 b6 promoted from GLOSSARY_ONLY -> TRANSLATE and vocabulary+lexical_hint dropped.
             ch2_blocks = textual_blocks(ch2)
             ch2_plan = {item.block_id: item for item in a_ch2.treatment_plan.items}
             assert ch2_plan[ch2_blocks[5].id].treatment is BlockTreatment.TRANSLATE
             assert a_ch2.content_plan is not None
-            pale_diff = next(
-                d
+            assert not any(
+                d.id == "d-ch2-pale" or any(anchor.quote == "pale" for anchor in d.anchors)
                 for d in a_ch2.content_plan.difficulties
-                if any(anchor.quote == "pale" for anchor in d.anchors)
             )
-            assert pale_diff.help_kind == "explanation"
 
             a_ch3 = analyses_by_section["ch-3"]
             assert a_ch3.chapter_summary == ch3_a2_summary

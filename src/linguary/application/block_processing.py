@@ -381,19 +381,31 @@ class TranslationCall:
                     results = tuple(replace(r, fragment_assistances=assistance[r.block_id]) for r in results)
                 elif context.content_plan is not None:
                     owners = tuple(r.block_id for r in results)
-                    evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
+                    if resolved_source_texts is not None:
+                        call_source_texts = resolved_source_texts
+                    else:
+                        document = None
+                        if request.book_id is not None and self._unit_of_work is not None:
+                            with self._unit_of_work.transaction() as transaction:
+                                docs = getattr(transaction, 'documents', None)
+                                if docs is not None:
+                                    document = docs.get(request.book_id)
+                        call_source_texts = (
+                            {block.id: block.text for section in document.sections for block in section.blocks}
+                            if document is not None
+                            else ({item.block.id: item.block.text for item in unit.items} if unit is not None else {})
+                        )
+                        resolved_source_texts = call_source_texts
+                    evidence = resolve_response_evidence(
+                        context.content_plan,
+                        mapped,
+                        results,
+                        context.before_you_read,
+                        owner_block_ids=owners,
+                        source_texts=call_source_texts,
+                    )
                     results = tuple(explained.without_repeats_v2(r) for r in results)
                     if a2_v4:
-                        if resolved_source_texts is not None:
-                            call_source_texts = resolved_source_texts
-                        else:
-                            document = None
-                            if request.book_id is not None:
-                                with self._unit_of_work.transaction() as transaction:
-                                    document = transaction.documents.get(request.book_id)
-                            call_source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
-                                if document is not None else {item.block.id: item.block.text for item in unit.items})
-                            resolved_source_texts = call_source_texts
                         checked, unresolved = resolve_content_coverage(context.content_plan, results,
                             context.before_you_read, evidence, owner_block_ids=owners, source_texts=call_source_texts,
                             validators_version=validators_version)

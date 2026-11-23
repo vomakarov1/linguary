@@ -4205,6 +4205,7 @@ def validate_content_plan(
     before_you_read_limit: int = 10,
     language_notes_per_chapter: int = 8,
     english_help: bool = False,
+    byr_enabled: bool = True,
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
     visible_texts_by_alias: Mapping[str, str] | None = None,
@@ -4367,8 +4368,15 @@ def validate_content_plan(
                 difficulty.owner_block_id, difficulty.owner_block_id
             )
             msg = (
-                "лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR "
-                f"({label}, {difficulty.id})"
+                (
+                    "лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR "
+                    f"({label}, {difficulty.id})"
+                )
+                if byr_enabled
+                else (
+                    "лексическая помощь допустима только в GLOSSARY_ONLY "
+                    f"({label}, {difficulty.id})"
+                )
             )
             raise _analysis_error(
                 msg,
@@ -5325,7 +5333,9 @@ def unify_chapter_analysis_verse_stanzas(
         dropped_ids: set[str] = set()
         for difficulty in new_content_plan.difficulties:
             switched = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
-            if switched is not difficulty and _is_auto_vocab_difficulty(difficulty):
+            if switched is None or (
+                switched is not difficulty and _is_auto_vocab_difficulty(difficulty)
+            ):
                 dropped_ids.add(difficulty.id)
                 continue
             updated_diffs.append(switched)
@@ -5734,8 +5744,10 @@ def normalize_pedagogical_response(
         switched_list = []
         for difficulty in difficulties:
             after_promo = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
-            if after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty):
-                # Never promote an auto-synthesized vocabulary hint into a TRANSLATE explanation.
+            if after_promo is None or (
+                after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty)
+            ):
+                # Never keep or promote a vocabulary lexical_hint on a promoted TRANSLATE block/segment.
                 for pt in difficulty.required_points:
                     pruned_removed_points.add((difficulty.id, pt.id))
                 continue
@@ -5763,7 +5775,9 @@ def normalize_pedagogical_response(
         kept_list = []
         for difficulty in difficulties:
             after_promo = _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
-            if after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty):
+            if after_promo is None or (
+                after_promo is not difficulty and _is_auto_vocab_difficulty(difficulty)
+            ):
                 for pt in difficulty.required_points:
                     pruned_removed_points.add((difficulty.id, pt.id))
                 continue
@@ -6249,6 +6263,8 @@ def _switch_promoted_hint(
             continue
         if byr_covered and not promoted.had_glossary:
             continue
+        if difficulty.kind == "vocabulary":
+            return None
         return replace(difficulty, help_kind="explanation")
     return difficulty
 

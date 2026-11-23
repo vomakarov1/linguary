@@ -2952,9 +2952,9 @@ def test_normalize_a2_lifts_stoplist_in_read_as_is_segments_and_unbacked_glossar
         item.treatment
         for item in normalized.treatment_plan[1 + n_stop + n_plain + n_unbacked :]
     ] == [BlockTreatment.GLOSSARY_ONLY] * n_backed
-    # Unbacked vocab hint on promoted whole GLOSSARY_ONLY block became explanation
+    # Unbacked vocab hint on promoted whole GLOSSARY_ONLY block is dropped.
     help_by_id = {d.id: d.help_kind for d in normalized.difficulties}
-    assert help_by_id["d-unbacked-vocab"] == "explanation"
+    assert "d-unbacked-vocab" not in help_by_id
 
 
 def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_guards_demotion() -> None:
@@ -2975,7 +2975,7 @@ def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_g
     point = (RequiredPoint("p1", "Объяснить слово."),)
 
     # Case 1: Already-TRANSLATE block (TRANSLATE, GLOSSARY_ONLY, READ_AS_IS -> seg 3 lifted to TRANSLATE).
-    # lexical_hint on untouched seg 2 MUST stay lexical_hint; hint on promoted seg 3 becomes explanation.
+    # lexical_hint on untouched seg 2 MUST stay lexical_hint; vocabulary+lexical_hint on promoted seg 3 is dropped.
     s1 = "He turned away. "
     s2 = "She felt nervous. "
     s3 = "He has gone home."
@@ -3087,7 +3087,7 @@ def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_g
         payload, blocks, aliases, reader_level="a2", english_help=False
     )
 
-    # b1: seg 3 lifted to TRANSLATE; untouched seg 2 keeps lexical_hint, promoted seg 3 becomes explanation
+    # b1: seg 3 lifted to TRANSLATE; untouched seg 2 keeps lexical_hint, promoted seg 3 vocabulary+lexical_hint is dropped
     assert [s.treatment for s in normalized.treatment_plan[0].segments] == [
         BlockTreatment.TRANSLATE,
         BlockTreatment.GLOSSARY_ONLY,
@@ -3102,7 +3102,6 @@ def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_g
     help_by_id = {d.id: d.help_kind for d in normalized.difficulties}
     assert help_by_id == {
         "d-b1-untouched": "lexical_hint",
-        "d-b1-promoted": "explanation",
         "d-b2-untouched": "lexical_hint",
         "auto-vocab-b2-1": "lexical_hint",
     }
@@ -4172,14 +4171,13 @@ def test_unify_verse_stanza_treatments_and_poem_fragment_boundary_guard() -> Non
             ),
         ),
     )
-    # Works for both A2 and B2 (switching promoted lexical_hint -> explanation and not synthesizing auto-vocab).
+    # Works for both A2 and B2 (dropping promoted vocabulary+lexical_hint and not synthesizing auto-vocab).
     for level in ("a2", "b2"):
         norm = normalize_pedagogical_response(
             payload, verse_blocks, aliases, reader_level=level, english_help=False
         )
         assert [item.treatment for item in norm.treatment_plan] == [BlockTreatment.TRANSLATE] * 4
-        assert len(norm.difficulties) == 1
-        assert norm.difficulties[0].help_kind == "explanation"
+        assert norm.difficulties == ()
         validated = validate_content_plan(
             ChapterAnalysisResponse(
                 translation_instructions="Keep voice.",
@@ -4649,3 +4647,412 @@ def test_unify_homogeneous_list_treatments_and_guards() -> None:
     )
     assert one_tr_changed is False
     assert [i.treatment for i in untouched_one_tr] == [i.treatment for i in one_tr_items]
+
+
+def test_promoted_glossary_only_drops_vocabulary_lexical_hint_and_prunes_byr_across_all_paths() -> None:
+    """Promoted GLOSSARY_ONLY->TRANSLATE drops model & auto vocabulary+lexical_hint and prunes BYR evidence across all 3 call sites."""
+    from linguary.application.analysis_merge import (
+        normalize_pedagogical_response,
+        unify_chapter_analysis_verse_stanzas,
+    )
+    from linguary.application.llm_dto import (
+        HelpEvidenceResponse,
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+        artifact_key,
+    )
+
+    point = (RequiredPoint("p1", "Объяснить слово."),)
+
+    # 1. A2 normalize_pedagogical_response:
+    #    - b1 (GLOSSARY_ONLY -> TRANSLATE via stoplist): drops model & auto vocabulary+lexical_hint,
+    #      prunes BYR evidence, keeps vocabulary+explanation, switches idiom+lexical_hint -> explanation.
+    #    - b2 (READ_AS_IS -> TRANSLATE via stoplist, full BYR coverage): preserves vocabulary+lexical_hint and BYR evidence.
+    #    - b3 (mixed segments: seg 1 GLOSSARY_ONLY kept, seg 2 GLOSSARY_ONLY -> TRANSLATE): drops seg 2 hint, keeps seg 1 hint.
+    b1 = make_analysis_block(
+        section_id=SECTION_ID,
+        order=0,
+        text="What are you waiting for? She felt gloomy and bitter.",
+    )
+    b2 = make_analysis_block(
+        section_id=SECTION_ID,
+        order=1,
+        text="He has gone to look at the strange wooden crate.",
+    )
+    seg1 = "She felt nervous. "
+    seg2 = "He has gone home."
+    b3 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=2, text=seg1 + seg2),
+        segments=(
+            BlockSegment(0, len(seg1), 0),
+            BlockSegment(len(seg1), len(seg1) + len(seg2), 1),
+        ),
+    )
+    blocks_a2 = (b1, b2, b3)
+    aliases_a2 = {f"b{i + 1}": b.id for i, b in enumerate(blocks_a2)}
+    payload_a2 = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse(
+                "b3",
+                BlockTreatment.GLOSSARY_ONLY,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+        ),
+        before_you_read=(
+            BeforeYouReadEntryResponse("gloomy", "Слово означает мрачный и угрюмый."),
+            BeforeYouReadEntryResponse("crate", "Большой деревянный ящик для вещей."),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-b1-vocab-hint",
+                (QuotedSourceAnchorResponse("b1", "gloomy"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "auto-vocab-b1-1",
+                (QuotedSourceAnchorResponse("b1", "bitter"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "Дать краткую контекстную словарную подсказку для «bitter»."),),
+            ),
+            QuotedDifficultyResponse(
+                "d-b1-vocab-expl",
+                (QuotedSourceAnchorResponse("b1", "bitter"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "explanation",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b1-idiom-hint",
+                (QuotedSourceAnchorResponse("b1", "waiting for"),),
+                "b1",
+                "idiom",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b2-byr-kept",
+                (QuotedSourceAnchorResponse("b2", "crate"),),
+                "b2",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b3-seg1-kept",
+                (QuotedSourceAnchorResponse("b3", "nervous"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b3-seg2-dropped",
+                (QuotedSourceAnchorResponse("b3", "gone"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                "d-b1-vocab-hint",
+                "p1",
+                "before_you_read.explanation",
+                "b1",
+                0,
+                "Слово означает мрачный и угрюмый.",
+            ),
+            HelpEvidenceResponse(
+                "d-b2-byr-kept",
+                "p1",
+                "before_you_read.explanation",
+                "b2",
+                1,
+                "Большой деревянный ящик для вещей.",
+            ),
+        ),
+    )
+    norm_a2 = normalize_pedagogical_response(
+        payload_a2, blocks_a2, aliases_a2, reader_level="a2", english_help=False
+    )
+    assert [item.treatment for item in norm_a2.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert [s.treatment for s in norm_a2.treatment_plan[2].segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert {d.id: d.help_kind for d in norm_a2.difficulties} == {
+        "d-b1-vocab-expl": "explanation",
+        "d-b1-idiom-hint": "explanation",
+        "d-b2-byr-kept": "lexical_hint",
+        "d-b3-seg1-kept": "lexical_hint",
+    }
+    assert [ev.difficulty_id for ev in norm_a2.before_you_read_evidence] == ["d-b2-byr-kept"]
+
+    # 2. Non-A2 normalize_pedagogical_response (`else:` branch, verse unification):
+    verse_lines = (
+        "Enter, stranger, but take heed",
+        "Of what awaits the sin of greed,",
+        "For those who take, but do not earn,",
+        "Must pay most dearly in their turn.",
+    )
+    verse_blocks = tuple(
+        replace(
+            make_analysis_block(section_id=SECTION_ID, order=i, text=line),
+            inline_annotations=(InlineAnnotation(InlineAnnotationType.ITALIC, 0, len(line)),),
+        )
+        for i, line in enumerate(verse_lines)
+    )
+    verse_aliases = {f"b{i + 1}": b.id for i, b in enumerate(verse_blocks)}
+    verse_payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse("b3", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+        before_you_read=(
+            BeforeYouReadEntryResponse("earn", "Зарабатывать честным трудом."),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-earn-vocab",
+                (QuotedSourceAnchorResponse("b3", "earn"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-earn-expl",
+                (QuotedSourceAnchorResponse("b3", "do not earn"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "explanation",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-turn-idiom",
+                (QuotedSourceAnchorResponse("b4", "in their turn"),),
+                "b4",
+                "idiom",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                "d-earn-vocab",
+                "p1",
+                "before_you_read.explanation",
+                "b3",
+                0,
+                "Зарабатывать честным трудом.",
+            ),
+        ),
+    )
+    norm_b2 = normalize_pedagogical_response(
+        verse_payload, verse_blocks, verse_aliases, reader_level="b2", english_help=False
+    )
+    assert {d.id: d.help_kind for d in norm_b2.difficulties} == {
+        "d-earn-expl": "explanation",
+        "d-turn-idiom": "explanation",
+    }
+    assert norm_b2.before_you_read_evidence == ()
+
+    # 3. unify_chapter_analysis_verse_stanzas (cross-fragment merged ChapterAnalysis):
+    p1 = replace(make_analysis_block(section_id=SECTION_ID, order=0, text="Line one of verse"), type=BlockType.POEM)
+    p2 = replace(make_analysis_block(section_id=SECTION_ID, order=1, text="Line two with heed and turn."), type=BlockType.POEM)
+    p3 = make_analysis_block(section_id=SECTION_ID, order=2, text="Next paragraph with gloom.")
+    heed_start = p2.text.index("heed")
+    turn_start = p2.text.index("turn")
+    gloom_start = p3.text.index("gloom")
+    d_model_vocab = Difficulty(
+        id="d-model-vocab",
+        anchors=(SourceAnchor(p2.id, heed_start, heed_start + 4, "heed"),),
+        owner_block_id=p2.id,
+        kind="vocabulary",
+        priority="useful",
+        help_kind="lexical_hint",
+        required_points=point,
+    )
+    d_auto_vocab = Difficulty(
+        id="auto-vocab-p2-1",
+        anchors=(SourceAnchor(p2.id, turn_start, turn_start + 4, "turn"),),
+        owner_block_id=p2.id,
+        kind="vocabulary",
+        priority="useful",
+        help_kind="lexical_hint",
+        required_points=(RequiredPoint("p1", "Дать краткую контекстную словарную подсказку для «turn»."),),
+    )
+    d_vocab_expl = Difficulty(
+        id="d-vocab-expl",
+        anchors=(SourceAnchor(p2.id, heed_start, heed_start + 4, "heed"),),
+        owner_block_id=p2.id,
+        kind="vocabulary",
+        priority="useful",
+        help_kind="explanation",
+        required_points=point,
+    )
+    d_idiom_hint = Difficulty(
+        id="d-idiom-hint",
+        anchors=(SourceAnchor(p2.id, turn_start, turn_start + 4, "turn"),),
+        owner_block_id=p2.id,
+        kind="idiom",
+        priority="useful",
+        help_kind="lexical_hint",
+        required_points=point,
+    )
+    d_other_kept = Difficulty(
+        id="d-other-kept",
+        anchors=(SourceAnchor(p3.id, gloom_start, gloom_start + 5, "gloom"),),
+        owner_block_id=p3.id,
+        kind="vocabulary",
+        priority="useful",
+        help_kind="lexical_hint",
+        required_points=point,
+    )
+    ev_dropped = HelpEvidence(
+        "d-model-vocab",
+        "p1",
+        "before_you_read.explanation",
+        p2.id,
+        artifact_key("before_you_read.explanation", p2.id, {"expression": "heed", "explanation": "Внимание."}),
+        "Внимание.",
+    )
+    ev_kept = HelpEvidence(
+        "d-other-kept",
+        "p1",
+        "before_you_read.explanation",
+        p3.id,
+        artifact_key("before_you_read.explanation", p3.id, {"expression": "gloom", "explanation": "Мрак."}),
+        "Мрак.",
+    )
+    merged_analysis = ChapterAnalysis(
+        id="a1",
+        section_id=SECTION_ID,
+        coverage_status=CoverageStatus.COMPLETE,
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=TreatmentPlan(
+            section_id=SECTION_ID,
+            items=(
+                TreatmentPlanItem(p1.id, BlockTreatment.TRANSLATE),
+                TreatmentPlanItem(p2.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItem(p3.id, BlockTreatment.GLOSSARY_ONLY),
+            ),
+        ),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(d_model_vocab, d_auto_vocab, d_vocab_expl, d_idiom_hint, d_other_kept),
+            before_you_read_evidence=(ev_dropped, ev_kept),
+        ),
+    )
+    unified = unify_chapter_analysis_verse_stanzas(merged_analysis, (p1, p2, p3), english_help=False)
+    assert unified.content_plan is not None
+    assert {d.id: d.help_kind for d in unified.content_plan.difficulties} == {
+        "d-vocab-expl": "explanation",
+        "d-idiom-hint": "explanation",
+        "d-other-kept": "lexical_hint",
+    }
+    assert unified.content_plan.before_you_read_evidence == (ev_kept,)
+
+
+def test_validate_content_plan_byr_disabled_omits_byr_in_lexical_help_channel() -> None:
+    """When byr_enabled=False, lexical_help_channel wording omits BYR."""
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    block = make_analysis_block(section_id=SECTION_ID, order=0, text="The eerie wind blew coldly.")
+    aliases = {"b1": block.id}
+    texts = {block.id: block.text}
+    visible = {"b1": block.text}
+    for mode in (BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS):
+        payload = ChapterAnalysisResponse(
+            translation_instructions="Keep voice.",
+            chapter_summary="Summary.",
+            treatment_plan=(TreatmentPlanItemResponse("b1", mode),),
+            content_plan=QuotedContentPlanResponse(
+                version=3,
+                profile="content-plan-v3",
+                difficulties=(
+                    QuotedDifficultyResponse(
+                        "d-eerie",
+                        (QuotedSourceAnchorResponse("b1", "eerie"),),
+                        "b1",
+                        "vocabulary",
+                        "useful",
+                        "lexical_hint",
+                        (RequiredPoint("p1", "eerie — жуткий."),),
+                    ),
+                ),
+            ),
+        )
+        with pytest.raises(AnalysisMergeError) as err_no_byr:
+            validate_content_plan(
+                payload,
+                aliases,
+                texts,
+                visible_texts_by_alias=visible,
+                blocks=(block,),
+                byr_enabled=False,
+            )
+        assert err_no_byr.value.violation is not None
+        assert err_no_byr.value.violation.rule_code == "lexical_help_channel"
+        assert "BYR" not in str(err_no_byr.value)
+        assert "GLOSSARY_ONLY" in str(err_no_byr.value)
+
+        with pytest.raises(AnalysisMergeError) as err_with_byr:
+            validate_content_plan(
+                payload,
+                aliases,
+                texts,
+                visible_texts_by_alias=visible,
+                blocks=(block,),
+                byr_enabled=True,
+            )
+        assert err_with_byr.value.violation is not None
+        assert err_with_byr.value.violation.rule_code == "lexical_help_channel"
+        assert "BYR" in str(err_with_byr.value)
+

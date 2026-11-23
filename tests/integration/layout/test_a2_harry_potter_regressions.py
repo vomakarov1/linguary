@@ -899,7 +899,6 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         for difficulty in harry_regression.normalized.difficulties
         if not difficulty.id.startswith("auto-vocab-")
     } == {
-        "d-bundle": "explanation",
         "d-demanded": "lexical_hint",
         "d-snapped": "lexical_hint",
     }

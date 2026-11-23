@@ -177,7 +177,7 @@ class TranslationResultValidator:
         for block in payload.blocks:
             single = replace(payload, blocks=(block,))
             self._ensure_block(
-                content_violation(single, unit=unit),
+                content_violation(single, unit=unit, strict_v3=policy_level >= 3),
                 expected,
                 block_id=block.source_block_id,
                 rule_code="content_violation",

@@ -2555,5 +2555,401 @@ def test_validation_policy_v3_preserves_all_v2_checks_and_rejects_unknown_policy
         validate(clean_payload, unit=quote_unit, validation_policy="v99")
 
 
+def test_strict_v3_rejects_bare_glossary_hints_on_translate_and_checks_mixed_phrasal_verbs() -> None:
+    """Under validation_policy='v3', bare glossary_hints without note are forbidden on TRANSLATE and non-GLOSSARY_ONLY segments."""
+    from linguary.application.validators.treatment import (
+        _hint_matches_glossary_texts,
+        content_violation,
+    )
+
+    # 1. Pure whole-block TRANSLATE: bare hint rejected under v3, accepted under v2, hint with note accepted under v3.
+    block = make_block(order=0, text="The entailed estate stood alone.")
+    unit = make_unit((block,))
+    for bare_note in (None, "", "   "):
+        bare_payload = make_response(
+            (
+                make_block_result(
+                    block,
+                    glossary_hints=(make_hint(original="entailed", note=bare_note),),
+                ),
+            )
+        )
+        assert validate(bare_payload, unit=unit, validation_policy="v2")[0].glossary_hints[0].original == "entailed"
+        err = rejection(bare_payload, unit=unit, validation_policy="v3")
+        assert err.violation is not None
+        assert err.violation.rule_code == "content_violation"
+        assert content_violation(bare_payload, unit=unit, strict_v3=True) is not None
+        assert content_violation(bare_payload, unit=unit, strict_v3=False) is None
+
+    noted_payload = make_response(
+        (
+            make_block_result(
+                block,
+                glossary_hints=(
+                    make_hint(
+                        original="entailed",
+                        note="Юридический термин: передаётся по майорату.",
+                    ),
+                ),
+            ),
+        )
+    )
+    assert validate(noted_payload, unit=unit, validation_policy="v3")[0].glossary_hints[0].note
+
+    # 2. Pure segmented (TRANSLATE, TRANSLATE) and mixed (TRANSLATE, READ_AS_IS): bare hints rejected under v3.
+    for modes in (
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        (BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+    ):
+        seg_unit, seg_block = _segmented(
+            ("The entailed estate stood alone.", " A clear sentence."),
+            modes,
+        )
+        seg_translations = (
+            ((1, "Заповедное имение стояло особняком."), (2, "Ясное предложение."))
+            if modes == (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE)
+            else ((1, "Заповедное имение стояло особняком."),)
+        )
+        seg_bare = _segmented_response(
+            seg_block,
+            seg_translations,
+            treatment=BlockTreatment.TRANSLATE,
+            hints=(make_hint(original="entailed", note=None),),
+        )
+        assert validate(seg_bare, unit=seg_unit, validation_policy="v2")[0].glossary_hints[0].original == "entailed"
+        seg_err = rejection(seg_bare, unit=seg_unit, validation_policy="v3")
+        assert seg_err.violation is not None
+        assert seg_err.violation.rule_code == "content_violation"
+
+        seg_noted = _segmented_response(
+            seg_block,
+            seg_translations,
+            treatment=BlockTreatment.TRANSLATE,
+            hints=(
+                make_hint(
+                    original="entailed",
+                    note="Юридический термин о праве наследования.",
+                ),
+            ),
+        )
+        assert validate(seg_noted, unit=seg_unit, validation_policy="v3")[0].glossary_hints[0].note
+
+    # 3. Light-verb phrasal verbs via _infinitive_end in _hint_matches_glossary_texts:
+    #    "to go off" <-> "It went off." (all words in _HINT_STOPWORDS!) and "to make out" <-> "He made it out."
+    assert _hint_matches_glossary_texts("to go off", ("It went off.",)) is True
+    assert _hint_matches_glossary_texts("to make out", ("He made it out in the fog.",)) is True
+    assert _hint_matches_glossary_texts("to go off", ("She went home.",)) is False
+
+    # 4. Mixed (TRANSLATE, GLOSSARY_ONLY): bare "to go off" matching "went off" in GLOSSARY_ONLY passes under v3,
+    #    while an extra bare hint from the TRANSLATE segment is rejected under v3.
+    mixed_unit, mixed_block = _segmented(
+        ("The entailed estate stood alone.", " It went off."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+    )
+    mixed_phrasal_ok = _segmented_response(
+        mixed_block,
+        ((1, "Заповедное имение стояло особняком."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="to go off", translation="взорваться / сработать"),),
+    )
+    assert validate(mixed_phrasal_ok, unit=mixed_unit, validation_policy="v3")[0].glossary_hints[0].original == "to go off"
+
+    mixed_extra_bare = _segmented_response(
+        mixed_block,
+        ((1, "Заповедное имение стояло особняком."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(
+            make_hint(original="to go off", translation="взорваться / сработать"),
+            make_hint(original="entailed", note=None),
+        ),
+    )
+    assert len(validate(mixed_extra_bare, unit=mixed_unit, validation_policy="v2")[0].glossary_hints) == 2
+    mixed_err = rejection(mixed_extra_bare, unit=mixed_unit, validation_policy="v3")
+    assert mixed_err.violation is not None
+    assert mixed_err.violation.rule_code == "content_violation"
+
+    # Extra hint from TRANSLATE WITH non-empty note alongside bare GLOSSARY_ONLY hint passes under v3.
+    mixed_extra_noted = _segmented_response(
+        mixed_block,
+        ((1, "Заповедное имение стояло особняком."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(
+            make_hint(original="to go off", translation="взорваться / сработать"),
+            make_hint(original="entailed", note="Ограниченное право наследования."),
+        ),
+    )
+    assert len(validate(mixed_extra_noted, unit=mixed_unit, validation_policy="v3")[0].glossary_hints) == 2
+
+    # 5. Mixed (GLOSSARY_ONLY, READ_AS_IS): bare hint from READ_AS_IS is rejected under v3.
+    gr_unit, gr_block = _segmented(
+        ("It went off.", " She smiled."),
+        (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS),
+    )
+    gr_bad = _segmented_response(
+        gr_block,
+        (),
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(
+            make_hint(original="to go off", translation="сработать"),
+            make_hint(original="smiled", translation="улыбнулась", note=None),
+        ),
+    )
+    gr_err = rejection(gr_bad, unit=gr_unit, validation_policy="v3")
+    assert gr_err.violation is not None
+    assert gr_err.violation.rule_code == "content_violation"
+
+
+def test_resolve_response_evidence_binds_collocation_with_source_texts() -> None:
+    """resolve_response_evidence(..., source_texts=...) binds `to wrinkle one’s nose` to anchor `wrinkled`."""
+    from linguary.application.llm_dto import TranslationResultResponse
+    from linguary.application.validators.content_plan import (
+        resolve_response_evidence,
+        validate_content_coverage,
+    )
+    from linguary.domain import GlossaryHint
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    source_text = "Aunt Petunia wrinkled her nose at the smell."
+    start = source_text.index("wrinkled")
+    end = start + len("wrinkled")
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                "d-wrinkle",
+                (SourceAnchor("b1", start, end, "wrinkled"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "Дать контекстную подсказку для collocation."),),
+            ),
+        ),
+    )
+    res = BlockProcessingResult(
+        "b1",
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("to wrinkle one’s nose", "сморщить нос"),),
+    )
+    payload = TranslationResultResponse(content_evidence=())
+
+    # Without source_texts, single-verb anchor "wrinkled" cannot verify "one's nose" in block text.
+    unbound = resolve_response_evidence(plan, payload, (res,), (), owner_block_ids=("b1",))
+    assert unbound.evidence == ()
+
+    # With source_texts, _hint_quote_matches_anchor matches verb + _infinitive_end(_ONE_SLOT) in source_block_text.
+    bound = resolve_response_evidence(
+        plan,
+        payload,
+        (res,),
+        (),
+        owner_block_ids=("b1",),
+        source_texts={"b1": source_text},
+    )
+    assert len(bound.evidence) == 1
+    assert bound.evidence[0].difficulty_id == "d-wrinkle"
+    assert bound.evidence[0].artifact_kind == "glossary_hint.translation"
+    assert bound.evidence[0].body_excerpt == "сморщить нос"
+
+    checked = validate_content_coverage(
+        plan,
+        (res,),
+        (),
+        bound,
+        owner_block_ids=("b1",),
+        source_texts={"b1": source_text},
+        validators_version=4,
+    )
+    assert len(checked) == 1
+
+    # End-to-end wiring: TranslationCall (block_processing.py) and CorrectChapter._candidates
+    # thread source_texts into resolve_response_evidence.
+    import asyncio
+    from types import SimpleNamespace
+
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.correction import CorrectionInputs
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        ChapterCorrectionResponse,
+        CorrectedBlockResponse,
+        CorrectionSnapshotV2,
+    )
+    from linguary.application.ports.llm import LLMResponse
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.correct_chapter import CorrectChapter
+    from linguary.domain import (
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+    )
+
+    doc_block = make_block(order=0, text=source_text)
+    doc_section = DocumentSection(
+        id=doc_block.section_id,
+        document_id="book-colloc",
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=(doc_block,),
+    )
+    doc = CanonicalDocument(
+        id="book-colloc",
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(doc_section,),
+    )
+    colloc_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                "d-wrinkle",
+                (SourceAnchor(doc_block.id, start, end, "wrinkled"),),
+                doc_block.id,
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                (RequiredPoint("p1", "Дать контекстную подсказку для collocation."),),
+            ),
+        ),
+    )
+    t_plan = TreatmentPlan.of_treatments(
+        doc_section.id, ((doc_block.id, BlockTreatment.GLOSSARY_ONLY),)
+    )
+    doc_analysis = ChapterAnalysis.create(
+        id="analysis-colloc",
+        section_id=doc_section.id,
+        treatment_plan=t_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(doc_block.id,),
+        content_plan=colloc_plan,
+    )
+    doc_unit = TranslationUnit.of_blocks(id="unit-colloc", blocks=(doc_block,), plan=t_plan)
+    call_ctx = ContextBuilder(content_plan_profile="content-plan-v3").for_translation_unit(
+        document=doc,
+        section=doc_section,
+        unit=doc_unit,
+        analysis=doc_analysis,
+        glossary=GlossarySnapshot(entries=()),
+    )
+    llm_payload = make_response(
+        (
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(
+                    make_hint(original="to wrinkle one’s nose", translation="сморщить нос"),
+                ),
+            ),
+        )
+    )
+
+    class _CollocLLM:
+        async def generate(self, request):
+            return LLMResponse(
+                payload=llm_payload,
+                provider="fake",
+                model="gpt-test",
+                truncated=False,
+                call_context=request.call_context,
+            )
+
+    call = TranslationCall(
+        unit_of_work=None,
+        llm_client=_CollocLLM(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=make_validator(),
+        sleep=None,
+    )
+    call_res = asyncio.run(
+        call.request(
+            call_ctx,
+            unit=doc_unit,
+            target_language=TARGET_LANGUAGE,
+            note_ids=note_ids(),
+            glossary=GlossarySnapshot(entries=()),
+        )
+    )
+    assert len(call_res.results[0].content_evidence.evidence) == 1
+    assert call_res.results[0].content_evidence.evidence[0].body_excerpt == "сморщить нос"
+
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 500,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    prev_res = BlockProcessingResult(
+        block_id=doc_block.id,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("to wrinkle one’s nose", "наморщить нос"),),
+    )
+    corr_inputs = CorrectionInputs(
+        document=doc,
+        section=doc_section,
+        analysis=doc_analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot(entries=())),
+        conditions=SimpleNamespace(
+            id="cond-1",
+            payload={"schema_version": 1, "versions": {"validators": 3}, "reader_level": "b2"},
+        ),
+        snapshot=snapshot,
+        blocks=(doc_block,),
+        results={doc_block.id: prev_res},
+        bindings={doc_block.id: None},
+    )
+    fake_tx = SimpleNamespace(work=SimpleNamespace(list_correction_candidates=lambda *a, **kw: ()))
+    corrector = CorrectChapter(
+        unit_of_work=None,
+        llm_client=None,
+        snapshot=snapshot,
+        validator=make_validator(),
+    )
+    corrected, = corrector._candidates(
+        fake_tx,
+        corr_inputs,
+        ChapterCorrectionResponse(
+            (
+                CorrectedBlockResponse(
+                    block_id=doc_block.id,
+                    translated_text=None,
+                    glossary_hints=(
+                        make_hint(original="to wrinkle one’s nose", translation="сморщить нос"),
+                    ),
+                    language_notes=(),
+                ),
+            )
+        ),
+    )
+    assert corrected.content_evidence is not None
+    assert len(corrected.content_evidence.evidence) == 1
+    assert corrected.content_evidence.evidence[0].body_excerpt == "сморщить нос"
+
+
+
+
 
 

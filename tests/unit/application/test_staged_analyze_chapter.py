@@ -1477,7 +1477,7 @@ async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_
 
 
 async def test_a2_promoted_glossary_only_dialogue_switches_lexical_hint_to_explanation(stored_book):
-    """Only a GLOSSARY_ONLY dialogue that becomes TRANSLATE changes lexical_hint to explanation."""
+    """A GLOSSARY_ONLY dialogue that becomes TRANSLATE drops vocabulary+lexical_hint while BYR-covered READ_AS_IS keeps lexical_hint."""
     _, uow, _ = stored_book
     promoted = _block(0, _LONG_QUOTE)
     covered = _block(1, _LONG_CRATE)
@@ -1501,12 +1501,12 @@ async def test_a2_promoted_glossary_only_dialogue_switches_lexical_hint_to_expla
     assert plan.treatment_for(covered.id) is BlockTreatment.TRANSLATE
     assert plan.treatment_for(kept.id) is BlockTreatment.GLOSSARY_ONLY
     by_quote = {item.anchors[0].quote: item.help_kind for item in result.analysis.content_plan.difficulties}
-    assert by_quote == {'box': 'explanation', 'crate': 'lexical_hint', 'Go': 'lexical_hint'}
+    assert by_quote == {'crate': 'lexical_hint', 'Go': 'lexical_hint'}
     with uow.transaction() as tx:
         saved = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.PEDAGOGICAL)
     saved_help = {item['anchors'][0]['quote']: item['help_kind']
                   for item in saved.payload['response']['difficulties']}
-    assert saved_help['box'] == 'explanation'
+    assert 'box' not in saved_help
     assert saved_help['crate'] == 'lexical_hint'
 
     one_pass_block = _block(0, _LONG_QUOTE)
@@ -1520,7 +1520,7 @@ async def test_a2_promoted_glossary_only_dialogue_switches_lexical_hint_to_expla
         language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=1),
         glossary_confidence_threshold=.8, context_builder=builder('a2'))(COMMAND)
     assert single.analysis.treatment_plan.treatment_for(section.blocks[0].id) is BlockTreatment.TRANSLATE
-    assert single.analysis.content_plan.difficulties[0].help_kind == 'explanation'
+    assert single.analysis.content_plan.difficulties == ()
 
 
 async def test_a2_elementary_short_dialogues_and_non_dialogue_lines_keep_mode(stored_book):
@@ -1654,7 +1654,8 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
     assert [segment.treatment for segment in normalized.treatment_plan[1].segments] == [
         BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY,
     ]
-    assert [item.help_kind for item in normalized.difficulties] == ['explanation', 'lexical_hint']
+    assert [item.help_kind for item in normalized.difficulties] == ['lexical_hint']
+    assert [item.id for item in normalized.difficulties] == ['d-slept']
     combined = ChapterAnalysisResponse(
         translation_instructions='Keep the voice.',
         chapter_summary='A speaker waits by the lane.',
@@ -1668,7 +1669,6 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
     )
     assert validated is not None
     assert {item.anchors[0].quote: item.help_kind for item in validated.difficulties} == {
-        'lane': 'explanation',
         'slept': 'lexical_hint',
     }
     fragment = FragmentAnalysis.of_response(
@@ -2153,6 +2153,10 @@ def test_a2_chapter_title_heading_promotes_to_translate_and_drops_from_no_one_gr
                 'd-letters', (QuotedSourceAnchorResponse('b3', 'Letters'),), 'b3',
                 'vocabulary', 'useful', 'lexical_hint', point,
             ),
+            QuotedDifficultyResponse(
+                'd-letters-expl', (QuotedSourceAnchorResponse('b3', 'The Letters'),), 'b3',
+                'vocabulary', 'useful', 'explanation', point,
+            ),
             grammar('d-paragraph', 'b4'),
         ),
         before_you_read_evidence=(
@@ -2173,7 +2177,7 @@ def test_a2_chapter_title_heading_promotes_to_translate_and_drops_from_no_one_gr
     ]
     assert {item.id: item.help_kind for item in normalized.difficulties} == {
         'd-from-evidenced': 'explanation',
-        'd-letters': 'explanation',
+        'd-letters-expl': 'explanation',
         'd-paragraph': 'explanation',
     }
 
@@ -2187,7 +2191,7 @@ def test_a2_chapter_title_heading_promotes_to_translate_and_drops_from_no_one_gr
         BlockTreatment.READ_AS_IS,
     ]
     assert [item.id for item in untouched.difficulties] == [
-        'd-from', 'd-from-evidenced', 'd-letters', 'd-paragraph',
+        'd-from', 'd-from-evidenced', 'd-letters', 'd-letters-expl', 'd-paragraph',
     ]
 
 
@@ -5048,6 +5052,72 @@ async def test_pedagogical_max_fragment_blocks_budget_and_balanced_split(stored_
     result_60 = await ac_60(COMMAND)
     assert result_60.analysis.is_complete
     assert client_60.pedagogical_sizes == [60]
+
+
+async def test_a2_analyze_chapter_lexical_help_channel_omits_byr(stored_book):
+    """AnalyzeChapter passes byr_enabled=False for A2 content-plan-v3 so repair omits BYR in both staged and one-pass paths."""
+    from analysis_fakes import analysis_reply
+
+    _, uow, _ = stored_book
+    client = FakeLLMClient([
+        narrative(),
+        pedagogical(
+            summary=A2_SUMMARY,
+            difficulties=[_vocab('b1', 'Holmes', 'd1', help_kind='lexical_hint')],
+        ),
+        pedagogical(summary=A2_SUMMARY),
+    ])
+    result = await scenario(uow, client, context=builder('a2'), attempts=2)(COMMAND)
+    assert result.analysis.is_complete
+    assert [r.stage for r in client.requests] == [NARRATIVE, PEDAGOGICAL, PEDAGOGICAL]
+    repair = client.requests[2].repair_instructions[-1]
+    assert 'GLOSSARY_ONLY' in repair
+    assert 'BYR' not in repair
+
+    _store(uow, (_block(0, _LONG_QUOTE),))
+    one_pass_client = FakeLLMClient([
+        analysis_reply(
+            aliases=('b1',),
+            treatment='TRANSLATE',
+            chapter_summary=A2_SUMMARY,
+            before_you_read=[],
+            content_plan=dict(
+                version=3,
+                profile='content-plan-v3',
+                before_you_read_evidence=[],
+                context_facts=[],
+                difficulties=[_vocab('b1', 'box', 'd1', help_kind='lexical_hint')],
+            ),
+        ),
+        analysis_reply(
+            aliases=('b1',),
+            treatment='TRANSLATE',
+            chapter_summary=A2_SUMMARY,
+            before_you_read=[],
+            content_plan=dict(
+                version=3,
+                profile='content-plan-v3',
+                before_you_read_evidence=[],
+                context_facts=[],
+                difficulties=[],
+            ),
+        ),
+    ])
+    one_pass = AnalyzeChapter(
+        unit_of_work=uow,
+        llm_client=one_pass_client,
+        language_detector=FakeLanguageDetector(),
+        retry_policy=RetryPolicy(max_attempts=2),
+        glossary_confidence_threshold=.8,
+        context_builder=builder('a2'),
+    )
+    one_pass_result = await one_pass(COMMAND)
+    assert one_pass_result.analysis.is_complete
+    one_pass_repair = one_pass_client.requests[1].repair_instructions[-1]
+    assert 'GLOSSARY_ONLY' in one_pass_repair
+    assert 'BYR' not in one_pass_repair
+
+
 
 
 
