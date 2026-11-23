@@ -1,10 +1,16 @@
 """Structural completeness validation against final visible help bodies."""
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import re
 
 from linguary.application.retry_policy import ResultValidationError
-from linguary.domain import DomainError, without_footnote_markers
+from linguary.domain import (
+    BlockProcessingResult,
+    BlockTreatment,
+    DocumentBlock,
+    DomainError,
+    without_footnote_markers,
+)
 from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
 from linguary.domain.llm_log import Violation
 
@@ -60,19 +66,222 @@ def _substance(text):
     return ''.join(re.findall(r'\w+', without_footnote_markers(text).casefold()))
 
 
-def validate_note_sources(results, source_texts):
+_EXCERPT_QUOTE_NORM = str.maketrans({
+    '“': '"',
+    '”': '"',
+    '«': '"',
+    '»': '"',
+    '„': '"',
+    '‘': "'",
+    '’': "'",
+    'ʼ': "'",
+    '`': "'",
+    '‚': "'",
+    '\u00ad': '',
+    '\xa0': ' ',
+})
+_EXCERPT_ELLIPSIS_RE = re.compile(r'\s*(?:…|\.{3})\s*')
+_CYRILLIC_WORD_RE = re.compile(r'^[А-Яа-яЁё]+$')
+
+
+def _note_translation_target(
+    result: BlockProcessingResult,
+    *,
+    source_text: str,
+    original_excerpt: str,
+    block: DocumentBlock | None,
+) -> str | None:
+    """Return translated text to ground `translated_excerpt`, or None when not applicable."""
+    from linguary.application.analysis_merge import _quote_spans
+
+    segment_treatments = getattr(result, 'segment_treatments', ()) or ()
+    if block is not None and segment_treatments and len(block.segment_spans) == len(segment_treatments):
+        spans = _quote_spans(source_text, original_excerpt)
+        if not spans:
+            return None
+        segment_translations = getattr(result, 'segment_translations', ()) or ()
+        overlapping_translations: list[str] = []
+        for quote_start, quote_end, _ in spans:
+            span_has_translate = False
+            for index, (seg_span, seg_mode) in enumerate(
+                zip(block.segment_spans, segment_treatments, strict=True)
+            ):
+                if quote_start < seg_span.end and seg_span.start < quote_end and seg_mode is BlockTreatment.TRANSLATE:
+                    span_has_translate = True
+                    if index < len(segment_translations) and segment_translations[index]:
+                        text = segment_translations[index]
+                        if text not in overlapping_translations:
+                            overlapping_translations.append(text)
+            if not span_has_translate:
+                # Never falsely reject notes that can be anchored in a GLOSSARY_ONLY/READ_AS_IS segment.
+                return None
+        if overlapping_translations:
+            return ' '.join(overlapping_translations)
+        return result.translated_text or ''
+    if segment_treatments and not all(mode is BlockTreatment.TRANSLATE for mode in segment_treatments):
+        return None
+    if result.treatment is BlockTreatment.TRANSLATE:
+        return result.translated_text or ''
+    return None
+
+
+def _excerpt_part_regex(
+    part: str,
+    lenient_quote_pattern: Callable[[str], str],
+) -> str | None:
+    stripped = part.strip()
+    if not stripped:
+        return None
+    left_b = r'(?<!\w)' if stripped[0].isalnum() else ''
+    right_b = r'(?!\w)' if stripped[-1].isalnum() else ''
+    return f'{left_b}{lenient_quote_pattern(stripped)}{right_b}'
+
+
+def _single_excerpt_matches(
+    norm_target: str,
+    norm_excerpt: str,
+    lenient_quote_pattern: Callable[[str], str],
+) -> bool:
+    pattern = _excerpt_part_regex(norm_excerpt, lenient_quote_pattern)
+    if pattern is not None:
+        try:
+            if re.search(pattern, norm_target, flags=re.IGNORECASE | re.DOTALL) is not None:
+                return True
+        except re.error:
+            pass
+    stripped = norm_excerpt.strip(' \t\r\n.,;:!?\"\'()[]—–-')
+    if stripped and stripped != norm_excerpt:
+        return _single_excerpt_matches(norm_target, stripped, lenient_quote_pattern)
+    return False
+
+
+def _gapped_excerpt_matches(
+    norm_target: str,
+    parts: list[str],
+    lenient_quote_pattern: Callable[[str], str],
+) -> bool:
+    patterns = [
+        pat
+        for part in parts
+        if (pat := _excerpt_part_regex(part, lenient_quote_pattern)) is not None
+    ]
+    if len(patterns) < 2:
+        return len(patterns) == 1 and _single_excerpt_matches(
+            norm_target, parts[0], lenient_quote_pattern
+        )
+    try:
+        regex = re.compile(r'.*?'.join(patterns), flags=re.IGNORECASE | re.DOTALL)
+    except re.error:
+        return False
+    return regex.search(norm_target) is not None
+
+
+def _cyrillic_inflection_matches(norm_target: str, norm_excerpt: str) -> bool:
+    from linguary.application.validators.language import _word_stem_pattern
+
+    cleaned = norm_excerpt.strip(' \t\r\n.,;:!?\"\'()[]—–-')
+    words = cleaned.split()
+    if not words or len(words) > 4:
+        return False
+    word_patterns: list[str] = []
+    has_inflected_cyrillic = False
+    for word in words:
+        if not _CYRILLIC_WORD_RE.fullmatch(word):
+            return False
+        if len(word) >= 5:
+            stem_pat = _word_stem_pattern(word)
+            if stem_pat.endswith('[а-яё]*'):
+                stem_pat = stem_pat[:-1] + '{0,3}'
+                has_inflected_cyrillic = True
+            word_patterns.append(rf'(?<!\w){stem_pat}(?!\w)')
+        else:
+            word_patterns.append(rf'(?<!\w){re.escape(word)}(?!\w)')
+    if not has_inflected_cyrillic:
+        return False
+    pattern = r'(?:\s|[,;:—–-]\s*)+'.join(word_patterns)
+    return re.search(pattern, norm_target, flags=re.IGNORECASE) is not None
+
+
+def _translated_excerpt_matches_normalized(
+    norm_target: str,
+    norm_excerpt: str,
+    lenient_quote_pattern: Callable[[str], str],
+) -> bool:
+    if _single_excerpt_matches(norm_target, norm_excerpt, lenient_quote_pattern):
+        return True
+    if '…' in norm_excerpt or '...' in norm_excerpt:
+        parts = [part.strip() for part in _EXCERPT_ELLIPSIS_RE.split(norm_excerpt.strip()) if part.strip()]
+        if not parts:
+            return False
+        if len(parts) == 1:
+            return _single_excerpt_matches(norm_target, parts[0], lenient_quote_pattern)
+        if _gapped_excerpt_matches(norm_target, parts, lenient_quote_pattern):
+            return True
+        cleaned_parts = [part.strip(' \t\r\n.,;:!?\"\'()[]—–-') for part in parts]
+        if (
+            all(cleaned_parts)
+            and cleaned_parts != parts
+            and _gapped_excerpt_matches(norm_target, cleaned_parts, lenient_quote_pattern)
+        ):
+            return True
+        return False
+    return _cyrillic_inflection_matches(norm_target, norm_excerpt)
+
+
+def _translated_excerpt_matches(target_text: str, translated_excerpt: str) -> bool:
+    from linguary.application.analysis_merge import _lenient_quote_pattern
+
+    norm_target = target_text.translate(_EXCERPT_QUOTE_NORM)
+    norm_excerpt = translated_excerpt.translate(_EXCERPT_QUOTE_NORM)
+    if _translated_excerpt_matches_normalized(norm_target, norm_excerpt, _lenient_quote_pattern):
+        return True
+    yo_target = norm_target.replace('ё', 'е').replace('Ё', 'Е')
+    yo_excerpt = norm_excerpt.replace('ё', 'е').replace('Ё', 'Е')
+    if yo_target != norm_target or yo_excerpt != norm_excerpt:
+        return _translated_excerpt_matches_normalized(yo_target, yo_excerpt, _lenient_quote_pattern)
+    return False
+
+
+def validate_note_sources(
+    results,
+    source_texts,
+    *,
+    blocks: Mapping[str, DocumentBlock] | None = None,
+    check_translated_excerpt: bool = False,
+):
     """Reject ungrounded or repeated notes before binding final v3 evidence."""
     from linguary.application.analysis_merge import find_quote_span
 
     for result in results:
         seen = set()
+        block = None if blocks is None else blocks.get(result.block_id)
+        source_text = source_texts[result.block_id]
         for note in result.language_notes:
-            if find_quote_span(source_texts[result.block_id], note.original_excerpt) is None:
+            if find_quote_span(source_text, note.original_excerpt) is None:
                 raise _validation_error(
                     f'цитата языковой заметки отсутствует в исходном блоке ({result.block_id})',
                     rule_code='note_quote_missing',
                     block_ids=(result.block_id,),
                 )
+            if (
+                check_translated_excerpt
+                and note.translated_excerpt is not None
+                and note.translated_excerpt.strip()
+            ):
+                target_text = _note_translation_target(
+                    result,
+                    source_text=source_text,
+                    original_excerpt=note.original_excerpt,
+                    block=block,
+                )
+                if target_text is not None and not _translated_excerpt_matches(
+                    target_text, note.translated_excerpt
+                ):
+                    raise _validation_error(
+                        f'перевод цитаты языковой заметки отсутствует в переводе блока ({result.block_id})',
+                        rule_code='note_translated_excerpt_missing',
+                        block_ids=(result.block_id,),
+                    )
             body = _substance(note.note)
             if body in seen:
                 raise _validation_error(

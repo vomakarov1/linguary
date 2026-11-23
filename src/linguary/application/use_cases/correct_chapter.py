@@ -12,7 +12,12 @@ from typing import Any, cast
 from uuid import uuid4
 
 from linguary.application.analysis_merge import find_quote_span
-from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
+from linguary.application.block_processing import (
+    complete_processing,
+    note_chapter_number,
+    note_id_factory,
+    run_note_numbering,
+)
 from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
 from linguary.application.correction import (
     correction_inputs, reconcile_corrections, task_matches_inputs, unchecked_blocks,
@@ -887,7 +892,7 @@ class CorrectChapter:
                 section_id=inputs.section.id,
                 states={'awaiting_review', 'awaiting_human', 'auto_applied', 'accepted', 'kept'})
                 for n in c.payload['result']['language_notes'])
-        notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
+        notes = note_id_factory(chapter_number=_correction_chapter_number(tx, inputs), used=used_note_ids)
         originals = {b.id: b for b in inputs.blocks}
         is_body_section = (
             not getattr(inputs.document, 'is_front_matter', lambda s: False)(inputs.section)
@@ -1097,6 +1102,15 @@ class CorrectChapter:
         return _issue_correction_note_ids(tx, inputs, chosen)
 
 
+def _correction_chapter_number(tx, inputs) -> int:
+    numbering = getattr(inputs, 'note_numbering', None) or run_note_numbering(tx, inputs.run.id)
+    return note_chapter_number(
+        inputs.document,
+        inputs.section,
+        note_numbering=numbering,
+    )
+
+
 def _issue_correction_note_ids(tx, inputs, candidates):
     """Replace temporary note ids after every check has passed."""
     allocator = getattr(getattr(tx, "results", None), "allocate_note_ids", None)
@@ -1117,7 +1131,7 @@ def _issue_correction_note_ids(tx, inputs, candidates):
         return candidates
     issued = allocator(
         inputs.run.id,
-        chapter_number(inputs.document, inputs.section),
+        _correction_chapter_number(tx, inputs),
         len(fresh_ids),
     )
     mapping = dict(zip(fresh_ids, issued, strict=True))

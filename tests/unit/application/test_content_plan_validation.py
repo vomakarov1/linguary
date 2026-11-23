@@ -325,3 +325,107 @@ def test_fragment_assistance_uses_quote_span_and_mutual_full_anchor_glossary_mat
         )
 
 
+def test_validate_note_sources_translated_excerpt_rules():
+    from linguary.application.validators.content_plan import validate_note_sources
+    from linguary.domain import BlockSegment, BlockType, DocumentBlock, SourceReference
+
+    mixed_text = 'He wore a heavy cloak. She opened the wooden door, and she smiled.'
+    cut1 = mixed_text.index(' She opened')
+    block = DocumentBlock.create(
+        document_id='book-1',
+        section_id='sec-1',
+        type=BlockType.PARAGRAPH,
+        order=0,
+        text=mixed_text,
+        source_reference=SourceReference('sec-1.xhtml', '/body/p[1]'),
+        segments=(
+            BlockSegment(0, cut1, 0),
+            BlockSegment(cut1, len(mixed_text), 1),
+        ),
+    )
+    whole_block = DocumentBlock.create(
+        document_id='book-1',
+        section_id='sec-1',
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text='Whether he laughed or cried, he stood firm.',
+        source_reference=SourceReference('sec-1.xhtml', '/body/p[2]'),
+    )
+    texts = {block.id: block.text, whole_block.id: whole_block.text}
+    blocks = {block.id: block, whole_block.id: whole_block}
+
+    # Default check_translated_excerpt=False leaves historical/export behavior intact
+    legacy_bad = BlockProcessingResult(
+        whole_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text='То ли он смеялся, то ли плакал — он устоял.',
+        language_notes=(
+            LanguageNote('n1', whole_block.id, 'stood firm', 'Устойчивое выражение.', 'совершенно другой текст'),
+        ),
+    )
+    validate_note_sources((legacy_bad,), texts)
+
+    # Under check_translated_excerpt=True:
+    # 1. None and blank translated_excerpt are skipped
+    # 2. Gapped match with `…` and `...` + quote/dash normalization passes on TRANSLATE block
+    gapped_and_norm = BlockProcessingResult(
+        whole_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text='— «То ли» он смеялся, то ли плакал — он устоял.',
+        language_notes=(
+            LanguageNote('n1', whole_block.id, 'Whether he laughed', 'Парный союз.', 'то ли … то ли'),
+            LanguageNote('n2', whole_block.id, 'or cried', 'Парный союз 2.', '"То ли" ... плакал - он устоял'),
+            LanguageNote('n3', whole_block.id, 'stood firm', 'Без перевода цитаты.', None),
+            LanguageNote('n4', whole_block.id, 'laughed', 'Пустая цитата.', '   '),
+        ),
+    )
+    validate_note_sources((gapped_and_norm,), texts, blocks=blocks, check_translated_excerpt=True)
+
+    # 3. Hallucinated translated_excerpt fails on TRANSLATE block
+    hallucinated_whole = BlockProcessingResult(
+        whole_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text='То ли он смеялся, то ли плакал.',
+        language_notes=(
+            LanguageNote('n1', whole_block.id, 'stood firm', 'Объяснение.', 'выдуманный перевод'),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as whole_exc:
+        validate_note_sources((hallucinated_whole,), texts, blocks=blocks, check_translated_excerpt=True)
+    assert whole_exc.value.violation is not None
+    assert whole_exc.value.violation.rule_code == 'note_translated_excerpt_missing'
+    assert whole_exc.value.violation.block_ids == (whole_block.id,)
+
+    # 4. Mixed block: note anchored in GLOSSARY_ONLY segment does NOT falsely fail
+    mixed_glossary_note = BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text='Она открыла деревянную дверь и улыбнулась.',
+        glossary_hints=(GlossaryHint('cloak', 'плащ', 'Длинная накидка.'),),
+        segment_treatments=(BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+        segment_translations=(None, 'Она открыла деревянную дверь и улыбнулась.'),
+        language_notes=(
+            LanguageNote('n1', block.id, 'heavy cloak', 'Старинная накидка.', 'тяжёлый плащ'),
+        ),
+    )
+    validate_note_sources((mixed_glossary_note,), texts, blocks=blocks, check_translated_excerpt=True)
+
+    # 5. Mixed block: note anchored in TRANSLATE segment with hallucinated excerpt fails
+    mixed_bad_translate_note = BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text='Она открыла деревянную дверь и улыбнулась.',
+        glossary_hints=(GlossaryHint('cloak', 'плащ', 'Длинная накидка.'),),
+        segment_treatments=(BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+        segment_translations=(None, 'Она открыла деревянную дверь и улыбнулась.'),
+        language_notes=(
+            LanguageNote('n1', block.id, 'wooden door', 'Пояснение.', 'железные ворота'),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as mixed_exc:
+        validate_note_sources((mixed_bad_translate_note,), texts, blocks=blocks, check_translated_excerpt=True)
+    assert mixed_exc.value.violation is not None
+    assert mixed_exc.value.violation.rule_code == 'note_translated_excerpt_missing'
+
+
+

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from linguary.application.a2_core_vocab import is_trivial_a1_hint
 from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
+from linguary.application.explained_expressions import expression_words
 from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import (
@@ -22,6 +23,7 @@ from linguary.application.layout.notes import (
     _hint_evidence_keys,
     _hint_only_dropped,
     _ids_for,
+    _note_evidence_key,
     _note_only_dropped,
     block_notes,
     vocabulary_dedup_key,
@@ -418,6 +420,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     dropped_difficulty_ids=dropped,
                     chapter_num=current_chapter_num,
                     history=grammar_history,
+                    plan=plan,
                 )
                 notes = block_notes(
                     block,
@@ -1289,25 +1292,52 @@ def _grammar_note_rule(note: LanguageNote) -> tuple[str, int, int] | None:
     return None
 
 
+_CULTURAL_OR_TERM_CAP = 1
+
+
+def _is_cultural_note(
+    note: LanguageNote,
+    evidences: Sequence[HelpEvidence],
+    known: Mapping[str, Difficulty],
+) -> bool:
+    if not known:
+        return False
+    ids = _ids_for(evidences, {_note_evidence_key(note)})
+    return any(
+        item_id in known and known[item_id].kind == "cultural_reference"
+        for item_id in ids
+    )
+
+
 def _deduplicate_grammar_notes(
     result: BlockProcessingResult,
     *,
     dropped_difficulty_ids: frozenset[str],
     chapter_num: int,
     history: dict[str, _GrammarSeen],
+    plan: ContentPlan | None = None,
 ) -> frozenset[int]:
-    """Suppress repeated grammar `LanguageNote`s per the 11 closed pattern caps."""
+    """Suppress repeated grammar, cultural-reference, and short-term `LanguageNote`s."""
     if not result.language_notes:
         return frozenset()
     evidences = _evidences(result)
+    known = {} if plan is None else {item.id: item for item in plan.difficulties}
     suppressed: set[int] = set()
     for index, note in enumerate(result.language_notes):
         if _note_only_dropped(note, evidences, dropped_difficulty_ids):
             continue
         matched = _grammar_note_rule(note)
-        if matched is None:
-            continue
-        key, cap, min_gap = matched
+        if matched is not None:
+            key, cap, min_gap = matched
+        else:
+            is_cultural = _is_cultural_note(note, evidences, known)
+            words = expression_words(note.original_excerpt)
+            if not is_cultural and not (0 < len(words) <= 4):
+                continue
+            term_key = vocabulary_dedup_key(note.original_excerpt)
+            if not term_key:
+                continue
+            key, cap, min_gap = f"term:{term_key}", _CULTURAL_OR_TERM_CAP, 0
         state = history.get(key)
         if state is None:
             history[key] = _GrammarSeen(count=1, last_chapter=chapter_num)

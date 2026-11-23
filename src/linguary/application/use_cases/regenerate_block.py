@@ -33,9 +33,10 @@ from linguary.application.block_processing import (
     Sleep,
     TranslationCall,
     book_record,
-    chapter_number,
     complete_processing,
+    note_chapter_number,
     note_id_factory,
+    run_note_numbering,
 )
 from linguary.application.context_builder import ContextBuilder, is_textual
 from linguary.application.correction import _scoped_reconcile_section
@@ -121,6 +122,7 @@ class _BlockWork:
     book_candidates: tuple[GlossaryCandidate, ...]
     used_note_ids: frozenset[str]
     task_id: str | None = None
+    note_numbering: str = "reading-order"
 
     @property
     def target_language(self) -> str:
@@ -129,8 +131,12 @@ class _BlockWork:
 
     @property
     def chapter_number(self) -> int:
-        """Chapter number of the block in reading order (PRD § 19.3)."""
-        return chapter_number(self.document, self.section)
+        """Chapter number of the block for language note IDs (PRD § 19.3)."""
+        return note_chapter_number(
+            self.document,
+            self.section,
+            note_numbering=self.note_numbering,
+        )
 
 
 class RegenerateBlock:
@@ -317,6 +323,7 @@ class RegenerateBlock:
                 if chapter.section_id != section.id
                 for candidate in chapter.glossary_candidates
             )
+            note_numbering = run_note_numbering(transaction, run.id)
         section_block_ids = {item.id for item in section.ordered_blocks}
         return _BlockWork(
             document=document,
@@ -332,6 +339,7 @@ class RegenerateBlock:
                 if result.block_id in section_block_ids
             ),
             task_id=command.task_id,
+            note_numbering=note_numbering,
         )
 
 

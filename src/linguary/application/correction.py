@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 from uuid import uuid4
 
+from linguary.application.block_processing import note_numbering_from_binding
 from linguary.application.context_builder import (
     _extract_word_stems,
     _matches_chapter_text,
@@ -116,6 +117,7 @@ class CorrectionInputs:
     results: dict[str, BlockProcessingResult]
     bindings: dict[str, dict | None]
     input_generations: dict[str, int] = field(default_factory=dict)
+    note_numbering: str | None = None
     _precomputed: dict | None = field(default=None, kw_only=True, repr=False, compare=False)
     _context: dict = field(init=False, repr=False, compare=False)
     _context_sha256: str = field(init=False, repr=False, compare=False)
@@ -219,6 +221,7 @@ class CorrectionInputs:
             results=new_results,
             bindings=new_bindings,
             input_generations=new_generations,
+            note_numbering=self.note_numbering,
             _precomputed=dict(
                 context=self._context,
                 context_sha256=self._context_sha256,
@@ -293,6 +296,7 @@ def _section_correction_inputs(
     result_bindings=None,
     generations=None,
     run_results=None,
+    note_numbering=None,
 ):
     blocks = textual_blocks(section)
     block_ids = {b.id for b in blocks}
@@ -340,6 +344,7 @@ def _section_correction_inputs(
         results,
         bindings,
         {b.id: generations.get(b.id, 0) for b in blocks},
+        note_numbering=note_numbering,
     )
 
 
@@ -411,6 +416,7 @@ def _load_book_correction_inputs_state(
         result_bindings=result_bindings,
         generations=generations,
         run_results=run_results,
+        note_numbering=note_numbering_from_binding(binding),
     )
 
 
@@ -419,8 +425,12 @@ def correction_inputs(tx, book_id, section_id):
     run = tx.runs.active_for_book(book_id)
     if run is None:
         return None
-    binding = tx.work.get_binding('run', run.id)
-    policy = correction_policy({} if binding is None else binding['payload_json'])
+    work_repo = getattr(tx, 'work', None)
+    get_binding = getattr(work_repo, 'get_binding', None)
+    binding = None if not callable(get_binding) else get_binding('run', run.id)
+    if binding is None:
+        return None
+    policy = correction_policy(binding['payload_json'])
     if policy is None:
         return None
     conditions = tx.work.latest_conditions(book_id)
@@ -441,6 +451,7 @@ def correction_inputs(tx, book_id, section_id):
         run=run,
         conditions=conditions,
         snapshot=snapshot,
+        note_numbering=note_numbering_from_binding(binding),
     )
 
 

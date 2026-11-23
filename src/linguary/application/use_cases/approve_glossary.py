@@ -521,6 +521,7 @@ class StartProcessing:
                     'schema_version': 1,
                     'glossary_snapshot': glossary,
                     'glossary_sha256': payload_digest(glossary),
+                    'note_numbering': 'story-v1',
                 }
                 if self._correction_snapshot is not None:
                     payload_dict['correction'] = self._correction_snapshot.to_payload()

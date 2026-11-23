@@ -2764,3 +2764,149 @@ def test_a2_dedup_mixed_read_as_is_and_glossary_only_segments_do_not_collapse_bu
     layout = build_book_layout(_inputs(doc, {block.id: result}, reader_level="a2"))
 
     assert [n.term for n in _notes(layout, block.id)] == ["to smile", "lantern"]
+
+
+def test_book_layout_deduplicates_cultural_reference_and_short_term_notes_without_collapsing_sentences() -> None:
+    """`cultural_reference` and short term notes (<=4 words) collapse to cap=1 via vocabulary_dedup_key; long sentences stay."""
+    from linguary.application.layout.book import _deduplicate_grammar_notes
+    from linguary.domain import LanguageNote
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    def _note_ev(diff: Difficulty, note: LanguageNote) -> HelpEvidence:
+        key = artifact_key(
+            "language_note.note",
+            note.block_id,
+            {
+                "original_excerpt": note.original_excerpt,
+                "note": note.note,
+                "translated_excerpt": note.translated_excerpt,
+            },
+        )
+        return HelpEvidence(diff.id, diff.required_points[0].id, "language_note.note", note.block_id, key, note.note)
+
+    # 4 cultural_reference notes across 4 chapters: Muggles / Muggle / Muggles / Muggles -> only 1st stays
+    b1 = _block("c1", 0, "They didn't want to mix with Muggles.")
+    b2 = _block("c2", 0, "He is just a Muggle, she thought.")
+    b3 = _block("c3", 0, "Even Muggles noticed the strange owls.")
+    b4 = _block("c4", 0, "Never tell Muggles about magic.")
+
+    # Long (>4 words) cultural_reference appearing twice -> collapsed by Difficulty.kind == "cultural_reference"
+    b1_long_cult = _block("c1", 1, "He received the Order of Merlin, First Class.")
+    b3_long_cult = _block("c3", 1, "Mentioning the Order of Merlin, First Class again.")
+
+    # Unrelated long full-sentence notes (>4 words, not cultural_reference) -> NEVER collapsed!
+    long_sentence = "She had never seen anything quite like this before."
+    b1_sent = _block("c1", 2, long_sentence)
+    b2_sent = _block("c2", 1, long_sentence)
+
+    d1 = _difficulty(b1, "Muggles", "cultural_reference", "d-m1")
+    d2 = _difficulty(b2, "Muggle", "cultural_reference", "d-m2")
+    d3 = _difficulty(b3, "Muggles", "cultural_reference", "d-m3")
+    d4 = _difficulty(b4, "Muggles", "cultural_reference", "d-m4")
+    d1_lc = _difficulty(b1_long_cult, "Order of Merlin, First Class", "cultural_reference", "d-om1")
+    d3_lc = _difficulty(b3_long_cult, "Order of Merlin, First Class", "cultural_reference", "d-om3")
+    d1_sent = _difficulty(b1_sent, long_sentence, "grammar", "d-s1")
+    d2_sent = _difficulty(b2_sent, long_sentence, "grammar", "d-s2")
+
+    p1 = _plan(d1, d1_lc, d1_sent)
+    p2 = _plan(d2, d2_sent)
+    p3 = _plan(d3, d3_lc)
+    p4 = _plan(d4)
+
+    n1 = LanguageNote("ln-1", b1.id, "Muggles", "Маглы — люди без магических способностей.")
+    n2 = LanguageNote("ln-2", b2.id, "Muggle", "Магл — человек без волшебных способностей.")
+    n3 = LanguageNote("ln-3", b3.id, "Muggles", "Снова о маглах.")
+    n4 = LanguageNote("ln-4", b4.id, "Muggles", "Ещё одно упоминание маглов.")
+    n1_lc = LanguageNote("ln-5", b1_long_cult.id, "Order of Merlin, First Class", "Высшая награда волшебного мира.")
+    n3_lc = LanguageNote("ln-6", b3_long_cult.id, "Order of Merlin, First Class", "Повтор про орден Мерлина.")
+    n1_sent = LanguageNote("ln-7", b1_sent.id, long_sentence, "Первая длинная грамматическая заметка.")
+    n2_sent = LanguageNote("ln-8", b2_sent.id, long_sentence, "Вторая длинная грамматическая заметка.")
+
+    results = {
+        b1.id: BlockProcessingResult(
+            b1.id, BlockTreatment.READ_AS_IS, language_notes=(n1,),
+            content_evidence=ContentEvidence(p1.sha256, (_note_ev(d1, n1),)),
+        ),
+        b2.id: BlockProcessingResult(
+            b2.id, BlockTreatment.READ_AS_IS, language_notes=(n2,),
+            content_evidence=ContentEvidence(p2.sha256, (_note_ev(d2, n2),)),
+        ),
+        b3.id: BlockProcessingResult(
+            b3.id, BlockTreatment.READ_AS_IS, language_notes=(n3,),
+            content_evidence=ContentEvidence(p3.sha256, (_note_ev(d3, n3),)),
+        ),
+        b4.id: BlockProcessingResult(
+            b4.id, BlockTreatment.READ_AS_IS, language_notes=(n4,),
+            content_evidence=ContentEvidence(p4.sha256, (_note_ev(d4, n4),)),
+        ),
+        b1_long_cult.id: BlockProcessingResult(
+            b1_long_cult.id, BlockTreatment.READ_AS_IS, language_notes=(n1_lc,),
+            content_evidence=ContentEvidence(p1.sha256, (_note_ev(d1_lc, n1_lc),)),
+        ),
+        b3_long_cult.id: BlockProcessingResult(
+            b3_long_cult.id, BlockTreatment.READ_AS_IS, language_notes=(n3_lc,),
+            content_evidence=ContentEvidence(p3.sha256, (_note_ev(d3_lc, n3_lc),)),
+        ),
+        b1_sent.id: BlockProcessingResult(
+            b1_sent.id, BlockTreatment.READ_AS_IS, language_notes=(n1_sent,),
+            content_evidence=ContentEvidence(p1.sha256, (_note_ev(d1_sent, n1_sent),)),
+        ),
+        b2_sent.id: BlockProcessingResult(
+            b2_sent.id, BlockTreatment.READ_AS_IS, language_notes=(n2_sent,),
+            content_evidence=ContentEvidence(p2.sha256, (_note_ev(d2_sent, n2_sent),)),
+        ),
+    }
+
+    sections = (
+        _section("c1", 0, "Chapter 1", (b1, b1_long_cult, b1_sent)),
+        _section("c2", 1, "Chapter 2", (b2, b2_sent)),
+        _section("c3", 2, "Chapter 3", (b3, b3_long_cult)),
+        _section("c4", 3, "Chapter 4", (b4,)),
+    )
+    analyses = (
+        _analysis("a1", "c1", plan=p1),
+        _analysis("a2", "c2", plan=p2),
+        _analysis("a3", "c3", plan=p3),
+        _analysis("a4", "c4", plan=p4),
+    )
+
+    layout = build_book_layout(_inputs(_document(sections), results, analyses))
+
+    assert len(_notes(layout, b1.id)) == 1
+    assert _notes(layout, b2.id) == ()
+    assert _notes(layout, b3.id) == ()
+    assert _notes(layout, b4.id) == ()
+    assert len(_notes(layout, b1_long_cult.id)) == 1
+    assert _notes(layout, b3_long_cult.id) == ()
+    assert len(_notes(layout, b1_sent.id)) == 1
+    assert len(_notes(layout, b2_sent.id)) == 1
+
+    # Direct helper check with plan parameter, plus short-term (<=4 words) dedup with plan=None
+    history: dict = {}
+    assert _deduplicate_grammar_notes(
+        results[b1.id], dropped_difficulty_ids=frozenset(), chapter_num=1, history=history, plan=p1
+    ) == frozenset()
+    assert _deduplicate_grammar_notes(
+        results[b2.id], dropped_difficulty_ids=frozenset(), chapter_num=2, history=history, plan=p2
+    ) == frozenset({0})
+
+    short_term_1 = BlockProcessingResult(
+        b1.id, BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote("ln-st1", b1.id, "Privet Drive", "Улица в пригороде."),),
+    )
+    short_term_2 = BlockProcessingResult(
+        b2.id, BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote("ln-st2", b2.id, "Privet Drive", "Снова про улицу."),),
+    )
+    assert _deduplicate_grammar_notes(
+        short_term_1, dropped_difficulty_ids=frozenset(), chapter_num=1, history=history, plan=None
+    ) == frozenset()
+    assert _deduplicate_grammar_notes(
+        short_term_2, dropped_difficulty_ids=frozenset(), chapter_num=2, history=history, plan=None
+    ) == frozenset({0})
+    assert _deduplicate_grammar_notes(
+        results[b1_sent.id], dropped_difficulty_ids=frozenset(), chapter_num=1, history=history, plan=None
+    ) == frozenset()
+    assert _deduplicate_grammar_notes(
+        results[b2_sent.id], dropped_difficulty_ids=frozenset(), chapter_num=2, history=history, plan=None
+    ) == frozenset()

@@ -37,9 +37,10 @@ from linguary.application.block_processing import (
     BlockProcessingError,
     Sleep,
     TranslationCall,
-    chapter_number,
     complete_processing,
+    note_chapter_number,
     note_id_factory,
+    run_note_numbering,
     total_usage,
 )
 from linguary.application.context_builder import ContextBuilder, textual_blocks
@@ -139,6 +140,7 @@ class _ChapterWork:
     task_id: str | None = None
     source_texts: Mapping[str, str] = field(default_factory=dict)
     pronunciation_help_enabled: bool = False
+    note_numbering: str = "reading-order"
 
     @property
     def target_language(self) -> str:
@@ -147,8 +149,12 @@ class _ChapterWork:
 
     @property
     def chapter_number(self) -> int:
-        """Chapter number in reading order: included in language note IDs (PRD § 19.3)."""
-        return chapter_number(self.document, self.section)
+        """Chapter number for language note IDs (PRD § 19.3)."""
+        return note_chapter_number(
+            self.document,
+            self.section,
+            note_numbering=self.note_numbering,
+        )
 
 
 class ProcessChapter:
@@ -611,6 +617,7 @@ class ProcessChapter:
                 block.id: block.text
                 for block in section.blocks
             }
+            note_numbering = run_note_numbering(tx, run.id)
         section_block_ids = {block.id for block in section.ordered_blocks}
         return _ChapterWork(
             document=document,
@@ -632,6 +639,7 @@ class ProcessChapter:
             task_id=command.task_id,
             source_texts=source_texts,
             pronunciation_help_enabled=pronunciation_help_enabled,
+            note_numbering=note_numbering,
         )
 
 

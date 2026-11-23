@@ -376,8 +376,16 @@ class TranslationCall:
                                     violation=replace(error.violation, scope='local', block_ids=(restored_result.block_id,))) from error
                             raise
                     results = tuple(checked_results)
+                    policy_level = validation_policy_level(
+                        'v1' if policy is None else policy.validation_policy
+                    )
                     from linguary.application.validators.content_plan import validate_note_sources
-                    validate_note_sources(results, {item.block.id: item.block.text for item in unit.items})
+                    validate_note_sources(
+                        results,
+                        {item.block.id: item.block.text for item in unit.items},
+                        blocks={item.block.id: item.block for item in unit.items},
+                        check_translated_excerpt=policy_level >= 3,
+                    )
                     record_reader_warnings(self._unit_of_work, response,
                         [('translation', result.translated_text or '') for result in results],
                         reader_level=conditions.payload['reader_level'] if conditions else 'b2')
@@ -790,6 +798,26 @@ def note_id_factory(*, chapter_number: int, used: Collection[str]) -> Callable[[
     return next_id
 
 
+def note_numbering_from_binding(binding: Mapping[str, Any] | None) -> str:
+    """Extract `note_numbering` mode from a `run` work binding, defaulting to `'reading-order'`."""
+    if not isinstance(binding, Mapping):
+        return "reading-order"
+    payload = binding.get("payload_json")
+    if not isinstance(payload, Mapping):
+        return "reading-order"
+    value = payload.get("note_numbering")
+    return value if isinstance(value, str) and value else "reading-order"
+
+
+def run_note_numbering(transaction: object, run_id: str) -> str:
+    """Read `note_numbering` from the `run` work binding with safe `work` guard."""
+    work_repo = getattr(transaction, "work", None)
+    get_binding = getattr(work_repo, "get_binding", None)
+    if not callable(get_binding):
+        return "reading-order"
+    return note_numbering_from_binding(get_binding("run", run_id))
+
+
 def chapter_number(document: CanonicalDocument, section: DocumentSection) -> int:
     """Chapter number in reading order: included in note IDs (PRD § 19.3)."""
     sections = document.ordered_sections
@@ -801,6 +829,39 @@ def chapter_number(document: CanonicalDocument, section: DocumentSection) -> int
         ),
         section.order + 1,
     )
+
+
+def note_chapter_number(
+    document: CanonicalDocument,
+    section: DocumentSection,
+    *,
+    note_numbering: str = "reading-order",
+) -> int:
+    """Chapter number for persistent language note IDs (`ln-chNN-NNN`).
+
+    `"reading-order"` preserves legacy 1-based spine order across all sections.
+    `"story-v1"` numbers story chapters (`not is_front_matter and not is_notes_only`)
+    as `1..N`, and non-story sections as `N + non_story_index` (`>= 1` even when `N == 0`).
+    """
+    if note_numbering != "story-v1":
+        return chapter_number(document, section)
+    sections = document.ordered_sections
+    is_front = getattr(document, "is_front_matter", lambda _s: False)
+    story: list[DocumentSection] = []
+    non_story: list[DocumentSection] = []
+    for other in sections:
+        if not is_front(other) and not getattr(other, "is_notes_only", False):
+            story.append(other)
+        else:
+            non_story.append(other)
+    story_count = len(story)
+    for number, other in enumerate(story, start=1):
+        if other.id == section.id:
+            return number
+    for non_story_index, other in enumerate(non_story, start=1):
+        if other.id == section.id:
+            return story_count + non_story_index
+    return max(story_count + len(non_story) + 1, section.order + 1, 1)
 
 
 def complete_processing(
@@ -1321,6 +1382,9 @@ __all__ = [
     "book_record",
     "chapter_number",
     "complete_processing",
+    "note_chapter_number",
     "note_id_factory",
+    "note_numbering_from_binding",
+    "run_note_numbering",
     "total_usage",
 ]
