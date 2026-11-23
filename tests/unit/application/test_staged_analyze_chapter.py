@@ -26,7 +26,7 @@ COMMAND = AnalyzeChapterCommand(BOOK_ID, 'section-1')
 
 def narrative(aliases=('b1',), *, scenes=True, facts=()):
     return FakeReply.of_payload(dict(
-        translation_instructions='Keep the voice.', chapter_summary='Holmes opens the door.',
+        translation_instructions='Сохранять голос автора.', chapter_summary='Holmes opens the door.',
         glossary_candidates=[], context_facts=list(facts),
         scenes=[dict(start_block_id=aliases[0], end_block_id=aliases[-1],
                      summary='Холмс прибывает.', location='Baker Street', participants=['Holmes'],
@@ -905,12 +905,12 @@ async def test_multi_fragment_narrative_findings_keep_all_instructions_and_sanit
     with uow.transaction() as tx:
         tx.documents.save(make_analysis_document((section,)))
     raw_1 = json.loads(narrative(('b1',)).content)
-    raw_1['translation_instructions'] = 'Keep instruction one.'
+    raw_1['translation_instructions'] = 'Сохранять первое правило.'
     raw_1['scenes'][0]['visual_facts'] = [
         dict(anchor=dict(block_id='b1', quote='door'), subject='door', detail='Open door.')
     ]
     raw_2 = json.loads(narrative(('b1',)).content)
-    raw_2['translation_instructions'] = 'Keep instruction two.'
+    raw_2['translation_instructions'] = 'Сохранять второе правило.'
     client = FakeLLMClient([
         FakeReply.of_payload(raw_1),
         FakeReply.of_payload(raw_2),
@@ -921,8 +921,8 @@ async def test_multi_fragment_narrative_findings_keep_all_instructions_and_sanit
     ])
     await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
     third_narrative_prompt = client.requests[2].input_text
-    assert 'Keep instruction one.' in third_narrative_prompt
-    assert 'Keep instruction two.' in third_narrative_prompt
+    assert 'Сохранять первое правило.' in third_narrative_prompt
+    assert 'Сохранять второе правило.' in third_narrative_prompt
     assert 'Последняя сцена: {' in third_narrative_prompt
     for block in section.blocks:
         assert block.id not in third_narrative_prompt
@@ -3661,7 +3661,7 @@ async def test_staged_a2_fragmented_chapter_keeps_full_summary_when_last_fragmen
 
     def nar_reply(summary, scene_summary, participants):
         return FakeReply.of_payload(dict(
-            translation_instructions='Keep a natural tone.',
+            translation_instructions='Сохранять естественный тон.',
             chapter_summary=summary,
             glossary_candidates=[],
             context_facts=[],
@@ -3730,7 +3730,7 @@ async def test_staged_narrative_merge_passes_section_separators(stored_book, sep
 
     def frag_narrative(*, continues=False):
         return FakeReply.of_payload(dict(
-            translation_instructions='Keep the voice.',
+            translation_instructions='Сохранять голос автора.',
             chapter_summary='Holmes meets Watson.',
             glossary_candidates=[],
             context_facts=[],
@@ -3795,7 +3795,7 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
     holmes_anchor = dict(block_id='b1', quote='Holmes')
     hudson_anchor = dict(block_id='b5', quote='Hudson')
     attempt_1 = FakeReply.of_payload(dict(
-        translation_instructions='Keep the voice.',
+        translation_instructions='Сохранять голос автора.',
         chapter_summary='Holmes arrives.',
         glossary_candidates=[],
         context_facts=[
@@ -3824,7 +3824,7 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
         ],
     ))
     attempt_2 = FakeReply.of_payload(dict(
-        translation_instructions='Keep the voice.',
+        translation_instructions='Сохранять голос автора.',
         chapter_summary='Holmes arrives.',
         glossary_candidates=[],
         context_facts=[
@@ -4045,7 +4045,7 @@ async def test_staged_analysis_rejects_non_target_scene_summary_and_passes_prior
             )
 
         bad_lang_narrative = FakeReply.of_payload(dict(
-            translation_instructions='Keep the voice.',
+            translation_instructions='Сохранять голос автора.',
             chapter_summary='Holmes walks across the quiet bridge in London.',
             glossary_candidates=[],
             context_facts=[],
@@ -4060,7 +4060,7 @@ async def test_staged_analysis_rejects_non_target_scene_summary_and_passes_prior
             )],
         ))
         good_narrative = FakeReply.of_payload(dict(
-            translation_instructions='Keep the voice.',
+            translation_instructions='Сохранять голос автора.',
             chapter_summary='Holmes walks across the quiet bridge in London.',
             glossary_candidates=[],
             context_facts=[],
@@ -4134,7 +4134,7 @@ async def test_staged_analysis_allows_known_names_in_ch2_participants_and_reject
             tx.documents.save(document)
 
         ch1_narrative = FakeReply.of_payload(dict(
-            translation_instructions='Keep tone.',
+            translation_instructions='Сохранять тон.',
             chapter_summary='Harry opens the old letter in the kitchen.',
             glossary_candidates=[
                 dict(
@@ -4164,7 +4164,7 @@ async def test_staged_analysis_allows_known_names_in_ch2_participants_and_reject
 
         # Chapter 2 attempt 1: Scene 1 mentions both Harry (known from Ch1) and Malfoy (spoiler from b2).
         ch2_spoiler_narrative = FakeReply.of_payload(dict(
-            translation_instructions='Keep tone.',
+            translation_instructions='Сохранять тон.',
             chapter_summary='Harry walks down the corridor and meets Malfoy.',
             glossary_candidates=[],
             context_facts=[],
@@ -4191,7 +4191,7 @@ async def test_staged_analysis_allows_known_names_in_ch2_participants_and_reject
         ))
         # Chapter 2 attempt 2: Scene 1 lists only Harry (known from Ch1 -> allowed!), Scene 2 introduces Malfoy.
         ch2_clean_narrative = FakeReply.of_payload(dict(
-            translation_instructions='Keep tone.',
+            translation_instructions='Сохранять тон.',
             chapter_summary='Harry walks down the corridor and meets Malfoy.',
             glossary_candidates=[],
             context_facts=[],
@@ -4455,7 +4455,7 @@ async def test_staged_narrative_candidates_findings_and_narrative_instructions_f
     _store(uow, blocks)
 
     frag1_narrative = json.loads(narrative(('b1', 'b2')).content)
-    frag1_narrative['translation_instructions'] = 'Keep Nick informal and never spoil Everlost.'
+    frag1_narrative['translation_instructions'] = 'Обращаться к Nick на ты и не раскрывать тайну Everlost.'
     frag1_narrative['glossary_candidates'] = [
         dict(
             source_text='Everlost',
@@ -4468,7 +4468,7 @@ async def test_staged_narrative_candidates_findings_and_narrative_instructions_f
         )
     ]
     frag2_narrative = json.loads(narrative(('b1', 'b2')).content)
-    frag2_narrative['translation_instructions'] = 'Keep short punchy dialogue.'
+    frag2_narrative['translation_instructions'] = 'Передавать короткие рубленые реплики естественно.'
     frag2_narrative['glossary_candidates'] = []
 
     client = FakeLLMClient([
@@ -4491,7 +4491,7 @@ async def test_staged_narrative_candidates_findings_and_narrative_instructions_f
     assert len(pedagogical_reqs) == 2
     for req in pedagogical_reqs:
         assert 'Указания переводчику:' in req.input_text
-        assert 'Keep Nick informal and never spoil Everlost.' in req.input_text
+        assert 'Обращаться к Nick на ты и не раскрывать тайну Everlost.' in req.input_text
 
     # Changing narrative_instructions changes pedagogical_input_sha256.
     with uow.transaction() as tx:

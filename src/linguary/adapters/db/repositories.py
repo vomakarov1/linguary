@@ -663,6 +663,17 @@ class SqlAlchemyBlockResultRepository:
             or 0
         )
 
+    def count_warnings_for_run(self, run_id: str) -> int:
+        """Count result warnings for the run via SQL without loading block results."""
+        return (
+            self._session.scalar(
+                select(func.count())
+                .select_from(ResultWarningRow)
+                .where(ResultWarningRow.run_id == run_id)
+            )
+            or 0
+        )
+
     def allocate_note_ids(
         self, run_id: str, chapter_number: int, count: int
     ) -> tuple[str, ...]:

@@ -3632,7 +3632,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
 
         narr_reply_1 = FakeReply.of_payload(
             {
-                "translation_instructions": "Keep names consistent.",
+                "translation_instructions": "Сохранять имена единообразно.",
                 "chapter_summary": "Harry reads the sign.",
                 "glossary_candidates": [],
                 "context_facts": [],
@@ -3651,7 +3651,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
         )
         narr_reply_2 = FakeReply.of_payload(
             {
-                "translation_instructions": "Keep names consistent.",
+                "translation_instructions": "Сохранять имена единообразно.",
                 "chapter_summary": "Harry reads the sign while Aunt Petunia mutters.",
                 "glossary_candidates": [],
                 "context_facts": [],

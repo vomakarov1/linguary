@@ -106,6 +106,22 @@ def test_count_for_run_without_results_is_zero(
         assert uow.results.count_for_run(RUN_ID) == 0
 
 
+def test_count_warnings_for_run_matches_stored_warnings_and_is_isolated(
+    unit_of_work: SqlAlchemyUnitOfWork,
+    stored_results: tuple[BlockProcessingResult, ...],
+) -> None:
+    """Warning count uses SQL count across `result_warnings` for the target run only."""
+    from linguary.domain import ProcessingRunStatus
+
+    with unit_of_work.transaction() as uow:
+        uow.runs.add(make_run(run_id="run-empty", status=ProcessingRunStatus.CANCELLED))
+        assert uow.results.count_warnings_for_run(RUN_ID) == sum(
+            len(item.warnings) for item in stored_results
+        )
+        assert uow.results.count_warnings_for_run("run-empty") == 0
+
+
+
 def test_block_replacement_keeps_evidence_atomic(unit_of_work, stored_results):
     from dataclasses import replace
     from linguary.domain.content_plan import ContentEvidence, HelpEvidence

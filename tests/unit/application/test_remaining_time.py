@@ -515,6 +515,7 @@ def test_book_overview_uses_read_transaction_and_skips_full_results_while_proces
         results=SimpleNamespace(
             count_for_run=lambda run_id: 1,
             block_ids_for_run=_block_ids_for_run,
+            count_warnings_for_run=lambda run_id: 0,
             list_for_run=_unexpected_list_for_run,
         ),
         llm_calls=SimpleNamespace(list_for_book=lambda book_id: ()),
@@ -773,6 +774,7 @@ def test_quality_projection_batches_root_scopes_and_attempts_queries() -> None:
         results=SimpleNamespace(
             count_for_run=lambda r_id: 2,
             block_ids_for_run=lambda r_id: frozenset({"blk-1", "blk-2"}),
+            count_warnings_for_run=lambda r_id: 0,
             list_for_run=_unexpected,
         ),
         llm_calls=SimpleNamespace(list_for_book=lambda b_id: ()),

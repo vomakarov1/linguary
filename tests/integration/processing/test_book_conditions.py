@@ -681,7 +681,7 @@ async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanaly
         bodies.append(body)
         kind = body['response_format']['json_schema']['name']
         if kind == 'chapter_analysis_narrative':
-            payload = dict(translation_instructions='Keep the voice.', chapter_summary='The cat sat.',
+            payload = dict(translation_instructions='Сохранять голос автора.', chapter_summary='The cat sat.',
                 glossary_candidates=[], context_facts=[], scenes=[dict(start_block_id='b1',
                     end_block_id='b1', summary='Кот сидит.', location=None, participants=[],
                     visual_facts=[], visual_assumptions=[])])

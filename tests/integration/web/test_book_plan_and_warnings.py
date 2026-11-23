@@ -112,8 +112,10 @@ def test_warnings_include_import_and_result_warnings(
     )
 
     warnings = client.get(f"/books/{scenario.book_id}/warnings").json()
+    detail = client.get(f"/books/{scenario.book_id}").json()
 
     assert warnings["total"] == 2
+    assert detail["warning_count"] == warnings["total"]
     assert warnings["import_warnings"][0]["kind_label"] == "Фрагмент книги пропущен"
     assert warnings["import_warnings"][0]["section_id"] == section_id
     assert warnings["result_warnings"][0]["kind_label"] == "Повторы в переводе"

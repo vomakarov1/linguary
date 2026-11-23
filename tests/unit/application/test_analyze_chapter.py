@@ -1713,7 +1713,7 @@ def _staged_narrative_reply(
 ) -> FakeReply:
     return FakeReply.of_payload(
         {
-            "translation_instructions": "Keep a natural tone.",
+            "translation_instructions": "Сохранять естественный тон.",
             "chapter_summary": summary,
             "glossary_candidates": [],
             "context_facts": list(facts or ()),

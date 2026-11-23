@@ -679,7 +679,21 @@ def book_overview(
             result_block_ids=done_block_ids,
             preload=preload,
         )
-        warning_count = len(transaction.documents.import_warnings(book_id))
+        import_warnings = transaction.documents.import_warnings(book_id)
+        result_warning_count = 0
+        if run is not None:
+            count_warnings_for_run = getattr(
+                transaction.results, "count_warnings_for_run", None
+            )
+            if callable(count_warnings_for_run):
+                result_warning_count = count_warnings_for_run(run.id)
+            else:
+                if stored_results is None:
+                    stored_results = transaction.results.list_for_run(run.id)
+                result_warning_count = sum(
+                    len(result.warnings) for result in stored_results
+                )
+        warning_count = len(import_warnings) + result_warning_count
         is_book_paused_fn = getattr(transaction.work, "is_book_paused", None)
         pause_requested = bool(is_book_paused_fn(book_id)) if is_book_paused_fn is not None else False
         legacy = quality["conditions"].get("conditions_id") is None and bool(analyses or run is not None)

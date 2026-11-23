@@ -94,6 +94,7 @@ DEFAULT_MAX_FRAGMENT_WEIGHT = 26_000
 #: Upper-bound estimate of response tokens per analyzed block from real runs.
 TOKENS_PER_ANALYSED_BLOCK = 200
 MAX_BEFORE_YOU_READ = 10
+MAX_MERGED_INSTRUCTIONS = 20
 
 
 def fragment_blocks_for(max_output_tokens: int | None) -> int:
@@ -720,6 +721,12 @@ _INSTRUCTION_QUOTED_RE = re.compile(
 )
 _QUOTE_APOSTROPHE_TRANS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _INSTRUCTION_PROPER_NOUN_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9'’-]*")
+_INSTRUCTION_ENGLISH_TERM_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z]+(?:['’-][A-Za-z]+)*"
+    r"(?:\.?\s+[A-Za-z]+(?:['’-][A-Za-z]+)*)*"
+    r"(?![A-Za-z0-9])"
+)
 _HONORIFIC_OR_INITIAL_BEFORE_DOT_RE = re.compile(
     r"(?:^|\W)(?:(?i:Mr|Mrs|Ms|Dr|Prof|St)|[A-ZА-ЯЁ])\.$",
 )
@@ -734,6 +741,7 @@ class _InstructionEntry:
     has_negation: bool
     quotes: frozenset[str]
     proper_nouns: frozenset[str]
+    english_terms: frozenset[str] = frozenset()
 
 
 def _stem_instruction_word(word: str) -> str:
@@ -826,6 +834,18 @@ def _instruction_proper_nouns(text: str) -> frozenset[str]:
     return frozenset(proper_nouns)
 
 
+def _instruction_english_terms(text: str) -> frozenset[str]:
+    """Canonical English term keys referenced inside a Cyrillic translation directive."""
+    if not _has_cyrillic(text):
+        return frozenset()
+    terms: set[str] = set()
+    for match in _INSTRUCTION_ENGLISH_TERM_RE.finditer(text):
+        key = glossary_key(match.group(0))
+        if sum(ch.isalpha() for ch in key) >= 2:
+            terms.add(key)
+    return frozenset(terms)
+
+
 def _instruction_entry(text: str) -> _InstructionEntry | None:
     cleaned = without_block_labels(text)
     key = re.sub(r"\s+", " ", cleaned).casefold().strip(" \t.,;:!?")
@@ -839,6 +859,7 @@ def _instruction_entry(text: str) -> _InstructionEntry | None:
         has_negation=bool(_INSTRUCTION_NEGATION_RE.search(cleaned)),
         quotes=_instruction_quoted_strings(cleaned),
         proper_nouns=_instruction_proper_nouns(cleaned),
+        english_terms=_instruction_english_terms(cleaned),
     )
 
 
@@ -849,7 +870,12 @@ def _instructions_semantically_match(
     if (
         left.register != right.register
         or left.has_negation != right.has_negation
-        or left.quotes != right.quotes
+    ):
+        return False
+    if left.english_terms and left.english_terms == right.english_terms:
+        return True
+    if (
+        left.quotes != right.quotes
         or left.proper_nouns != right.proper_nouns
     ):
         return False
@@ -1060,7 +1086,8 @@ def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
             for idx in reversed(matched[1:]):
                 del entries[idx]
     return "\n".join(
-        f"{index}. {entry.text}" for index, entry in enumerate(entries, 1)
+        f"{index}. {entry.text}"
+        for index, entry in enumerate(entries[:MAX_MERGED_INSTRUCTIONS], 1)
     )
 
 
@@ -1130,10 +1157,13 @@ def select_staged_a2_summary(
 ) -> str:
     """Selects the staged A2 chapter summary best covering `narrative_summary`.
 
-    Candidates whose dominant script disagrees with `narrative_summary` (when known)
-    are excluded from overlap scoring. When no candidate achieves positive stem
-    overlap in the matching script, falls back predictably to the fullest non-empty
-    candidate, breaking ties in favor of earlier fragments (`parts[0]`).
+    Splits `narrative_summary` into sentences, drops empty-stem sentences, and filters out
+    ubiquitous stems appearing in `>= 50%` of narrative sentences whenever rarer stems exist
+    in a sentence. Candidates whose dominant script disagrees with `narrative_summary` (when
+    known) are excluded from overlap scoring, and remaining candidates are ranked by
+    `(covered_sentence_ratio, covers_last_sentence, total_stem_overlap, -index)`. When no
+    candidate achieves positive stem overlap in the matching script, falls back predictably to
+    the fullest non-empty candidate, breaking ties in favor of earlier fragments (`parts[0]`).
     """
     candidates = [
         (index, summary)
@@ -1144,21 +1174,60 @@ def select_staged_a2_summary(
         return ""
 
     narrative_script = dominant_script(narrative_summary)
-    narrative_stems = _significant_summary_stems(narrative_summary)
+    sentence_stems = [
+        stems
+        for sentence in _split_instruction_sentences(narrative_summary)
+        if (stems := _significant_summary_stems(sentence))
+    ]
+    num_sentences = len(sentence_stems)
+    stem_doc_freq: dict[str, int] = {}
+    for stems in sentence_stems:
+        for stem in stems:
+            stem_doc_freq[stem] = stem_doc_freq.get(stem, 0) + 1
 
-    best_overlap: tuple[int, int, str] | None = None
-    if narrative_stems:
+    sentence_entries: list[tuple[frozenset[str], bool]] = []
+    for stems in sentence_stems:
+        rare = frozenset(stem for stem in stems if stem_doc_freq[stem] * 2 < num_sentences)
+        if rare:
+            sentence_entries.append((rare, True))
+        else:
+            sentence_entries.append((stems, False))
+
+    all_effective_stems = (
+        frozenset().union(*(eff for eff, _ in sentence_entries))
+        if sentence_entries
+        else frozenset()
+    )
+
+    best_overlap: tuple[float, bool, int, int, str] | None = None
+    if all_effective_stems:
         for index, summary in candidates:
             candidate_script = dominant_script(summary)
             if narrative_script is not None and candidate_script != narrative_script:
                 continue
-            overlap = len(narrative_stems & _significant_summary_stems(summary))
-            if overlap > 0:
-                rank = (overlap, -index)
-                if best_overlap is None or rank > best_overlap[:2]:
-                    best_overlap = (overlap, -index, summary)
+            candidate_stems = _significant_summary_stems(summary)
+            total_stem_overlap = len(all_effective_stems & candidate_stems)
+            if total_stem_overlap == 0:
+                continue
+            covered_flags = [
+                (match_count >= 1)
+                if has_rare
+                else (match_count >= 2 or match_count / len(eff) >= 0.25)
+                for eff, has_rare in sentence_entries
+                for match_count in (len(eff & candidate_stems),)
+            ]
+            covered_sentence_ratio = sum(covered_flags) / num_sentences
+            covers_last_sentence = covered_flags[-1]
+            rank = (
+                covered_sentence_ratio,
+                covers_last_sentence,
+                total_stem_overlap,
+                -index,
+            )
+            if best_overlap is None or rank > best_overlap[:4]:
+                best_overlap = (*rank, summary)
     if best_overlap is not None:
-        return best_overlap[2]
+        return best_overlap[4]
 
     best_fallback: tuple[bool, int, int, int, str] | None = None
     for index, summary in candidates:
@@ -1688,6 +1757,7 @@ __all__ = [
     "DEFAULT_MAX_FRAGMENT_CHARS",
     "DEFAULT_MAX_FRAGMENT_WEIGHT",
     "MAX_BEFORE_YOU_READ",
+    "MAX_MERGED_INSTRUCTIONS",
     "TOKENS_PER_ANALYSED_BLOCK",
     "AnalysisMergeError",
     "ChapterFragment",
@@ -1826,6 +1896,7 @@ _NARRATIVE_RULE_PRIORITY = (
     "scene_visual_anchor_out_of_bounds",
     "narrative_summary_language",
     "scene_summary_language",
+    "translation_instructions_language",
     "name_assessment_conflict",
     "spoiler_name_leak",
     "speaker_subject_anchor",
@@ -1989,6 +2060,26 @@ def _collect_narrative_language_issues(
                     tuple(dict.fromkeys(bad_scene_blocks)),
                 )
             )
+        if norm_target == "ru":
+            bad_instruction_details: list[str] = []
+            for point in _instruction_points(payload.translation_instructions):
+                unquoted = _INSTRUCTION_QUOTED_RE.sub(" ", point)
+                has_required_cyrillic = (
+                    _has_cyrillic(unquoted)
+                    if len(_LATIN_WORD_RE.findall(unquoted)) >= 2
+                    else _has_cyrillic(point)
+                )
+                if not has_required_cyrillic:
+                    bad_instruction_details.append(f"«{_preview_quote(point)}»")
+            if bad_instruction_details:
+                issues.append(
+                    (
+                        "translation_instructions_language",
+                        f"инструкции переводчику должны быть на целевом языке ({target_language}) "
+                        f"({'; '.join(dict.fromkeys(bad_instruction_details))})",
+                        (),
+                    )
+                )
     return issues
 
 

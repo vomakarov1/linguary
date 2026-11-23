@@ -642,7 +642,7 @@ def test_validate_narrative_rejects_wrong_summary_and_allows_latin_names_in_russ
         participants=('Lestrade',),
     )
     ok_payload = NarrativeAnalysisResponse(
-        'Keep voice.',
+        'Сохранять голос автора.',
         'Holmes wears a red coat while Watson opens the door for Lestrade.',
         scenes=(ru_scene_short, ru_scene_long),
     )
@@ -1261,7 +1261,7 @@ def test_validate_narrative_allows_short_part_divider_titles_with_real_langid_an
         texts = {'part-b1': divider_title}
         visible = {'b1': divider_title}
         payload = NarrativeAnalysisResponse(
-            translation_instructions='Keep tone.',
+            translation_instructions='Сохранять тон.',
             chapter_summary=divider_title,
             scenes=(),
         )
@@ -1646,6 +1646,93 @@ def test_validate_narrative_rejects_gender_plural_subject_with_and():
         aliases, texts, visible, ordered_block_ids=('id-1', 'id-2'),
     )
     assert len(resolved) == 2
+
+
+def test_validate_narrative_checks_translation_instructions_language():
+    scenes = (QuotedSceneResponse('b1', 'b3', 'Холмс и Ватсон в комнате.'),)
+
+    # 1. Valid Russian instructions with quoted English terms and short glosses pass.
+    for valid_instructions in (
+        '«Gringotts» — «Гринготтс»',
+        'Слово «Muggle» переводить как «магл».',
+        'Передавать Leaky Cauldron как «Дырявый котёл».',
+        'Сохранять живой разговорный тон.\n\n«Gringotts» — «Гринготтс».',
+        '',
+    ):
+        resolved_scenes, _ = validate_narrative_response(
+            NarrativeAnalysisResponse(valid_instructions, 'Holmes wears a red coat.', scenes=scenes),
+            ALIASES,
+            TEXTS,
+            VISIBLE,
+            ordered_block_ids=ORDER,
+            source_language='en',
+            target_language='ru',
+            is_notes_only=False,
+        )
+        assert len(resolved_scenes) == 1
+
+    # 2. English translation instructions (even with a Cyrillic quote) are rejected when target_language='ru'.
+    for bad_instructions in (
+        'Translate "Muggle" as «магл»',
+        'Keep the voice.',
+        'Сохранять иронию.\n\nTranslate "Muggle" as «магл».',
+    ):
+        with pytest.raises(AnalysisMergeError) as exc_info:
+            validate_narrative_response(
+                NarrativeAnalysisResponse(bad_instructions, 'Holmes wears a red coat.', scenes=scenes),
+                ALIASES,
+                TEXTS,
+                VISIBLE,
+                ordered_block_ids=ORDER,
+                source_language='en',
+                target_language='ru',
+                is_notes_only=False,
+            )
+        assert exc_info.value.violation is not None
+        assert exc_info.value.violation.rule_code == 'translation_instructions_language'
+        assert exc_info.value.violation.block_ids == ()
+
+    # 3. Notes-only sections and non-Russian target languages skip this check.
+    validate_narrative_response(
+        NarrativeAnalysisResponse('Translate "Muggle" as «магл»', 'Holmes wears a red coat.', scenes=()),
+        ALIASES,
+        TEXTS,
+        VISIBLE,
+        ordered_block_ids=ORDER,
+        source_language='en',
+        target_language='ru',
+        is_notes_only=True,
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse('Translate "Muggle" as «магл»', 'Holmes wears a red coat.', scenes=(scene('b1', 'b3'),)),
+        ALIASES,
+        TEXTS,
+        VISIBLE,
+        ordered_block_ids=ORDER,
+        source_language='en',
+        target_language='en',
+        is_notes_only=False,
+    )
+
+    # 4. Priority: scene_summary_language outranks translation_instructions_language.
+    with pytest.raises(AnalysisMergeError) as prio_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Translate "Muggle" as «магл»',
+                'Holmes wears a red coat.',
+                scenes=(scene('b1', 'b3'),),
+            ),
+            ALIASES,
+            TEXTS,
+            VISIBLE,
+            ordered_block_ids=ORDER,
+            source_language='en',
+            target_language='ru',
+            is_notes_only=False,
+        )
+    assert prio_exc.value.violation is not None
+    assert prio_exc.value.violation.rule_code == 'scene_summary_language'
+
 
 
 

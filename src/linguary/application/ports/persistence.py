@@ -241,6 +241,9 @@ class BlockResultRepository(Protocol):
         so retrieving all block results just for a count is unnecessary.
         """
 
+    def count_warnings_for_run(self, run_id: str) -> int:
+        """Number of result warnings persisted for the run."""
+
     def allocate_note_ids(
         self, run_id: str, chapter_number: int, count: int
     ) -> tuple[str, ...]:

@@ -5056,3 +5056,189 @@ def test_validate_content_plan_byr_disabled_omits_byr_in_lexical_help_channel() 
         assert err_with_byr.value.violation.rule_code == "lexical_help_channel"
         assert "BYR" in str(err_with_byr.value)
 
+
+def test_select_staged_a2_summary_excludes_ubiquitous_stems_and_splits_abbreviations() -> None:
+    """6-fragment HP Ch. 5 selects full summary covering Gringotts, owl, and Ollivander without ubiquitous-stem distortion."""
+    from linguary.application.analysis_merge import select_staged_a2_summary
+
+    narrative_summary = (
+        "Harry and Hagrid take the old train to London and talk about Hogwarts school. "
+        "Harry and Hagrid enter the Leaky Cauldron where friendly wizards welcome young Harry. "
+        "Hagrid taps the brick wall behind the pub to open Diagon Alley for Harry. "
+        "Harry and Hagrid visit Gringotts bank where goblins guard Harry's gold. "
+        "Harry meets a boy at the robes shop and Hagrid buys Harry a snowy owl. "
+        "Harry visits Mr. Ollivander to choose a holly wand while Hagrid waits outside."
+    )
+    # Detailed early summary repeats many stems from sentences 1..3 (more raw stems overall),
+    # whereas the compact full summary covers sentences 4..6 (Gringotts, owl, Ollivander).
+    frag_0 = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary=(
+            "Harry and Hagrid take the old train to London, talk about Hogwarts school, "
+            "enter the Leaky Cauldron where friendly wizards welcome young Harry, "
+            "and Hagrid taps the brick wall behind the pub to open Diagon Alley."
+        ),
+    )
+    frag_1 = make_fragment(
+        1,
+        blocks=("b2",),
+        chapter_summary=(
+            "Harry and Hagrid walk through Diagon Alley behind the pub and look at Hogwarts supplies."
+        ),
+    )
+    full_frag_2 = make_fragment(
+        2,
+        blocks=("b3",),
+        chapter_summary=(
+            "Harry takes the train to London and enters Diagon Alley. "
+            "At Gringotts he gets gold. "
+            "Hagrid buys an owl. "
+            "Harry gets a wand from Ollivander."
+        ),
+    )
+    frag_3 = make_fragment(
+        3,
+        blocks=("b4",),
+        chapter_summary="Harry and Hagrid see goblins and gold at Gringotts bank.",
+    )
+    frag_4 = make_fragment(
+        4,
+        blocks=("b5",),
+        chapter_summary="Harry meets a boy at the robes shop and gets an owl from Hagrid.",
+    )
+    frag_5 = make_fragment(
+        5,
+        blocks=("b6",),
+        chapter_summary="Harry visits Mr. Ollivander to buy his wand while Hagrid waits.",
+    )
+
+    assert (
+        select_staged_a2_summary(
+            (frag_0, frag_1, full_frag_2, frag_3, frag_4, frag_5),
+            narrative_summary=narrative_summary,
+        )
+        == full_frag_2.chapter_summary
+    )
+
+    # Abbreviation-safe splitting: "Mr. Dursley" must stay inside one sentence instead of creating a fake sentence boundary.
+    abbrev_narrative = (
+        "Mr. Dursley drives to work and notices strange owls in the sky. "
+        "Mrs. Dursley hears whispers about wizards near the house."
+    )
+    abbrev_early_only = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary="Mr. Dursley drives to work and notices strange owls in the sky.",
+    )
+    abbrev_full = make_fragment(
+        1,
+        blocks=("b2",),
+        chapter_summary="Mr. Dursley sees owls and Mrs. Dursley hears whispers.",
+    )
+    assert (
+        select_staged_a2_summary(
+            (abbrev_early_only, abbrev_full),
+            narrative_summary=abbrev_narrative,
+        )
+        == abbrev_full.chapter_summary
+    )
+
+    # Empty-stem sentence ("And in the.") is dropped; equal (ratio, covers_last, overlap) preserves -index tie-breaker.
+    tie_narrative = (
+        "And in the. "
+        "Harry opens Diagon Alley. "
+        "Harry visits Gringotts bank. "
+        "Harry buys a wand."
+    )
+    tie_first = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary="Harry opens Diagon Alley, visits Gringotts bank, and buys a wand.",
+    )
+    tie_second = make_fragment(
+        1,
+        blocks=("b2",),
+        chapter_summary="Harry opens Diagon Alley, visits Gringotts bank, and gets a wand.",
+    )
+    assert (
+        select_staged_a2_summary(
+            (tie_first, tie_second),
+            narrative_summary=tie_narrative,
+        )
+        == tie_first.chapter_summary
+    )
+
+
+def test_merged_instructions_deduplicates_canonical_english_terms_and_caps_at_20() -> None:
+    """Same English term deduplicates only when register and polarity match; result is capped at 20 items."""
+    from linguary.application.analysis_merge import MAX_MERGED_INSTRUCTIONS
+
+    assert MAX_MERGED_INSTRUCTIONS == 20
+
+    expected = block_ids(4)
+    merged = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions="\n".join(
+                [
+                    "- Слово «Muggle» переводить как «магл».",
+                    "- Имя «Mr. Ollivander» передавать как «мистер Олливандер».",
+                    "- В разговоре с Hagrid обращаться на ты.",
+                    "- Не переводить слово «Muggle» с большой буквы.",
+                ]
+            ),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:2],
+            translation_instructions="\n".join(
+                [
+                    "- Термин Muggle в речи волшебников последовательно передавать как «магл» без сносок.",
+                    "- Для Mr Ollivander сохранять форму «мистер Олливандер».",
+                    "- В разговоре с Hagrid обращаться на вы.",
+                    "- Не использовать вариант «простец» для Muggle.",
+                ]
+            ),
+        ),
+        make_fragment(
+            2,
+            blocks=expected[2:3],
+            translation_instructions="- Обращаться к Hagrid строго на вы в официальных сценах.",
+        ),
+        make_fragment(
+            3,
+            blocks=expected[3:],
+            translation_instructions="- Для слова «Muggle» оставлять строчное написание «магл».",
+        ),
+        expected=expected,
+    )
+    lines = merged.translation_instructions.splitlines()
+    assert lines == [
+        "1. Термин Muggle в речи волшебников последовательно передавать как «магл» без сносок.",
+        "2. Имя «Mr. Ollivander» передавать как «мистер Олливандер».",
+        "3. В разговоре с Hagrid обращаться на ты.",
+        "4. Не переводить слово «Muggle» с большой буквы.",
+        "5. Обращаться к Hagrid строго на вы в официальных сценах.",
+    ]
+
+    topics = (
+        "альбом", "берег", "ветер", "город", "дерево",
+        "еда", "жара", "замок", "игла", "камень",
+        "лес", "море", "небо", "огонь", "поле",
+        "река", "снег", "туман", "утро", "фонарь",
+        "холм", "цветок", "чайник", "шляпа", "якорь",
+    )
+    many_points = "\n".join(
+        f"- Образ «{topic}» передавать с мягкой интонацией." for topic in topics
+    )
+    capped = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions=many_points),
+        expected=expected[:1],
+    )
+    capped_lines = capped.translation_instructions.splitlines()
+    assert len(capped_lines) == 20
+    assert capped_lines[0] == "1. Образ «альбом» передавать с мягкой интонацией."
+    assert capped_lines[-1] == "20. Образ «фонарь» передавать с мягкой интонацией."
+
