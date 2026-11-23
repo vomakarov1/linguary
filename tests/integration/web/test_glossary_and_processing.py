@@ -55,9 +55,84 @@ def test_glossary_review_exposes_pending_items(
                 "note": "",
                 "other_spellings": [],
                 "has_decision_conflict": False,
+                "mention_count": 5,
+                "chapter_count": 1,
             }
         ],
     }
+
+
+def test_glossary_html_and_schema_expose_mention_and_chapter_counts(
+    client: TestClient, application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GlossaryItemResponse and glossary.html expose mention_count and chapter_count when non-zero."""
+    from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
+    from linguary.domain import ConceptType
+    from linguary.web.schemas import GlossaryItemResponse
+
+    candidate = glossary_candidate()
+    scenario = store_book(
+        application,
+        glossary_candidates={0: (candidate,)},
+        chapters=(("Mr. Bennet " * 5,),),
+    )
+
+    html = client.get(
+        f"/books/{scenario.book_id}/glossary",
+        headers={"accept": "text/html"},
+    )
+    assert html.status_code == 200
+    assert "Упоминаний: 5 (глав: 1)." in html.text
+
+    zero_item = GlossaryReviewItem(
+        concept_id="c-zero",
+        source_text="Ghost",
+        type=ConceptType.TERM,
+        suggested_translation="призрак",
+        confidence=0.9,
+        model_flagged_review=False,
+        has_translation_conflict=False,
+        requires_review=False,
+        mention_count=0,
+        chapter_count=0,
+    )
+    nonzero_item = replace(zero_item, concept_id="c-nonzero", source_text="Wizard", mention_count=3, chapter_count=2)
+    zero_dto = GlossaryItemResponse.of_item(zero_item)
+    nonzero_dto = GlossaryItemResponse.of_item(nonzero_item)
+    assert (zero_dto.mention_count, zero_dto.chapter_count) == (0, 0)
+    assert (nonzero_dto.mention_count, nonzero_dto.chapter_count) == (3, 2)
+
+    monkeypatch.setattr(
+        application.approve_glossary,
+        "review",
+        lambda book_id: GlossaryReview(
+            book_id=book_id,
+            book_status=BookStatus.GLOSSARY_REVIEW,
+            items=(zero_item,),
+        ),
+    )
+    rendered_zero = client.get(
+        f"/books/{scenario.book_id}/glossary",
+        headers={"accept": "text/html"},
+    )
+    assert rendered_zero.status_code == 200
+    assert "Упоминаний:" not in rendered_zero.text
+
+    monkeypatch.setattr(
+        application.approve_glossary,
+        "review",
+        lambda book_id: GlossaryReview(
+            book_id=book_id,
+            book_status=BookStatus.GLOSSARY_REVIEW,
+            items=(nonzero_item,),
+        ),
+    )
+    rendered_nonzero = client.get(
+        f"/books/{scenario.book_id}/glossary",
+        headers={"accept": "text/html"},
+    )
+    assert rendered_nonzero.status_code == 200
+    assert "Упоминаний: 3 (глав: 2)." in rendered_nonzero.text
 
 
 @pytest.mark.parametrize(

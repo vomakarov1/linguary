@@ -1898,6 +1898,7 @@ _NARRATIVE_RULE_PRIORITY = (
     "scene_summary_language",
     "translation_instructions_language",
     "name_assessment_conflict",
+    "generic_person_candidate",
     "spoiler_name_leak",
     "speaker_subject_anchor",
     "gender_plural_subject",
@@ -2162,6 +2163,37 @@ def _collect_name_assessment_conflicts(
                 f"«{candidate.source_text}»: описательная именная группа с opaque_name=False "
                 f"должна переводиться по смыслу (meaning), а не методом sound {_ALLOWED_REVIEW_REASONS_HINT}"
             )
+    return list(dict.fromkeys(details))
+
+
+_GENERIC_PERSON_CANDIDATE_PATTERNS = (
+    re.compile(r"^(?:the|a|an)\s+[a-z]+$"),
+    re.compile(r"^(?:the|a|an)\s+[a-z]+\s+of\s+(?:the|a|an|my|his|her|their)\s+[a-z]+$"),
+    re.compile(
+        r"^(?:the|a|an)\s+"
+        r"(?:old|young|little|small|big|tall|short|fat|thin|other|first|last|poor|rich)\s+"
+        r"(?:man|woman|boy|girl|goblin|person|child|stranger|owner|clerk|guard|driver|keeper|wizard|witch)$"
+    ),
+)
+
+
+def _is_generic_person_candidate(source_text: str) -> bool:
+    """Return True for all-lowercase generic noun-phrase candidates tagged as PERSON."""
+    stripped = source_text.strip()
+    if not stripped or any(ch.isupper() for ch in stripped):
+        return False
+    return any(pattern.match(stripped) is not None for pattern in _GENERIC_PERSON_CANDIDATE_PATTERNS)
+
+
+def _collect_generic_person_candidates(
+    candidates: Sequence[GlossaryCandidateResponse],
+) -> list[str]:
+    details: list[str] = []
+    for candidate in candidates:
+        if candidate.type is not ConceptType.PERSON:
+            continue
+        if _is_generic_person_candidate(candidate.source_text):
+            details.append(f"«{candidate.source_text}»")
     return list(dict.fromkeys(details))
 
 
@@ -3349,6 +3381,16 @@ def validate_narrative_response(
             (
                 "name_assessment_conflict",
                 f"несогласованная оценка перевода имени ({'; '.join(assessment_conflicts)})",
+                (),
+            )
+        )
+    generic_persons = _collect_generic_person_candidates(payload.glossary_candidates)
+    if generic_persons:
+        issues.append(
+            (
+                "generic_person_candidate",
+                "общие описательные выражения без имени собственного не должны добавляться как "
+                f"персонаж type=person ({', '.join(generic_persons)})",
                 (),
             )
         )

@@ -1734,6 +1734,127 @@ def test_validate_narrative_checks_translation_instructions_language():
     assert prio_exc.value.violation.rule_code == 'scene_summary_language'
 
 
+def test_validate_narrative_rejects_generic_lowercase_person_candidates():
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationMethod,
+        NameTranslationPolicy,
+        NameTranslationReviewReason,
+        NameTranslationStrategy,
+    )
+
+    meaning_policy = NameTranslationPolicy(1, NameTranslationStrategy.MEANING)
+
+    for generic in (
+        'the boy',
+        'the goblin',
+        'a stranger',
+        'the owner of the hotel',
+        'a member of his family',
+        'the old man',
+        'an old wizard',
+    ):
+        cand = GlossaryCandidateResponse(
+            source_text=generic,
+            type=ConceptType.PERSON,
+            suggested_translation='персонаж',
+            confidence=0.9,
+            model_flagged_review=False,
+        )
+        with pytest.raises(AnalysisMergeError) as exc_info:
+            validate_narrative_response(
+                NarrativeAnalysisResponse(
+                    'Keep voice.', 'Summary.',
+                    glossary_candidates=(cand,),
+                    scenes=(scene('b1', 'b3'),),
+                ),
+                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            )
+        assert exc_info.value.violation is not None
+        assert exc_info.value.violation.rule_code == 'generic_person_candidate'
+
+    # Allowed: capitalized particles/names, non-PERSON type, and 'the freckled boy' (MEANING + opaque_name=False).
+    allowed = (
+        GlossaryCandidateResponse(
+            source_text='van Helsing',
+            type=ConceptType.PERSON,
+            suggested_translation='ван Хельсинг',
+            confidence=0.95,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='de la Cruz',
+            type=ConceptType.PERSON,
+            suggested_translation='де ла Крус',
+            confidence=0.95,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='The boy',
+            type=ConceptType.PERSON,
+            suggested_translation='Мальчик',
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='the boy',
+            type=ConceptType.TERM,
+            suggested_translation='мальчик',
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='the freckled boy',
+            type=ConceptType.PERSON,
+            suggested_translation='веснушчатый мальчик',
+            confidence=0.9,
+            model_flagged_review=False,
+            name_translation_assessment=NameTranslationAssessment(
+                NameTranslationMethod.MEANING, True, (), 'Описательное прозвище.', opaque_name=False,
+            ),
+        ),
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=allowed,
+            scenes=(scene('b1', 'b3'),),
+        ),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        name_translation_policy=meaning_policy,
+    )
+
+    # Priority: name_assessment_conflict outranks generic_person_candidate.
+    both_conflict = GlossaryCandidateResponse(
+        source_text='the old man',
+        type=ConceptType.PERSON,
+        suggested_translation='старик',
+        confidence=0.85,
+        model_flagged_review=True,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.SOUND,
+            False,
+            (NameTranslationReviewReason.AMBIGUOUS,),
+            'Описательное.',
+            opaque_name=False,
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as prio_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                glossary_candidates=(both_conflict,),
+                scenes=(scene('b1', 'b3'),),
+            ),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        )
+    assert prio_exc.value.violation is not None
+    assert prio_exc.value.violation.rule_code == 'name_assessment_conflict'
+
+
+
 
 
 

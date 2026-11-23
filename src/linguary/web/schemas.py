@@ -127,6 +127,8 @@ class GlossaryItemResponse(BaseModel):
     note: str = ""
     other_spellings: tuple[str, ...] = ()
     has_decision_conflict: bool = False
+    mention_count: int = 0
+    chapter_count: int = 0
 
     @classmethod
     def of_item(cls, item: GlossaryReviewItem) -> GlossaryItemResponse:
@@ -159,6 +161,8 @@ class GlossaryItemResponse(BaseModel):
             note=item.note,
             other_spellings=item.other_spellings,
             has_decision_conflict=item.has_decision_conflict,
+            mention_count=item.mention_count,
+            chapter_count=item.chapter_count,
         )
 
 

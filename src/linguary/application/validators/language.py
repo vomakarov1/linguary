@@ -24,6 +24,7 @@ from linguary.application.validators.treatment import (
 )
 from linguary.domain import (
     BlockTreatment,
+    ConceptType,
     GlossarySnapshotEntry,
     TranslationUnit,
     TranslationUnitItem,
@@ -233,7 +234,11 @@ def _calque_initial_warnings(
         elif len(src_words) == 1 and len(tr_words) == 1:
             if src_words[0][0].casefold() == "h" and tr_words[0][0].casefold() == "г":
                 has_h_to_g_first = True
-            elif src_words[0][0].isupper() and tr_words[0][0].isupper():
+            elif (
+                entry.type is ConceptType.PERSON
+                and src_words[0][0].isupper()
+                and tr_words[0][0].isupper()
+            ):
                 single_surnames.append(tr_words[0])
 
     if has_h_to_g_first:
@@ -267,8 +272,13 @@ def _glossary_mismatch_warnings(
         if not source_term or not _source_contains_term(source_text, source_term):
             continue
         if not _translation_contains_term(translated_text, entry.translation):
+            glossary_kind = (
+                "обязательным глоссарием"
+                if entry.status.is_user_decision
+                else "предложенным глоссарием"
+            )
             warnings.append(
-                f"блок {block_id}: расхождение с обязательным глоссарием для {source_term!r} "
+                f"блок {block_id}: расхождение с {glossary_kind} для {source_term!r} "
                 f"(ожидалось «{entry.translation}»)"
             )
     return warnings

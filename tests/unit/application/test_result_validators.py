@@ -3039,5 +3039,238 @@ def test_validation_policy_v3_enforces_strict_dialogue_checks_preserving_v2() ->
     assert validate(dialect_payload, unit=dialect_unit, validation_policy="v3")
 
 
+def test_suggested_glossary_warnings_calque_person_restriction_and_v3_union_wiring() -> None:
+    """P2.T5B: v3 checks union (is_user_decision | always_requires_review), differentiates suggested copy, and limits single_surnames to PERSON."""
+    import asyncio
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.ports.llm import LLMResponse
+    from linguary.application.translation_policy import (
+        CURRENT_TRANSLATION_POLICY,
+        TRANSLATION_RELIABILITY_POLICY_V3,
+    )
+    from linguary.application.validators.language import translation_quality_warnings
+    from linguary.domain import (
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        ConceptType,
+        DocumentSection,
+        GlossarySnapshot,
+        GlossarySnapshotEntry,
+        LLMCallStage,
+        TermStatus,
+    )
+    from linguary.domain.llm_log import CallContext
+
+    entries = (
+        GlossarySnapshotEntry(
+            source_text="Harry",
+            translation="Гарри",
+            type=ConceptType.PERSON,
+            status=TermStatus.SUGGESTED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Potter",
+            translation="Поттер",
+            type=ConceptType.PERSON,
+            status=TermStatus.SUGGESTED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Hogwarts",
+            translation="Хогвартс",
+            type=ConceptType.PLACE,
+            status=TermStatus.SUGGESTED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="London",
+            translation="Лондон",
+            type=ConceptType.PLACE,
+            status=TermStatus.SUGGESTED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Wand",
+            translation="палочка",
+            type=ConceptType.TERM,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Owl",
+            translation="сова",
+            type=ConceptType.TERM,
+            status=TermStatus.SUGGESTED,
+        ),
+    )
+
+    # 1. _glossary_mismatch_warnings differentiates mandatory vs suggested, and _calque_initial_warnings
+    #    restricts single_surnames to ConceptType.PERSON.
+    block = make_block(
+        order=0,
+        text="Mr H. Potter took his Wand and Owl from H. London to Hogwarts.",
+    )
+    unit = make_unit((block,))
+    payload = make_response(
+        (
+            make_block_result(
+                block,
+                translated_text="Мистер Х. Поттер взял свой жезл и филина из Х. Лондона в Школу магии.",
+            ),
+        )
+    )
+    warnings = translation_quality_warnings(
+        payload,
+        unit=unit,
+        target_language="ru",
+        mandatory_glossary=entries,
+    )
+    assert any(
+        "расхождение с обязательным глоссарием" in w and "'Wand'" in w
+        for w in warnings
+    )
+    assert any(
+        "расхождение с предложенным глоссарием" in w and "'Hogwarts'" in w
+        for w in warnings
+    )
+    assert not any(
+        "расхождение с обязательным глоссарием" in w and "'Hogwarts'" in w
+        for w in warnings
+    )
+    assert any("Х. Поттер" in w for w in warnings)
+    assert not any("Х. Лондон" in w for w in warnings)
+
+    # 2. block_processing.TranslationCall passes union under v3 and only mandatory_entries under v2.
+    snapshot = GlossarySnapshot(entries=entries)
+    section = DocumentSection(
+        id=block.section_id,
+        document_id="book-v3",
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=(block,),
+    )
+    document = CanonicalDocument(
+        id="book-v3",
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    plan = TreatmentPlan.of_treatments(section.id, ((block.id, BlockTreatment.TRANSLATE),))
+    analysis = ChapterAnalysis.create(
+        id="analysis-v3",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(block.id,),
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=snapshot,
+    )
+    call_payload = make_response(
+        (
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Мистер Х. Поттер взял свой жезл и филина в Школу магии.",
+            ),
+        )
+    )
+
+    def run_with_policy(policy_version: str) -> tuple[str, ...]:
+        cond_id = str(uuid4())
+        root_id = str(uuid4())
+        rec_attempt_id = str(uuid4())
+        conditions = SimpleNamespace(
+            id=cond_id,
+            payload={"models": {"processing": "gpt-test"}, "versions": {"validators": 3}},
+        )
+        root = SimpleNamespace(
+            id=root_id,
+            conditions_id=cond_id,
+            policy_version=policy_version,
+            generation=1,
+        )
+        rec_ctx = CallContext(
+            conditions_id=cond_id,
+            stage=LLMCallStage.TRANSLATION_UNIT.value,
+            scope_id="scope-1",
+            ordered_block_ids=(block.id,),
+            attempt_id=rec_attempt_id,
+            generation=0,
+            assigned_model="gpt-test",
+            prompt_hash="a" * 64,
+            root_id=root_id,
+            policy_version=policy_version,
+        )
+        fake_tx = SimpleNamespace(
+            runs=SimpleNamespace(active_for_book=lambda _bid: None),
+            work=SimpleNamespace(
+                get_binding=lambda _kind, _key: None,
+                get_conditions=lambda cid: conditions if cid == cond_id else None,
+                get_root=lambda rid: root if rid == root_id else None,
+                begin_recovery_attempt=lambda *a, **kw: rec_ctx,
+                owns_recovery_attempt=lambda aid: aid == rec_attempt_id,
+            ),
+        )
+        fake_uow = SimpleNamespace(
+            transaction=lambda: nullcontext(fake_tx),
+            _diagnostics_service=SimpleNamespace(
+                ensure_available=lambda: None,
+                fail=lambda: None,
+            ),
+        )
+
+        class _FakeLLM:
+            async def generate(self, request):
+                return LLMResponse(
+                    payload=call_payload,
+                    provider="fake",
+                    model="gpt-test",
+                    truncated=False,
+                    call_context=request.call_context,
+                )
+
+        call = TranslationCall(
+            unit_of_work=fake_uow,  # type: ignore[arg-type]
+            llm_client=_FakeLLM(),  # type: ignore[arg-type]
+            retry_policy=RetryPolicy(max_attempts=1),
+            validator=make_validator(),
+            sleep=lambda _: None,  # type: ignore[arg-type]
+        )
+        res = asyncio.run(
+            call.request(
+                context,
+                unit=unit,
+                target_language=TARGET_LANGUAGE,
+                note_ids=note_ids(),
+                recovery=(root_id, "scope-1"),
+                glossary=snapshot,
+            )
+        )
+        return tuple(w.message for w in res.results[0].warnings)
+
+    v3_warnings = run_with_policy(CURRENT_TRANSLATION_POLICY)
+    assert any("расхождение с обязательным глоссарием" in m and "'Wand'" in m for m in v3_warnings)
+    assert any("расхождение с предложенным глоссарием" in m and "'Hogwarts'" in m for m in v3_warnings)
+    assert any("Х. Поттер" in m for m in v3_warnings)
+    assert not any("'Owl'" in m for m in v3_warnings)
+
+    v2_warnings = run_with_policy(TRANSLATION_RELIABILITY_POLICY_V3)
+    assert any("расхождение с обязательным глоссарием" in m and "'Wand'" in m for m in v2_warnings)
+    assert not any("'Hogwarts'" in m for m in v2_warnings)
+    assert not any("Х. Поттер" in m for m in v2_warnings)
+
+
+
 
 

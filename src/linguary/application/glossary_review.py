@@ -96,6 +96,8 @@ class GlossaryReviewItem:
     has_translation_conflict: bool
     requires_review: bool
     is_frequent: bool = True
+    mention_count: int = 0
+    chapter_count: int = 0
     decision: TermConcept | None = None
     suggested_note: str = ""
     spellings: tuple[str, ...] = ()
@@ -391,9 +393,11 @@ def _review_item(
         if total_chapters is not None
         else min_chapters
     )
+    mention_count = 0 if count_mentions is None else count_mentions(spellings)
+    chapter_count = len({candidate.analysis_id for candidate in group})
     is_frequent = count_mentions is None or (
-        count_mentions(spellings) >= min_mentions
-        or len({candidate.analysis_id for candidate in group}) >= effective_min_chapters
+        mention_count >= min_mentions
+        or chapter_count >= effective_min_chapters
     )
     decision, superseded = _chosen_decision(decisions, shown=spellings[0])
     concept_type = next(
@@ -461,6 +465,8 @@ def _review_item(
         model_flagged_review=model_flagged,
         has_translation_conflict=conflict,
         is_frequent=is_frequent,
+        mention_count=mention_count,
+        chapter_count=chapter_count,
         requires_review=compute_requires_review(
             type=concept_type,
             confidence=confidence,

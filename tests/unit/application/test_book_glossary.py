@@ -739,3 +739,63 @@ def test_build_glossary_review_adapts_chapter_threshold_from_document() -> None:
         min_chapters=3,
     )
     assert not default_two.items[0].is_frequent
+
+
+def test_review_computes_mention_and_chapter_counts_unconditionally() -> None:
+    """mention_count and chapter_count are always populated without `or` short-circuiting."""
+    cand_ch1 = make_analysis_candidate(analysis_id="analysis-1", source_text="Hogwarts")
+    cand_ch2 = make_analysis_candidate(analysis_id="analysis-2", source_text="Hogwarts")
+    cand_ch3 = make_analysis_candidate(analysis_id="analysis-3", source_text="Hogwarts")
+
+    mention_calls = 0
+
+    def counting_mentions(_spellings: Sequence[str]) -> int:
+        nonlocal mention_calls
+        mention_calls += 1
+        return 12
+
+    # High mention count still computes chapter_count accurately.
+    by_mentions = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=counting_mentions,
+        min_mentions=5,
+        min_chapters=3,
+    )
+    assert mention_calls == 1
+    assert by_mentions.items[0].is_frequent
+    assert by_mentions.items[0].mention_count == 12
+    assert by_mentions.items[0].chapter_count == 2
+
+    # High chapter count still invokes count_mentions and keeps mention_count.
+    mention_calls = 0
+
+    def low_mentions(_spellings: Sequence[str]) -> int:
+        nonlocal mention_calls
+        mention_calls += 1
+        return 2
+
+    by_chapters = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2), chapter_three(cand_ch3)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=low_mentions,
+        min_mentions=5,
+        min_chapters=3,
+    )
+    assert mention_calls == 1
+    assert by_chapters.items[0].is_frequent
+    assert by_chapters.items[0].mention_count == 2
+    assert by_chapters.items[0].chapter_count == 3
+
+    # When count_mentions is None, mention_count=0 and chapter_count reflects distinct analyses.
+    without_counter = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=None,
+    )
+    assert without_counter.items[0].mention_count == 0
+    assert without_counter.items[0].chapter_count == 2
+

@@ -40,7 +40,11 @@ from linguary.application.retry_policy import (
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
 from linguary.application.token_budget import recommended_unit_max_completion_tokens
-from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
+from linguary.application.translation_policy import (
+    require_policy,
+    TranslationPolicyUnavailable,
+    validation_policy_level,
+)
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_content_coverage, resolve_response_evidence, validate_content_coverage
@@ -56,6 +60,7 @@ from linguary.domain import (
     DocumentSection,
     ErrorType,
     GlossarySnapshot,
+    GlossarySnapshotEntry,
     ProcessingTask,
     TaskStatus,
     TaskType,
@@ -299,6 +304,18 @@ class TranslationCall:
                 if physical_context is not None and response.call_context != physical_context:
                     raise ConditionsError('conditions_unavailable')
                 mapped = context.to_block_ids(response.payload)
+                validation_policy = 'v1' if policy is None else policy.validation_policy
+                effective_glossary: tuple[GlossarySnapshotEntry, ...] = ()
+                if resolved_glossary is not None:
+                    if validation_policy_level(validation_policy) >= 3:
+                        effective_glossary = tuple(
+                            entry
+                            for entry in resolved_glossary.entries
+                            if entry.status.is_user_decision
+                            or entry.type.always_requires_review
+                        )
+                    else:
+                        effective_glossary = resolved_glossary.mandatory_entries
                 results = self._validator.validate(
                     mapped,
                     unit=unit,
@@ -307,12 +324,8 @@ class TranslationCall:
                     note_id_factory=note_ids,
                     truncated=response.truncated,
                     expectation=context.expectation,
-                    mandatory_glossary=(
-                        ()
-                        if resolved_glossary is None
-                        else resolved_glossary.mandatory_entries
-                    ),
-                    validation_policy='v1' if policy is None else policy.validation_policy,
+                    mandatory_glossary=effective_glossary,
+                    validation_policy=validation_policy,
                     protected_quotes=() if unit is None else source_quote_fragments(
                         item.block.text for item in unit.items
                     ),
