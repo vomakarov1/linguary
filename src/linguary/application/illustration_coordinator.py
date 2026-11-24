@@ -43,6 +43,18 @@ class IllustrationCoordinator:
         self._plan_reference_scopes = plan_reference_scopes
         self._plan_chapter_scopes = plan_chapter_scopes
 
+    def bind_planners(
+        self,
+        *,
+        plan_reference_scopes: Callable[..., bool] | None = None,
+        plan_chapter_scopes: Callable[..., bool] | None = None,
+    ) -> None:
+        """Attach reference/chapter planners after `RuntimeSettings` construction."""
+        if plan_reference_scopes is not None:
+            self._plan_reference_scopes = plan_reference_scopes
+        if plan_chapter_scopes is not None:
+            self._plan_chapter_scopes = plan_chapter_scopes
+
     def reconcile_in_transaction(
         self,
         tx: UnitOfWork,

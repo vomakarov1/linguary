@@ -88,10 +88,12 @@ class TaskRunner:
         classify_error: TaskErrorClassifier | None = None,
         maintenance: Callable[[], None] | None = None,
         recover_work: Callable[[], None] | None = None,
+        after_recovery: Callable[[], None] | None = None,
     ) -> None:
         self._queue = queue
         self._maintenance = maintenance
         self._recover_work = recover_work
+        self._after_recovery = after_recovery
         self._handlers = dict(handlers)
         self._classify_error = classify_error or classify_task_error
 
@@ -109,6 +111,8 @@ class TaskRunner:
         interrupted = tuple(task.interrupt() for task in await self._queue.list_running())
         for task in interrupted:
             await self._queue.save(task)
+        if self._after_recovery is not None:
+            await asyncio.to_thread(self._after_recovery)
         return interrupted
 
     async def run_next(self) -> ProcessingTask | None:
@@ -136,13 +140,17 @@ class TaskRunner:
         handler = self._handlers.get(task.task_type)
         if handler is None:
             return await self._save(task.fail(_unregistered_handler_error(task)))
+        terminal = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.SUPERSEDED}
         try:
             await handler(task)
         except Exception as error:  # any use case exception results in a failed task
             current = await self._reload_task(task)
-            if current is not None and current.id == task.id and current.status is TaskStatus.SUCCEEDED:
+            if current is not None and current.id == task.id and current.status in terminal:
                 return current
             return await self._save(task.fail(self._classify_error(error)))
+        current = await self._reload_task(task)
+        if current is not None and current.id == task.id and current.status in terminal:
+            return current
         return await self._save(task.succeed())
 
     async def _reload_task(self, task: ProcessingTask) -> ProcessingTask | None:

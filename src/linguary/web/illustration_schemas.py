@@ -150,6 +150,15 @@ class ParsedSettingsInput:
     return_params: IllustrationReturnParams
 
 
+@dataclass(frozen=True, slots=True)
+class ParsedCommandInput:
+    expected_revision: int
+    expected_generation_id: str | None
+    section_id: str | None
+    force_new_generation: bool
+    return_params: IllustrationReturnParams
+
+
 _API01_ALLOWED_QUERY = frozenset(
     {
         "offset",
@@ -189,6 +198,23 @@ _RETURN_FORM_KEYS = frozenset(
     }
 )
 _SETTINGS_FORM_KEYS = _SETTINGS_JSON_KEYS | _RETURN_FORM_KEYS
+_PREPARE_JSON_KEYS = frozenset(
+    {
+        "expected_revision",
+        "expected_generation_id",
+        "section_id",
+        "force_new_generation",
+    }
+)
+_PREPARE_FORM_KEYS = _PREPARE_JSON_KEYS | _RETURN_FORM_KEYS
+_RETRY_JSON_KEYS = frozenset(
+    {
+        "expected_revision",
+        "expected_generation_id",
+        "section_id",
+    }
+)
+_RETRY_FORM_KEYS = _RETRY_JSON_KEYS | _RETURN_FORM_KEYS
 
 
 def parse_api01_query(multi_items: Sequence[tuple[str, str]]) -> IllustrationGetQuery:
@@ -340,6 +366,74 @@ def parse_settings_form(multi_items: Sequence[tuple[str, Any]]) -> ParsedSetting
     return ParsedSettingsInput(
         expected_revision=expected_revision,
         settings=settings,
+        return_params=return_params,
+    )
+
+
+def parse_command_json(raw: Any, *, allow_force_new: bool, require_generation: bool) -> ParsedCommandInput:
+    if not isinstance(raw, Mapping):
+        raise _invalid("ожидался JSON-объект")
+    allowed = _PREPARE_JSON_KEYS if allow_force_new else _RETRY_JSON_KEYS
+    unknown = set(raw.keys()) - allowed
+    if unknown:
+        raise _invalid("запрос содержит неизвестные или запрещённые поля")
+    if "expected_revision" not in raw:
+        raise _invalid("отсутствует обязательное поле expected_revision")
+    expected_revision = _strict_int(raw["expected_revision"], min_value=0)
+    expected_generation_id = _optional_clean_str(raw.get("expected_generation_id"))
+    if require_generation and expected_generation_id is None:
+        raise _invalid("отсутствует обязательное поле expected_generation_id")
+    section_id = _optional_clean_str(raw.get("section_id"))
+    force_new = False
+    if allow_force_new and "force_new_generation" in raw:
+        raw_force = raw["force_new_generation"]
+        if type(raw_force) is not bool:
+            raise _invalid("поле force_new_generation должно быть логическим")
+        force_new = raw_force
+    return ParsedCommandInput(
+        expected_revision=expected_revision,
+        expected_generation_id=expected_generation_id,
+        section_id=section_id,
+        force_new_generation=force_new,
+        return_params=IllustrationReturnParams(),
+    )
+
+
+def parse_command_form(
+    multi_items: Sequence[tuple[str, Any]],
+    *,
+    allow_force_new: bool,
+    require_generation: bool,
+) -> ParsedCommandInput:
+    allowed = _PREPARE_FORM_KEYS if allow_force_new else _RETRY_FORM_KEYS
+    raw: dict[str, Any] = {}
+    for key, value in multi_items:
+        if key not in allowed or key in raw:
+            raise _invalid(f"неизвестное или повторяющееся поле формы {key!r}")
+        if not isinstance(value, str):
+            raise _invalid(f"поле формы {key!r} должно быть строкой")
+        raw[key] = value
+
+    # Syntactically validate return_* before any DB mutation!
+    return_params = parse_return_params_from_form(raw)
+
+    if "expected_revision" not in raw:
+        raise _invalid("отсутствует expected_revision")
+    expected_revision = _strict_int(raw["expected_revision"], min_value=0, from_str=True)
+    expected_generation_id = _optional_clean_str(raw.get("expected_generation_id"))
+    if require_generation and expected_generation_id is None:
+        raise _invalid("отсутствует обязательное поле expected_generation_id")
+    section_id = _optional_clean_str(raw.get("section_id"))
+    force_new = (
+        _parse_form_bool(raw.get("force_new_generation"), default=False)
+        if allow_force_new
+        else False
+    )
+    return ParsedCommandInput(
+        expected_revision=expected_revision,
+        expected_generation_id=expected_generation_id,
+        section_id=section_id,
+        force_new_generation=force_new,
         return_params=return_params,
     )
 
@@ -677,9 +771,12 @@ __all__ = [
     "IllustrationRegistryResponse",
     "IllustrationReturnParams",
     "IllustrationViewResponse",
+    "ParsedCommandInput",
     "ParsedSettingsInput",
     "parse_api01_query",
     "parse_api04_query",
+    "parse_command_form",
+    "parse_command_json",
     "parse_return_params_from_form",
     "parse_settings_form",
     "parse_settings_json",

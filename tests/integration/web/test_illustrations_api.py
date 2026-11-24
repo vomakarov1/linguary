@@ -839,3 +839,591 @@ def test_all_12_states_28_reasons_and_4_registry_kinds_have_russian_labels() -> 
     assert templates.env.globals["illustration_reason_labels"] is ILLUSTRATION_REASON_LABELS
     assert templates.env.globals["illustration_registry_kind_labels"] is ILLUSTRATION_REGISTRY_KIND_LABELS
     assert templates.env.globals["illustration_style_labels"] is ILLUSTRATION_STYLE_LABELS
+
+
+# ── P4.T1 API-03 tests ────────────────────────────────────────────────────────
+
+
+def _seed_staged_ready_book(
+    app: Application,
+    tmp_path: Path,
+    *,
+    book_id: str = "book-p4",
+    num_sections: int = 2,
+    include_front_matter: bool = False,
+) -> tuple[CanonicalDocument, str, str]:
+    from hashlib import sha256
+    from linguary.application.analysis_pass_cache import encode_pass
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.illustration_source import _pass_model_dependencies
+    from linguary.application.llm_dto import NarrativeAnalysisResponse, QuotedSceneResponse
+    from linguary.application.token_budget import narrative_max_fragment_blocks_for
+    from linguary.composition.book_runtime import conditions_payload
+    from linguary.domain import AnalysisPassKind, AnalysisPassResult
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    epub_file = tmp_path / f"{book_id}.epub"
+    epub_bytes = f"epub-bytes-{book_id}".encode()
+    epub_file.write_bytes(epub_bytes)
+    source_sha = sha256(epub_bytes).hexdigest()
+    conditions_id = str(uuid4())
+
+    sections: list[DocumentSection] = []
+    order = 0
+    if include_front_matter:
+        sections.append(
+            DocumentSection(
+                id=f"{book_id}-fm",
+                document_id=book_id,
+                title="Title Page",
+                order=order,
+                source_resource_path="Text/title.xhtml",
+                blocks=(
+                    DocumentBlock(
+                        id=f"{book_id}:fm:0",
+                        section_id=f"{book_id}-fm",
+                        type=BlockType.PARAGRAPH,
+                        order=0,
+                        text="Published 2026.",
+                        source_reference=SourceReference("Text/title.xhtml", "p[0]"),
+                        support_status=SupportStatus.SUPPORTED,
+                    ),
+                ),
+            )
+        )
+        order += 1
+
+    content_sections: list[DocumentSection] = []
+    for idx in range(num_sections):
+        sec_id = f"{book_id}-sec-{idx}"
+        blk_id = f"{book_id}:blk:{idx}"
+        sec = DocumentSection(
+            id=sec_id,
+            document_id=book_id,
+            title=f"Chapter {idx + 1}",
+            order=order,
+            source_resource_path=f"Text/ch{idx + 1}.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id=blk_id,
+                    section_id=sec_id,
+                    type=BlockType.PARAGRAPH,
+                    order=0,
+                    text=f"Alice walked through hall {idx + 1} with a silver lantern.",
+                    source_reference=SourceReference(f"Text/ch{idx + 1}.xhtml", "p[0]"),
+                    support_status=SupportStatus.SUPPORTED,
+                ),
+            ),
+        )
+        sections.append(sec)
+        content_sections.append(sec)
+        order += 1
+
+    doc = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title=f"Book {book_id}"),
+        source_language="en",
+        target_language="ru",
+        sections=tuple(sections),
+    )
+    book = BookRecord(
+        id=book_id,
+        metadata=doc.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.GLOSSARY_REVIEW,
+        source_epub_path=str(epub_file),
+        created_at=datetime(2026, 11, 1, tzinfo=UTC),
+    )
+    cond_payload = conditions_payload(book, app.settings, revision=1, profile="content-plan-v3")
+    cond_payload["source_sha256"] = source_sha
+    cond_payload["staged_analysis"] = True
+    cond_payload["llm_parameters"]["staged_analysis"] = True
+    cond_payload["checks"]["sequential_analysis"] = False
+    prompts_version = int(cond_payload["versions"]["prompts"])
+    strategy = app.settings.reading.name_translation_strategy
+    ctx_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        name_translation_policy=NameTranslationPolicy(
+            version=1, strategy=NameTranslationStrategy(strategy)
+        ),
+        reader_level=app.settings.reading.normalized_level,
+    )
+    model_deps = _pass_model_dependencies(cond_payload)
+    max_frag = narrative_max_fragment_blocks_for(cond_payload["llm_parameters"])
+
+    with app.unit_of_work.transaction() as tx:
+        tx.books.add(book)
+        tx.documents.save(doc)
+        tx.work.add_conditions(
+            BookConditions(
+                id=conditions_id,
+                book_id=book_id,
+                revision=1,
+                payload=cond_payload,
+                created_at=datetime(2026, 11, 1, tzinfo=UTC),
+            )
+        )
+        for sec in content_sections:
+            narrative = NarrativeAnalysisResponse(
+                translation_instructions="Сохранять спокойный ритм повествования.",
+                chapter_summary=f"Alice walks quietly through {sec.title} holding a lantern.",
+                glossary_candidates=(),
+                context_facts=(),
+                scenes=(
+                    QuotedSceneResponse(
+                        start_block_id=sec.blocks[0].id,
+                        end_block_id=sec.blocks[-1].id,
+                        summary=f"Сцена в {sec.title}.",
+                        location="Зал",
+                        participants=(),
+                        visual_facts=(),
+                        visual_assumptions=(),
+                        continues_previous_scene=False,
+                    ),
+                ),
+            )
+            encoded = encode_pass(narrative)
+            encoded["input_suggestions"] = []
+            encoded["input_context"] = {
+                "schema_version": 1,
+                "sequential_analysis": False,
+                "parallel_batch": False,
+                "seed_active": False,
+                "user_decisions": [],
+                "nonbinding_suggestions": [],
+                "prompts_version": prompts_version,
+            }
+            input_sha = ctx_builder.narrative_input_sha256(
+                doc,
+                sec,
+                (),
+                (),
+                (),
+                model_dependencies=model_deps,
+                max_fragment_blocks=max_frag,
+            )
+            tx.analyses.save_pass(
+                AnalysisPassResult(
+                    id=f"pass-{sec.id}",
+                    book_id=book_id,
+                    section_id=sec.id,
+                    pass_kind=AnalysisPassKind.NARRATIVE,
+                    scope_key="",
+                    input_sha256=input_sha,
+                    output_sha256=canonical_sha(encoded),
+                    conditions_id=conditions_id,
+                    attempt_id=None,
+                    payload=encoded,
+                )
+            )
+        tx.illustrations.save_settings(
+            book_id,
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=3,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+    return doc, conditions_id, source_sha
+
+
+def _build_ready_app(tmp_path: Path) -> tuple[Application, TestClient]:
+    settings = AppSettings(
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+        llm=LLMSettings(
+            provider="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5-mini",
+            api_key="test-key",
+            staged_analysis=True,
+        ),
+        checks=CheckSettings(sequential_analysis=False),
+        server=ServerSettings(host="127.0.0.1", port=8000),
+    )
+    from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
+
+    app = build_application(settings=settings)
+    web_app = create_app(application=app, run_background_worker=False)
+    setattr(web_app.state, APPLICATION_STATE_ATTRIBUTE, app)
+    client = TestClient(web_app, base_url="http://127.0.0.1:8000")
+    return app, client
+
+
+def test_prepare_replay_one_generation_one_task(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-replay", num_sections=1)
+        r1 = client.post("/books/book-replay/illustrations/prepare", json={"expected_revision": 1})
+        assert r1.status_code == 202
+        gen_id = r1.json()["active_generation_id"]
+        assert gen_id is not None
+
+        r2 = client.post("/books/book-replay/illustrations/prepare", json={"expected_revision": 1})
+        assert r2.status_code == 202
+        assert r2.json()["active_generation_id"] == gen_id
+
+        with app.unit_of_work.read_transaction() as tx:
+            tasks = [
+                t
+                for t in tx.tasks.list_for_book("book-replay")
+                if t.task_type is TaskType.PREPARE_ILLUSTRATION_REFERENCE
+            ]
+            assert len(tasks) == 1
+            assert tasks[0].operation_id == f"{gen_id}:a1"
+            assert tasks[0].policy_version == "illustration-v1"
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_prepare_after_revocation_under_same_request_key_creates_new_generation(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-rev", num_sections=1)
+        r1 = client.post("/books/book-rev/illustrations/prepare", json={"expected_revision": 1})
+        assert r1.status_code == 202
+        gen1 = r1.json()["active_generation_id"]
+        assert gen1 is not None
+
+        with app.unit_of_work.transaction() as tx:
+            tx.illustrations.revoke_generation("book-rev", gen1, reason_code="source_changed")
+
+        r2 = client.post("/books/book-rev/illustrations/prepare", json={"expected_revision": 1})
+        assert r2.status_code == 202
+        gen2 = r2.json()["active_generation_id"]
+        assert gen2 is not None and gen2 != gen1
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_section_prepare_upgrades_to_full_book_preserving_ready_chapter(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-upg", num_sections=2)
+        r1 = client.post(
+            "/books/book-upg/illustrations/prepare",
+            json={"expected_revision": 1, "section_id": "book-upg-sec-0"},
+        )
+        assert r1.status_code == 202
+        gen_id = r1.json()["active_generation_id"]
+
+        # Simulate registry sealed and chapter 0 already ACCEPTED.
+        with app.unit_of_work.transaction() as tx:
+            tx.illustrations.seal_registry("book-upg", gen_id, registry_sha256="e" * 64)
+            snap = app.illustrations._source_snapshot_fn(tx, "book-upg")  # type: ignore[misc]
+            gen = tx.illustrations.get_generation("book-upg", gen_id)
+            assert gen is not None
+            ch0_specs = tx.illustrations.upsert_scopes(
+                gen_id,
+                [
+                    IllustrationScopeSpec(
+                        stage=IllustrationScopeStage.CHAPTER,
+                        scope_key="chapter:book-upg-sec-0",
+                        input_sha256="f" * 64,
+                        section_id="book-upg-sec-0",
+                        section_order=0,
+                        section_title="Chapter 1",
+                        state=IllustrationScopeState.ACCEPTED,
+                        payload={"schema_version": 1, "section_id": "book-upg-sec-0", "generation_id": gen_id, "style": "monochrome_ink", "moments": [], "zero_reason_ru": "Тихая глава."},
+                        output_sha256="1" * 64,
+                        summary={"moment_count": 0},
+                    )
+                ],
+            )
+            del snap, ch0_specs
+
+        # Expand to full book -> same generation, requested_sections expanded, chapter 0 stays ACCEPTED!
+        r2 = client.post(
+            "/books/book-upg/illustrations/prepare",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r2.status_code == 202
+        assert r2.json()["active_generation_id"] == gen_id
+        with app.unit_of_work.read_transaction() as tx:
+            gen = tx.illustrations.get_generation("book-upg", gen_id)
+            assert gen is not None
+            assert set(gen.requested_sections) == {"book-upg-sec-0", "book-upg-sec-1"}
+            ch0 = tx.illustrations.list_scopes(
+                gen_id, stage=IllustrationScopeStage.CHAPTER, section_id="book-upg-sec-0"
+            )[0]
+            assert ch0.state is IllustrationScopeState.ACCEPTED
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_prepare_before_initial_conditions_returns_409_source_incompatible(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_book(app, "book-nocond", num_sections=1)
+        with app.unit_of_work.transaction() as tx:
+            tx.illustrations.save_settings(
+                "book-nocond",
+                expected_revision=0,
+                settings=IllustrationSettings(
+                    enabled=True,
+                    max_per_chapter=3,
+                    model_reference="gpt-5-mini",
+                    model_prompts="gpt-5-mini",
+                ),
+            )
+        resp = client.post(
+            "/books/book-nocond/illustrations/prepare", json={"expected_revision": 1}
+        )
+        assert resp.status_code == 409
+        assert resp.json() == {"detail": {"reason_code": "source_incompatible"}}
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_prepare_on_non_content_section_returns_409(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(
+            app, tmp_path, book_id="book-fm", num_sections=1, include_front_matter=True
+        )
+        resp = client.post(
+            "/books/book-fm/illustrations/prepare",
+            json={"expected_revision": 1, "section_id": "book-fm-fm"},
+        )
+        assert resp.status_code == 409
+        assert resp.json() == {"detail": {"reason_code": "non_content_section"}}
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_prepare_supersedes_stale_generation_and_rejects_force_new_outside_limit_409(
+    tmp_path: Path,
+) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-stale", num_sections=1)
+        r1 = client.post("/books/book-stale/illustrations/prepare", json={"expected_revision": 1})
+        assert r1.status_code == 202
+        gen1 = r1.json()["active_generation_id"]
+
+        # force_new_generation on a non-limit-exhausted generation -> 409 generation_conflict!
+        bad_force = client.post(
+            "/books/book-stale/illustrations/prepare",
+            json={
+                "expected_revision": 1,
+                "expected_generation_id": gen1,
+                "force_new_generation": True,
+            },
+        )
+        assert bad_force.status_code == 409
+        assert bad_force.json() == {"detail": {"reason_code": "generation_conflict"}}
+
+        # Mark gen1 failed with call_limit_exhausted -> force_new_generation SUCCEEDS (202) and creates gen2!
+        with app.unit_of_work.transaction() as tx:
+            tx.illustrations.update_generation_state(
+                "book-stale",
+                gen1,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value,
+            )
+        ok_force = client.post(
+            "/books/book-stale/illustrations/prepare",
+            json={
+                "expected_revision": 1,
+                "expected_generation_id": gen1,
+                "force_new_generation": True,
+            },
+        )
+        assert ok_force.status_code == 202
+        gen2 = ok_force.json()["active_generation_id"]
+        assert gen2 != gen1
+
+        # Simulate stale generation (source_sha mismatch against stored manifest) -> prepare revokes stale & creates gen3!
+        with app.unit_of_work.transaction() as tx:
+            from linguary.adapters.db.illustration_models import IllustrationGenerationRow
+
+            row = tx.illustrations._session.get(IllustrationGenerationRow, gen2)
+            assert row is not None
+            row.source_sha256 = "0" * 64
+        r3 = client.post(
+            "/books/book-stale/illustrations/prepare",
+            json={"expected_revision": 1, "expected_generation_id": gen2},
+        )
+        assert r3.status_code == 202
+        gen3 = r3.json()["active_generation_id"]
+        assert gen3 != gen2
+        with app.unit_of_work.read_transaction() as tx:
+            old = tx.illustrations.get_generation("book-stale", gen2)
+            assert old is not None and old.state is IllustrationGenerationState.REVOKED
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_prepare_and_retry_while_book_paused_return_202_paused(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _, cond_id, _ = _seed_staged_ready_book(app, tmp_path, book_id="book-pause", num_sections=1)
+        with app.unit_of_work.transaction() as tx:
+            tx.work.set_book_paused("book-pause", cond_id, True)
+
+        r_prep = client.post(
+            "/books/book-pause/illustrations/prepare", json={"expected_revision": 1}
+        )
+        assert r_prep.status_code == 202
+        assert r_prep.json()["state"] == "paused"
+        assert r_prep.json()["reason_code"] == "book_paused"
+        gen_id = r_prep.json()["active_generation_id"]
+
+        # Fail the extract scope with retryable provider_error, then retry while paused -> 202 paused!
+        with app.unit_of_work.transaction() as tx:
+            scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+            tx.illustrations.fail_scope(
+                scopes[0].id,
+                attempt_id=None,
+                reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+            )
+            tx.illustrations.update_generation_state(
+                "book-pause",
+                gen_id,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+            )
+
+        r_retry = client.post(
+            "/books/book-pause/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_retry.status_code == 202
+        assert r_retry.json()["state"] == "paused"
+        assert r_retry.json()["reason_code"] == "book_paused"
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_retry_only_failed_scopes_and_rejects_nothing_to_retry_409(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-retry", num_sections=1)
+        r_prep = client.post(
+            "/books/book-retry/illustrations/prepare", json={"expected_revision": 1}
+        )
+        gen_id = r_prep.json()["active_generation_id"]
+
+        # Nothing failed yet -> 409 nothing_to_retry!
+        r_none = client.post(
+            "/books/book-retry/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_none.status_code == 409
+        assert r_none.json() == {"detail": {"reason_code": "nothing_to_retry"}}
+
+        # Deterministic failure atomic_input_too_large -> not retryable -> 409 nothing_to_retry!
+        with app.unit_of_work.transaction() as tx:
+            sc = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            tx.illustrations.fail_scope(
+                sc.id,
+                attempt_id=None,
+                reason_code=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
+            )
+        r_det = client.post(
+            "/books/book-retry/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_det.status_code == 409
+        assert r_det.json() == {"detail": {"reason_code": "nothing_to_retry"}}
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_retry_after_interrupted_vs_call_limit_exhausted_409(tmp_path: Path) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-rcall", num_sections=1)
+        r_prep = client.post(
+            "/books/book-rcall/illustrations/prepare", json={"expected_revision": 1}
+        )
+        gen_id = r_prep.json()["active_generation_id"]
+
+        # Interrupted scope IS retryable (202)!
+        with app.unit_of_work.transaction() as tx:
+            sc = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            tx.illustrations.fail_scope(
+                sc.id, attempt_id=None, reason_code=IllustrationReasonCode.INTERRUPTED.value
+            )
+        r_int = client.post(
+            "/books/book-rcall/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_int.status_code == 202
+
+        # call_limit_exhausted -> 409 call_limit_exhausted!
+        with app.unit_of_work.transaction() as tx:
+            sc = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            tx.illustrations.fail_scope(
+                sc.id,
+                attempt_id=None,
+                reason_code=IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value,
+            )
+        r_lim = client.post(
+            "/books/book-rcall/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_lim.status_code == 409
+        assert r_lim.json() == {"detail": {"reason_code": "call_limit_exhausted"}}
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_http_json_202_html_303_preserving_return_params_and_forbidding_return_in_json(
+    tmp_path: Path,
+) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-http", num_sections=1)
+        # return_* forbidden in JSON -> 422 invalid_request!
+        bad_json = client.post(
+            "/books/book-http/illustrations/prepare",
+            json={"expected_revision": 1, "return_offset": 0},
+        )
+        assert bad_json.status_code == 422
+        assert bad_json.json() == {"detail": {"reason_code": "invalid_request"}}
+
+        # HTML form -> 303 preserving return_*!
+        html_ok = client.post(
+            "/books/book-http/illustrations/prepare",
+            data={
+                "expected_revision": "1",
+                "section_id": "",
+                "expected_generation_id": "",
+                "return_offset": "10",
+                "return_limit": "20",
+                "return_section_id": "book-http-sec-0",
+            },
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert html_ok.status_code == 303
+        assert (
+            html_ok.headers["location"]
+            == "/books/book-http/illustrations?offset=10&limit=20&section_id=book-http-sec-0"
+        )
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())

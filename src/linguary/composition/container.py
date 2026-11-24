@@ -73,9 +73,12 @@ from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
 from linguary.application.context_builder import ContextBuilder
+from linguary.application.illustration_chapter import IllustrationChapter
 from linguary.application.illustration_coordinator import IllustrationCoordinator
+from linguary.application.illustration_reference import IllustrationReference
 from linguary.application.illustration_source import IllustrationSource
 from linguary.application.illustrations import IllustrationService
+from linguary.composition.illustration_runtime import IllustrationRuntime
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskHandler, TaskRunner
@@ -188,7 +191,9 @@ class Application:
     correction: CorrectionSequence
     quality_review: QualityReviewService
     illustrations: IllustrationService
+    illustration_coordinator: IllustrationCoordinator
     _close_quality: Callable
+    _close_illustrations: Callable
     _dispose: Callable[[], None]
     resolve_correction_candidate: ResolveCorrectionCandidate | None = None
     pause_book: PauseBook | None = None
@@ -257,6 +262,7 @@ class Application:
             self.book_runtime.aclose,
             self.correction.resolver.aclose,
             self._close_quality,
+            self._close_illustrations,
         ):
             try:
                 await close()
@@ -571,6 +577,33 @@ def build_application(
 
     maintain_work = _MaintainWork()
 
+    illustration_runtime = IllustrationRuntime(
+        runtime_settings=runtime_settings,
+        rate_limiter=rate_limiter,
+        unit_of_work=unit_of_work,
+        on_logged=on_logged,
+        injected_client=llm_client,
+    )
+    illustration_chapter = IllustrationChapter(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        runtime=illustration_runtime,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
+    )
+    illustration_reference = IllustrationReference(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        runtime=illustration_runtime,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
+        plan_chapter_scopes=illustration_chapter.plan_chapter_scopes,
+    )
+    illustration_coordinator.bind_planners(
+        plan_reference_scopes=illustration_reference.plan_scopes,
+        plan_chapter_scopes=illustration_chapter.plan_chapter_scopes,
+    )
+
     runner = TaskRunner(
         queue=task_queue,
         recover_work=recover_work,
@@ -585,6 +618,8 @@ def build_application(
             regeneration=regeneration,
             correction=correction,
             quality_review=quality_review,
+            illustration_reference=illustration_reference,
+            illustration_chapter=illustration_chapter,
         ),
     )
     worker_pool = TaskWorkerPool(
@@ -595,13 +630,22 @@ def build_application(
         runtime=runtime_settings, store=settings_store,
         limiter=rate_limiter, worker_pool=worker_pool,
     )
+    def _is_book_paused(tx: SqlAlchemyUnitOfWork, book_id: str) -> bool:
+        try:
+            is_paused = getattr(tx.work, "is_book_paused", None)
+            return bool(is_paused(book_id)) if callable(is_paused) else False
+        except Exception:
+            return False
+
     illustrations = IllustrationService(
         unit_of_work=unit_of_work,
-        provider_ready_fn=lambda: bool(
-            llm_client is not None or runtime_settings.current.settings.llm.api_key
-        ),
-        default_model_fn=lambda: (runtime_settings.current.settings.llm.model or None),
+        provider_ready_fn=illustration_runtime.is_provider_ready,
+        default_model_fn=illustration_runtime.default_model,
         source_snapshot_fn=illustration_source.snapshot,
+        is_book_paused_fn=_is_book_paused,
+        reconcile_in_tx_fn=illustration_coordinator.reconcile_in_transaction,
+        notify_work_available=task_queue.notify_work_available,
+        id_factory=task_queue.new_task_id,
     )
     return Application(
         runtime_settings=runtime_settings,
@@ -652,7 +696,9 @@ def build_application(
         resume_book=ResumeBook(unit_of_work=unit_of_work),
         quality_review=quality_review,
         illustrations=illustrations,
+        illustration_coordinator=illustration_coordinator,
         _close_quality=quality_configured.aclose,
+        _close_illustrations=illustration_runtime.aclose,
         _dispose=engine.dispose,
     )
 
@@ -858,6 +904,8 @@ def _handlers(
     regeneration: BlockRegenerationSequence | RuntimeSequence,
     correction: CorrectionSequence,
     quality_review: QualityReviewService,
+    illustration_reference: IllustrationReference,
+    illustration_chapter: IllustrationChapter,
 ) -> dict[TaskType, TaskHandler]:
     """Handlers for all queue task types (ALG-02).
 
@@ -877,6 +925,8 @@ def _handlers(
         TaskType.REGENERATE_BLOCK: regeneration.run_task,
         TaskType.CHAPTER_CORRECTION: correction.run_task,
         TaskType.QUALITY_REVIEW: quality_review.run_task,
+        TaskType.PREPARE_ILLUSTRATION_REFERENCE: illustration_reference.run_task,
+        TaskType.PREPARE_CHAPTER_ILLUSTRATIONS: illustration_chapter.run_task,
     }
 
 

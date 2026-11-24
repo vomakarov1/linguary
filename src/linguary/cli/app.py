@@ -38,8 +38,17 @@ from linguary.application.use_cases.register_book import RegisterBookCommand
 from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.composition import build_application, drain_tasks, run_worker
-from linguary.domain import BookStatus, TaskStatus, TaskType
+from linguary.domain import BookStatus, DomainError, TaskStatus, TaskType
 from linguary.domain.book_conditions import WorkStateError
+from linguary.domain.illustrations import (
+    IllustrationError,
+    IllustrationRegistryKind,
+    IllustrationSettings,
+)
+from linguary.web.illustration_schemas import (
+    IllustrationRegistryResponse,
+    IllustrationViewResponse,
+)
 from linguary.web.schemas import EpubCheckConfigResponse, LLMConfigResponse
 
 
@@ -49,7 +58,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (ApplicationError, SettingsError, OSError) as error:
+    except IllustrationError as error:
+        if getattr(args, "json_output", False):
+            print(
+                json.dumps({"detail": {"reason_code": error.reason_code}}, ensure_ascii=False),
+                file=sys.stderr,
+            )
+        else:
+            print(f"{error.reason_code}: {error}", file=sys.stderr)
+        return 1
+    except (ApplicationError, DomainError, SettingsError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 1
 
@@ -198,6 +216,95 @@ def _parser() -> argparse.ArgumentParser:
         if action == 'purge':
             command.add_argument('--call-id')
         command.set_defaults(handler=_diagnostics)
+
+    illustrations = subparsers.add_parser(
+        "illustrations",
+        parents=[reader_parent],
+        help="optional book illustration prompt preparation",
+    )
+    ill_actions = illustrations.add_subparsers(dest="illustrations_action", required=True)
+
+    ill_settings = ill_actions.add_parser(
+        "settings",
+        parents=[reader_parent],
+        help="update book illustration settings without starting preparation",
+    )
+    ill_settings.add_argument("book_id")
+    ill_settings.add_argument("--expected-revision", type=int, required=True)
+    enable_group = ill_settings.add_mutually_exclusive_group()
+    enable_group.add_argument("--enable", dest="enabled", action="store_true", default=None)
+    enable_group.add_argument("--disable", dest="enabled", action="store_false")
+    ill_settings.add_argument("--max-per-chapter", type=int, default=None)
+    ill_settings.add_argument("--model-reference", default=None)
+    ill_settings.add_argument("--model-prompts", default=None)
+    ill_settings.add_argument("--json", dest="json_output", action="store_true")
+    ill_settings.set_defaults(handler=_illustrations_settings)
+
+    ill_prepare = ill_actions.add_parser(
+        "prepare",
+        parents=[reader_parent],
+        help="start or expand illustration preparation for a book or chapter",
+    )
+    ill_prepare.add_argument("book_id")
+    ill_prepare.add_argument("--expected-revision", type=int, default=None)
+    ill_prepare.add_argument("--expected-generation", dest="expected_generation_id", default=None)
+    ill_prepare.add_argument("--section-id", default=None)
+    ill_prepare.add_argument("--force-new-generation", action="store_true")
+    ill_prepare.add_argument("--json", dest="json_output", action="store_true")
+    ill_prepare.set_defaults(handler=_illustrations_prepare)
+
+    ill_retry = ill_actions.add_parser(
+        "retry",
+        parents=[reader_parent],
+        help="retry failed retryable scopes of the active illustration generation",
+    )
+    ill_retry.add_argument("book_id")
+    ill_retry.add_argument("--expected-generation", dest="expected_generation_id", required=True)
+    ill_retry.add_argument("--expected-revision", type=int, default=None)
+    ill_retry.add_argument("--section-id", default=None)
+    ill_retry.add_argument("--json", dest="json_output", action="store_true")
+    ill_retry.set_defaults(handler=_illustrations_retry)
+
+    ill_status = ill_actions.add_parser(
+        "status",
+        parents=[reader_parent],
+        help="show book illustration preparation status",
+    )
+    ill_status.add_argument("book_id")
+    ill_status.add_argument("--generation-id", default=None)
+    ill_status.add_argument("--offset", type=int, default=0)
+    ill_status.add_argument("--limit", type=int, default=50)
+    ill_status.add_argument("--json", dest="json_output", action="store_true")
+    ill_status.set_defaults(handler=_illustrations_status)
+
+    ill_show = ill_actions.add_parser(
+        "show",
+        parents=[reader_parent],
+        help="show illustration prompts for a single chapter",
+    )
+    ill_show.add_argument("book_id")
+    ill_show.add_argument("section_id")
+    ill_show.add_argument("--generation-id", default=None)
+    ill_show.add_argument("--json", dest="json_output", action="store_true")
+    ill_show.set_defaults(handler=_illustrations_show)
+
+    ill_registry = ill_actions.add_parser(
+        "registry",
+        parents=[reader_parent],
+        help="show read-only book illustration registry entries",
+    )
+    ill_registry.add_argument("book_id")
+    ill_registry.add_argument("--generation-id", default=None)
+    ill_registry.add_argument("--entity-id", default=None)
+    ill_registry.add_argument(
+        "--kind",
+        choices=[member.value for member in IllustrationRegistryKind],
+        default=None,
+    )
+    ill_registry.add_argument("--offset", type=int, default=0)
+    ill_registry.add_argument("--limit", type=int, default=50)
+    ill_registry.add_argument("--json", dest="json_output", action="store_true")
+    ill_registry.set_defaults(handler=_illustrations_registry)
     return parser
 
 
@@ -529,6 +636,187 @@ def _diagnostics(args: argparse.Namespace) -> int:
         return 0
     finally:
         asyncio.run(application.aclose())
+
+
+def _print_illustration_view(view: Any, *, as_json: bool) -> None:
+    dto = IllustrationViewResponse.of_view(view)
+    if as_json:
+        print(json.dumps(dto.model_dump(mode="json"), ensure_ascii=False))
+        return
+    print(f"Book: {dto.book_id}")
+    print(f"State: {dto.state}")
+    if dto.reason_code:
+        print(f"Reason: {dto.reason_code}")
+    print(f"Revision: {dto.settings_revision}")
+    print(f"Enabled: {dto.enabled}")
+    if dto.active_generation_id:
+        print(f"Active generation: {dto.active_generation_id}")
+    print(
+        f"Source chapters: {dto.source_progress.ready_chapters}/{dto.source_progress.expected_chapters}"
+    )
+    if dto.selected_chapter is not None:
+        ch = dto.selected_chapter
+        print(f"Chapter: {ch.section_id} ({ch.state})")
+        if ch.zero_reason_ru:
+            print(f"Zero reason: {ch.zero_reason_ru}")
+        for moment in ch.moments:
+            print(f"- {moment.title_ru}: {moment.prompt_en}")
+
+
+def _illustrations_settings(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            current = application.illustrations.get(args.book_id)
+            enabled = current.settings.enabled if args.enabled is None else bool(args.enabled)
+            max_per = (
+                current.settings.max_per_chapter
+                if args.max_per_chapter is None
+                else args.max_per_chapter
+            )
+            model_ref = (
+                current.settings.model_reference
+                if args.model_reference is None
+                else (args.model_reference.strip() or None)
+            )
+            model_prompts = (
+                current.settings.model_prompts
+                if args.model_prompts is None
+                else (args.model_prompts.strip() or None)
+            )
+            new_settings = IllustrationSettings(
+                enabled=enabled,
+                max_per_chapter=max_per,
+                style=current.settings.style,
+                model_reference=model_ref,
+                model_prompts=model_prompts,
+            )
+            application.illustrations.save_settings(
+                args.book_id,
+                expected_revision=args.expected_revision,
+                settings=new_settings,
+            )
+            view = application.illustrations.get(args.book_id)
+            _print_illustration_view(view, as_json=args.json_output)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
+
+
+def _illustrations_prepare(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            expected_rev = args.expected_revision
+            if expected_rev is None:
+                expected_rev = application.illustrations.get(args.book_id).settings_revision
+            view = await application.illustrations.prepare(
+                args.book_id,
+                expected_revision=expected_rev,
+                expected_generation_id=args.expected_generation_id,
+                section_id=args.section_id,
+                force_new_generation=bool(args.force_new_generation),
+            )
+            _warn_if_book_paused(application.unit_of_work, args.book_id)
+            _print_illustration_view(view, as_json=args.json_output)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
+
+
+def _illustrations_retry(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            expected_rev = args.expected_revision
+            if expected_rev is None:
+                expected_rev = application.illustrations.get(args.book_id).settings_revision
+            view = await application.illustrations.retry(
+                args.book_id,
+                expected_revision=expected_rev,
+                expected_generation_id=args.expected_generation_id,
+                section_id=args.section_id,
+            )
+            _warn_if_book_paused(application.unit_of_work, args.book_id)
+            _print_illustration_view(view, as_json=args.json_output)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
+
+
+def _illustrations_status(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            view = application.illustrations.get(
+                args.book_id,
+                offset=args.offset,
+                limit=args.limit,
+                generation_id=args.generation_id,
+            )
+            _print_illustration_view(view, as_json=args.json_output)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
+
+
+def _illustrations_show(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            view = application.illustrations.get(
+                args.book_id,
+                section_id=args.section_id,
+                generation_id=args.generation_id,
+            )
+            _print_illustration_view(view, as_json=args.json_output)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
+
+
+def _illustrations_registry(args: argparse.Namespace) -> int:
+    application = _application(args)
+
+    async def execute() -> int:
+        try:
+            kind = IllustrationRegistryKind(args.kind) if args.kind is not None else None
+            reg = application.illustrations.get_registry(
+                args.book_id,
+                generation_id=args.generation_id,
+                entity_id=args.entity_id,
+                kind=kind,
+                offset=args.offset,
+                limit=args.limit,
+            )
+            dto = IllustrationRegistryResponse.of_view(reg)
+            if args.json_output:
+                print(json.dumps(dto.model_dump(mode="json"), ensure_ascii=False))
+            else:
+                print(f"Book: {dto.book_id}")
+                print(f"Items: {len(dto.items)}/{dto.pagination.total}")
+                for item in dto.items:
+                    print(f"- [{item.kind}] {item.item_key}: {item.summary_ru}")
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
 
 
 def _application(args: argparse.Namespace):

@@ -369,12 +369,12 @@ def _compute_costs(
         cost_seen = False
         cost_sum = Decimal(0)
         for entry in entries:
-            if entry.usage is not None:
+            if entry.usage is not None and entry.usage.total_tokens is not None:
                 tokens_seen = True
                 token_sum += entry.usage.total_tokens
-            if entry.cost_usd is not None:
+            if entry.cost is not None:
                 cost_seen = True
-                cost_sum += entry.cost_usd
+                cost_sum += entry.cost
         return IllustrationCostBucketView(
             calls=len(entries),
             total_tokens=token_sum if tokens_seen else None,

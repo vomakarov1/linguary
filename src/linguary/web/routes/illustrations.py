@@ -17,9 +17,12 @@ from linguary.web.dependencies import CurrentApplication
 from linguary.web.illustration_schemas import (
     IllustrationRegistryResponse,
     IllustrationViewResponse,
+    ParsedCommandInput,
     ParsedSettingsInput,
     parse_api01_query,
     parse_api04_query,
+    parse_command_form,
+    parse_command_json,
     parse_settings_form,
     parse_settings_json,
 )
@@ -147,6 +150,107 @@ async def save_illustration_settings(
         view = application.illustrations.get(book_id)
         response_dto = IllustrationViewResponse.of_view(view)
         return JSONResponse(status_code=status.HTTP_200_OK, content=response_dto.model_dump(mode="json"))
+    except IllustrationError as error:
+        return _error_response(request, error)
+
+
+async def _parse_command_request(
+    request: Request,
+    *,
+    allow_force_new: bool,
+    require_generation: bool,
+) -> ParsedCommandInput:
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if content_type == "application/json":
+        try:
+            body = await request.json()
+        except Exception:
+            raise IllustrationValidationError(
+                IllustrationReasonCode.INVALID_REQUEST,
+                "некорректный JSON в теле запроса",
+            ) from None
+        return parse_command_json(
+            body, allow_force_new=allow_force_new, require_generation=require_generation
+        )
+    if content_type in _FORM_MEDIA_TYPES:
+        try:
+            form = await request.form()
+        except Exception:
+            raise IllustrationValidationError(
+                IllustrationReasonCode.INVALID_REQUEST,
+                "некорректные данные формы",
+            ) from None
+        return parse_command_form(
+            list(form.multi_items()),
+            allow_force_new=allow_force_new,
+            require_generation=require_generation,
+        )
+    raise IllustrationValidationError(
+        IllustrationReasonCode.INVALID_REQUEST,
+        "неподдерживаемый Content-Type",
+    )
+
+
+@router.post("/books/{book_id}/illustrations/prepare")
+async def prepare_illustrations(
+    request: Request,
+    application: CurrentApplication,
+    book_id: str,
+) -> Response:
+    """`API-03`: Explicitly start or expand optional book illustration preparation."""
+    try:
+        parsed = await _parse_command_request(
+            request, allow_force_new=True, require_generation=False
+        )
+        view = await application.illustrations.prepare(
+            book_id,
+            expected_revision=parsed.expected_revision,
+            expected_generation_id=parsed.expected_generation_id,
+            section_id=parsed.section_id,
+            force_new_generation=parsed.force_new_generation,
+        )
+        if wants_html(request):
+            return RedirectResponse(
+                url=parsed.return_params.redirect_location(book_id),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        response_dto = IllustrationViewResponse.of_view(view)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=response_dto.model_dump(mode="json"),
+        )
+    except IllustrationError as error:
+        return _error_response(request, error)
+
+
+@router.post("/books/{book_id}/illustrations/retry")
+async def retry_illustrations(
+    request: Request,
+    application: CurrentApplication,
+    book_id: str,
+) -> Response:
+    """`API-03`: Retry only retryable failed scopes of the active illustration generation."""
+    try:
+        parsed = await _parse_command_request(
+            request, allow_force_new=False, require_generation=True
+        )
+        assert parsed.expected_generation_id is not None
+        view = await application.illustrations.retry(
+            book_id,
+            expected_revision=parsed.expected_revision,
+            expected_generation_id=parsed.expected_generation_id,
+            section_id=parsed.section_id,
+        )
+        if wants_html(request):
+            return RedirectResponse(
+                url=parsed.return_params.redirect_location(book_id),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+        response_dto = IllustrationViewResponse.of_view(view)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=response_dto.model_dump(mode="json"),
+        )
     except IllustrationError as error:
         return _error_response(request, error)
 
