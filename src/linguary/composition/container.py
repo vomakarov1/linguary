@@ -73,6 +73,7 @@ from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
 from linguary.application.context_builder import ContextBuilder
+from linguary.application.illustrations import IllustrationService
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskHandler, TaskRunner
@@ -184,6 +185,7 @@ class Application:
     regeneration: RuntimeSequence
     correction: CorrectionSequence
     quality_review: QualityReviewService
+    illustrations: IllustrationService
     _close_quality: Callable
     _dispose: Callable[[], None]
     resolve_correction_candidate: ResolveCorrectionCandidate | None = None
@@ -580,6 +582,13 @@ def build_application(
         runtime=runtime_settings, store=settings_store,
         limiter=rate_limiter, worker_pool=worker_pool,
     )
+    illustrations = IllustrationService(
+        unit_of_work=unit_of_work,
+        provider_ready_fn=lambda: bool(
+            llm_client is not None or runtime_settings.current.settings.llm.api_key
+        ),
+        default_model_fn=lambda: (runtime_settings.current.settings.llm.model or None),
+    )
     return Application(
         runtime_settings=runtime_settings,
         book_conditions=book_conditions,
@@ -628,6 +637,7 @@ def build_application(
         pause_book=PauseBook(unit_of_work=unit_of_work),
         resume_book=ResumeBook(unit_of_work=unit_of_work),
         quality_review=quality_review,
+        illustrations=illustrations,
         _close_quality=quality_configured.aclose,
         _dispose=engine.dispose,
     )

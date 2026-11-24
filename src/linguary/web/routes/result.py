@@ -399,9 +399,12 @@ def _wants_result_blocks_fragment(request: Request) -> bool:
     return request.headers.get("x-linguary-fragment", "").lower() == "result-blocks"
 
 
-def _block_anchor(block_id: str) -> str:
+def block_anchor(block_id: str) -> str:
     """Block anchor must match the `id` in `partials/result_block.html`."""
     return f"block-{block_id.replace(':', '-').replace('/', '-')}"
 
 
-__all__ = ["router"]
+_block_anchor = block_anchor
+
+
+__all__ = ["block_anchor", "router"]

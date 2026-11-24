@@ -358,3 +358,64 @@ QUALITY_OPERATION_ERRORS.update({
     'source_digest_mismatch': 'Исходный файл изменился. Проверьте источник книги перед продолжением.',
     'source_unavailable': 'Исходный файл недоступен. Проверьте источник книги перед продолжением.',
 })
+
+#: All 12 Russian labels for illustration states (11 top-level states + history `revoked`).
+ILLUSTRATION_STATE_LABELS: Mapping[str, str] = {
+    "disabled": "Подготовка иллюстраций выключена",
+    "not_started": "Подготовка ещё не запускалась",
+    "waiting_source": "Ожидает завершения анализа глав",
+    "needs_analysis": "Требуется поэтапный анализ книги",
+    "queued": "В очереди на подготовку",
+    "running": "Подготавливается",
+    "ready": "Промты готовы",
+    "failed": "Подготовка завершилась с ошибкой",
+    "stale": "Результат устарел",
+    "skipped": "Нет содержательных глав для иллюстраций",
+    "paused": "Подготовка приостановлена",
+    "revoked": "Отозвано",
+}
+
+#: All 28 closed Russian labels for illustration reason codes.
+ILLUSTRATION_REASON_LABELS: Mapping[str, str] = {
+    "book_not_found": "Книга не найдена",
+    "section_not_found": "Глава не найдена",
+    "generation_not_found": "Поколение подготовки иллюстраций не найдено",
+    "invalid_request": "Запрос заполнен неверно",
+    "revision_conflict": "Настройки иллюстраций уже изменились — обновите страницу",
+    "generation_conflict": "Состояние поколения изменилось — обновите страницу",
+    "nothing_to_retry": "Нет областей, которые можно повторить",
+    "source_incompatible": "Книге нужен современный поэтапный анализ глав",
+    "source_changed": "Исходный текст или анализ книги изменились",
+    "narrative_missing": "Повествовательный анализ не завершён для всех глав",
+    "narrative_failed": "Повествовательный анализ одной из глав завершился с ошибкой",
+    "non_content_section": "Выбранный раздел не содержит основного текста",
+    "no_content": "В книге нет содержательных глав для иллюстраций",
+    "settings_changed": "Настройки подготовки иллюстраций изменились",
+    "channel_disabled": "Канал подготовки иллюстраций выключен",
+    "book_paused": "Обработка книги поставлена на паузу",
+    "route_unavailable": "Выбранная модель или ключ провайдера недоступны",
+    "context_limit": "Запрос превысил контекст модели",
+    "atomic_input_too_large": "Единичный фрагмент слишком велик для допустимого запроса",
+    "split_depth_exhausted": "Достигнут предел глубины разбиения фрагментов",
+    "call_limit_exhausted": "Достигнут предел обращений к модели для поколения",
+    "scope_limit_exhausted": "Достигнут предел числа областей для поколения",
+    "model_output_invalid": "Ответ модели не прошёл проверку",
+    "provider_truncated": "Ответ модели оборвался по лимиту токенов",
+    "provider_error": "Провайдер модели вернул ошибку",
+    "interrupted": "Выполнение прервано перезапуском приложения",
+    "stale_attempt": "Попытка устарела и не была принята",
+    "storage_unavailable": "Исходный файл книги недоступен на диске",
+}
+
+#: All 4 Russian labels for read-only illustration registry item kinds (`DTO-02`).
+ILLUSTRATION_REGISTRY_KIND_LABELS: Mapping[str, str] = {
+    "entity": "Персонаж или место",
+    "fact": "Факт из текста",
+    "alias_decision": "Сопоставление имён",
+    "design": "Нейтральный образ",
+}
+
+#: Supported visual styles for illustration prompts.
+ILLUSTRATION_STYLE_LABELS: Mapping[str, str] = {
+    "monochrome_ink": "Монохромная графика тушью",
+}
