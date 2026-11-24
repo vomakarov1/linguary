@@ -396,3 +396,79 @@ def test_cli_illustrations_settings_partial_flags_prepare_retry_status_show_regi
     assert out_cleared["settings"]["enabled"] is False
     assert out_cleared["settings"]["model_reference"] is None
     assert out_cleared["settings"]["model_prompts"] is None
+
+
+def test_cli_illustrations_validation_errors_paused_warning_and_text_output(
+    tmp_path: Path, capsys: Any
+) -> None:
+    cfg, data_root = _write_config(tmp_path)
+    _seed_cli_book(tmp_path, data_root, "book-cli-v")
+
+    # 1. Invalid --offset / --limit rejected with exit code 1 + invalid_request
+    for argv in (
+        ["--config", str(cfg), "illustrations", "status", "book-cli-v", "--offset", "-1", "--json"],
+        ["--config", str(cfg), "illustrations", "status", "book-cli-v", "--limit", "51", "--json"],
+        ["--config", str(cfg), "illustrations", "registry", "book-cli-v", "--limit", "101", "--json"],
+        [
+            "--config",
+            str(cfg),
+            "illustrations",
+            "settings",
+            "book-cli-v",
+            "--expected-revision",
+            "0",
+            "--model-reference",
+            "gpt-5\nmini",
+            "--json",
+        ],
+    ):
+        rc = main(argv)
+        assert rc == 1
+        cap = capsys.readouterr()
+        assert cap.out == ""
+        assert json.loads(cap.err) == {"detail": {"reason_code": "invalid_request"}}
+
+    # 2. Human-readable (non-JSON) text output works for settings + status
+    rc = main(
+        [
+            "--config",
+            str(cfg),
+            "illustrations",
+            "settings",
+            "book-cli-v",
+            "--expected-revision",
+            "0",
+            "--enable",
+            "--model-reference",
+            "gpt-5-mini",
+            "--model-prompts",
+            "gpt-5-mini",
+        ]
+    )
+    assert rc == 0
+    text_out = capsys.readouterr().out
+    assert "Book: book-cli-v" in text_out
+    assert "Enabled: True" in text_out
+
+    # 3. Paused book warning goes to stderr while --json stdout stays pure JSON
+    app = build_application(
+        settings=AppSettings(
+            storage=StorageSettings(data_root=str(data_root)),
+            llm=LLMSettings(api_key="sk-test-secret-key"),
+        )
+    )
+    try:
+        with app.unit_of_work.transaction() as tx:
+            cond = tx.work.latest_conditions("book-cli-v")
+            assert cond is not None
+            tx.work.set_book_paused("book-cli-v", cond.id, True)
+    finally:
+        asyncio.run(app.aclose())
+
+    rc = main(["--config", str(cfg), "illustrations", "prepare", "book-cli-v", "--json"])
+    assert rc == 0
+    cap = capsys.readouterr()
+    parsed = json.loads(cap.out)
+    assert parsed["state"] == "paused"
+    assert parsed["reason_code"] == "book_paused"
+    assert "паузе" in cap.err.lower() or "paused" in cap.err.lower()

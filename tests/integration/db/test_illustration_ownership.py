@@ -522,3 +522,142 @@ async def test_revoke_supersedes_pending_running_and_failed_tasks_and_worker_kee
             assert task is not None and task.status is TaskStatus.SUPERSEDED
     finally:
         await app.aclose()
+
+
+async def test_disable_mid_call_and_split_or_fail_rejected_on_revoked_or_stale(
+    tmp_path: Path,
+) -> None:
+    import pytest
+    from linguary.domain.illustrations import IllustrationOwnershipError, IllustrationScopeSpec
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_handler(req: LLMRequest[Any], _n: int) -> Any:
+        started.set()
+        await release.wait()
+        data = json.loads(req.input_text)
+        return IllustrationExtractResponse(
+            mentions=(),
+            facts=(),
+            covered_source_unit_ids=(data["units"][0]["source_unit_id"],),
+            complete=True,
+        )
+
+    client = _AsyncScriptedClient(_slow_handler)
+    app = _make_app(tmp_path, client)
+    try:
+        _seed_book(app, tmp_path, book_id="book-dis-mid")
+        view = await app.illustrations.prepare("book-dis-mid", expected_revision=1)
+        gen_id = view.active_generation_id
+        assert gen_id is not None
+
+        drain_coro = asyncio.create_task(drain_tasks(app))
+        await started.wait()
+
+        # Disable channel mid-call via save_settings -> revokes gen and marks running scope FAILED!
+        app.illustrations.save_settings(
+            "book-dis-mid",
+            expected_revision=1,
+            settings=IllustrationSettings(
+                enabled=False,
+                max_per_chapter=3,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        release.set()
+        await drain_coro
+
+        with app.unit_of_work.transaction() as tx:
+            sc = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            assert sc.state is IllustrationScopeState.FAILED
+            assert sc.payload is None
+            # Direct repository calls on a revoked generation MUST raise IllustrationOwnershipError!
+            with pytest.raises(IllustrationOwnershipError):
+                tx.illustrations.fail_scope(
+                    sc.id, attempt_id=None, reason_code=IllustrationReasonCode.PROVIDER_ERROR.value
+                )
+            with pytest.raises(IllustrationOwnershipError):
+                tx.illustrations.split_scope(
+                    sc.id,
+                    attempt_id=None,
+                    children=[
+                        IllustrationScopeSpec(
+                            stage=IllustrationScopeStage.EXTRACT,
+                            scope_key="extract:child",
+                            input_sha256="a" * 64,
+                            summary={},
+                        )
+                    ],
+                    max_scopes=100,
+                )
+    finally:
+        await app.aclose()
+
+
+async def test_mixed_scope_failure_and_late_acceptance_transitions_gen_to_failed(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustrations import finalize_generation_state_in_tx
+    from linguary.domain.illustrations import IllustrationScopeSpec
+
+    client = _AsyncScriptedClient(lambda _r, _n: (_ for _ in ()).throw(AssertionError("unused")))
+    app = _make_app(tmp_path, client)
+    try:
+        _seed_book(app, tmp_path, book_id="book-mix")
+        with app.unit_of_work.transaction() as tx:
+            head = tx.illustrations.get_head("book-mix")
+            assert head.settings_id is not None
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-mix",
+                settings_id=head.settings_id,
+                request_key="req-mix",
+                source_sha256="a" * 64,
+                source_authority={},
+                requested_sections=("book-mix-sec-0",),
+            )
+            tx.illustrations.update_generation_state(
+                "book-mix", gen.id, state=IllustrationGenerationState.RUNNING
+            )
+            sc1, sc2 = tx.illustrations.upsert_scopes(
+                gen.id,
+                [
+                    IllustrationScopeSpec(
+                        stage=IllustrationScopeStage.EXTRACT,
+                        scope_key="extract:p0",
+                        input_sha256="1" * 64,
+                        summary={},
+                    ),
+                    IllustrationScopeSpec(
+                        stage=IllustrationScopeStage.EXTRACT,
+                        scope_key="extract:p1",
+                        input_sha256="2" * 64,
+                        summary={},
+                    ),
+                ],
+            )
+            # First scope fails while second is still pending -> gen stays RUNNING
+            tx.illustrations.fail_scope(
+                sc1.id, attempt_id=None, reason_code=IllustrationReasonCode.PROVIDER_ERROR.value
+            )
+            finalize_generation_state_in_tx(tx, "book-mix", gen.id)
+            mid_gen = tx.illustrations.get_generation("book-mix", gen.id)
+            assert mid_gen is not None and mid_gen.state is IllustrationGenerationState.RUNNING
+
+            # Second scope later accepts -> finalize_generation_state_in_tx transitions gen to FAILED!
+            tx.illustrations.accept_scope(
+                sc2.id,
+                attempt_id=None,
+                expected_input_sha256=sc2.input_sha256,
+                payload={"mentions": [], "facts": []},
+                output_sha256="3" * 64,
+                summary={},
+            )
+            finalize_generation_state_in_tx(tx, "book-mix", gen.id)
+            final_gen = tx.illustrations.get_generation("book-mix", gen.id)
+            assert final_gen is not None
+            assert final_gen.state is IllustrationGenerationState.FAILED
+            assert final_gen.reason_code == IllustrationReasonCode.PROVIDER_ERROR.value
+    finally:
+        await app.aclose()

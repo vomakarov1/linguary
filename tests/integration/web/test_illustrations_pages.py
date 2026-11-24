@@ -621,11 +621,15 @@ def test_illustrations_textarea_breakout_and_xss_escaped_in_all_fields(tmp_path:
             # Raw <script> MUST NOT appear anywhere in HTML!
             assert "<script>alert(" not in resp.text
             tree = html.fromstring(resp.text)
+            assert len(tree.xpath("//textarea")) == 1
             textareas = tree.xpath('//textarea[@id="prompt-m1"]')
             assert len(textareas) == 1
             assert textareas[0].get("readonly") is not None
             # Exact verbatim prompt_en without leading/trailing indentation!
             assert textareas[0].text == prompt_exact
+            assert "&lt;/textarea&gt;&lt;script&gt;alert(" in resp.text
+            for prefix in ("Заголовок", "Причина", "Событие", "Герой", "Место", "Реестр"):
+                assert prefix in resp.text
     finally:
         asyncio.run(app.aclose())
 
@@ -1081,3 +1085,75 @@ def test_illustrations_missing_analysis_and_call_limit_new_generation(tmp_path: 
             ) == 1
     finally:
         asyncio.run(v3_app.aclose())
+
+
+def test_illustrations_prepare_on_stale_omits_return_generation_id_and_alias_verdict_is_russian(
+    tmp_path: Path,
+) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(app, tmp_path, "book-st", chapter_count=1)
+        rev = app.illustrations.save_settings(
+            "book-st",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        with app.unit_of_work.transaction() as tx:
+            # Active generation with mismatched source_sha256 -> state == "stale", is_history == False
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-st",
+                settings_id=rev.id,
+                request_key="req-st",
+                source_sha256="0" * 64,
+                source_authority={},
+                requested_sections=tuple(sec_ids),
+            )
+            tx.illustrations.upsert_registry_items(
+                gen.id,
+                [
+                    RegistryItem(
+                        generation_id=gen.id,
+                        kind=IllustrationRegistryKind.ALIAS_DECISION,
+                        item_key="pair-1",
+                        entity_id="ent-1",
+                        position_key="0000:0000",
+                        is_back_applicable=False,
+                        payload_sha256="f" * 64,
+                        payload={"verdict": "same_entity"},
+                    ),
+                    RegistryItem(
+                        generation_id=gen.id,
+                        kind=IllustrationRegistryKind.ALIAS_DECISION,
+                        item_key="pair-2",
+                        entity_id="ent-2",
+                        position_key="0000:0001",
+                        is_back_applicable=False,
+                        payload_sha256="e" * 64,
+                        payload={"verdict": "different"},
+                    ),
+                ],
+            )
+
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            r = client.get(
+                f"/books/book-st/illustrations?generation_id={gen.id}",
+                headers=HTML_HEADERS,
+            )
+            assert r.status_code == 200
+            tree = html.fromstring(r.text)
+            prepare_forms = tree.xpath('//form[contains(@action, "/illustrations/prepare")]')
+            assert len(prepare_forms) == 1
+            # On stale generation, prepare form MUST NOT carry return_generation_id of the stale gen!
+            assert prepare_forms[0].xpath('.//input[@name="return_generation_id"]') == []
+            # ALIAS_DECISION verdicts rendered in Russian (no raw English enum)
+            assert "один и тот же образ" in r.text
+            assert "разные образы" in r.text
+            assert "same_entity" not in r.text
+    finally:
+        asyncio.run(app.aclose())

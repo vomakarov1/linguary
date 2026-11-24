@@ -581,6 +581,8 @@ def test_invalid_query_params_return_reason_code_422_json_and_safe_html(
     for url in (
         "/books/book-1/illustrations?unknown=1",
         "/books/book-1/illustrations?offset=-1",
+        "/books/book-1/illustrations?offset=%C2%B2",
+        f"/books/book-1/illustrations?offset={'1' * 5000}",
         "/books/book-1/illustrations?limit=99",
         "/books/book-1/illustrations?limit=1&limit=2",
         "/books/book-1/illustrations?registry_kind=bogus",
@@ -1423,6 +1425,162 @@ def test_http_json_202_html_303_preserving_return_params_and_forbidding_return_i
             html_ok.headers["location"]
             == "/books/book-http/illustrations?offset=10&limit=20&section_id=book-http-sec-0"
         )
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_retry_source_changed_409_persists_revocation_and_supersedes_tasks(
+    tmp_path: Path,
+) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        _seed_staged_ready_book(app, tmp_path, book_id="book-rsrc", num_sections=1)
+        r_prep = client.post(
+            "/books/book-rsrc/illustrations/prepare", json={"expected_revision": 1}
+        )
+        assert r_prep.status_code == 202
+        gen_id = r_prep.json()["active_generation_id"]
+
+        # Fail extract scope and mutate EPUB on disk before calling retry!
+        with app.unit_of_work.transaction() as tx:
+            book = tx.books.get("book-rsrc")
+            assert book is not None and book.source_epub_path is not None
+            epub_path = Path(book.source_epub_path)
+            sc = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            tx.illustrations.fail_scope(
+                sc.id, attempt_id=None, reason_code=IllustrationReasonCode.PROVIDER_ERROR.value
+            )
+            tx.illustrations.update_generation_state(
+                "book-rsrc",
+                gen_id,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+            )
+        epub_path.write_bytes(b"changed-source-epub-bytes")
+
+        r_retry = client.post(
+            "/books/book-rsrc/illustrations/retry",
+            json={"expected_revision": 1, "expected_generation_id": gen_id},
+        )
+        assert r_retry.status_code == 409
+        assert r_retry.json() == {"detail": {"reason_code": "source_changed"}}
+
+        # Revocation & task superseding MUST have committed despite the 409 error!
+        with app.unit_of_work.read_transaction() as tx:
+            head = tx.illustrations.get_head("book-rsrc")
+            assert head.active_generation_id is None
+            gen = tx.illustrations.get_generation("book-rsrc", gen_id)
+            assert gen is not None
+            assert gen.state is IllustrationGenerationState.REVOKED
+            assert gen.reason_code == IllustrationReasonCode.SOURCE_CHANGED.value
+            ill_tasks = [
+                t
+                for t in tx.tasks.list_for_book("book-rsrc")
+                if t.task_type
+                in {
+                    TaskType.PREPARE_ILLUSTRATION_REFERENCE,
+                    TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
+                }
+            ]
+            assert ill_tasks and all(t.status is TaskStatus.SUPERSEDED for t in ill_tasks)
+    finally:
+        import asyncio
+
+        asyncio.run(app.aclose())
+
+
+def test_partial_generation_lists_unrequested_chapters_allows_prepare_on_failed_gen_and_omits_payload_sql(
+    tmp_path: Path,
+) -> None:
+    app, client = _build_ready_app(tmp_path)
+    try:
+        doc, _, _ = _seed_staged_ready_book(app, tmp_path, book_id="book-part", num_sections=3)
+        sec0, sec1, sec2 = [s.id for s in doc.ordered_sections]
+
+        # Prepare only sec0
+        r1 = client.post(
+            "/books/book-part/illustrations/prepare",
+            json={"expected_revision": 1, "section_id": sec0},
+        )
+        assert r1.status_code == 202
+        gen_id = r1.json()["active_generation_id"]
+
+        # Seal registry and create failed CHAPTER scope for sec0 only
+        with app.unit_of_work.transaction() as tx:
+            ext = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+            tx.illustrations.accept_scope(
+                ext.id,
+                attempt_id=None,
+                expected_input_sha256=ext.input_sha256,
+                payload={"mentions": [], "facts": []},
+                output_sha256="a" * 64,
+                summary=ext.summary,
+            )
+            tx.illustrations.seal_registry("book-part", gen_id, registry_sha256="b" * 64)
+            ch0 = tx.illustrations.upsert_scopes(
+                gen_id,
+                [
+                    IllustrationScopeSpec(
+                        stage=IllustrationScopeStage.CHAPTER,
+                        scope_key=sec0,
+                        section_id=sec0,
+                        section_order=0,
+                        section_title="Chapter 1",
+                        input_sha256="c" * 64,
+                        summary={},
+                    )
+                ],
+            )[0]
+            tx.illustrations.fail_scope(
+                ch0.id, attempt_id=None, reason_code=IllustrationReasonCode.PROVIDER_ERROR.value
+            )
+            tx.illustrations.update_generation_state(
+                "book-part",
+                gen_id,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+            )
+
+        # GET /illustrations without section_id MUST list all 3 chapters (sec0 failed, sec1/sec2 not_started)
+        # and MUST NOT select payload_json in SQL!
+        executed_sql: list[str] = []
+        from sqlalchemy import event
+
+        def _capture_sql(_conn, _cursor, statement, _params, _context, _executemany):
+            executed_sql.append(statement)
+
+        engine = app.unit_of_work._session_factory.kw["bind"]
+        event.listen(engine, "before_cursor_execute", _capture_sql)
+        try:
+            r_list = client.get("/books/book-part/illustrations?offset=0&limit=10")
+        finally:
+            event.remove(engine, "before_cursor_execute", _capture_sql)
+
+        assert r_list.status_code == 200
+        body = r_list.json()
+        assert body["pagination"]["total"] == 3
+        states_by_sid = {h["section_id"]: h["state"] for h in body["chapter_headers"]}
+        assert states_by_sid == {sec0: "failed", sec1: "not_started", sec2: "not_started"}
+        assert not any(
+            "illustration_scopes" in sql and "payload_json" in sql for sql in executed_sql
+        )
+
+        # Selecting unrequested chapter sec1 returns 200 not_started (not 404!)
+        r_sel = client.get(f"/books/book-part/illustrations?section_id={sec1}")
+        assert r_sel.status_code == 200
+        assert r_sel.json()["selected_chapter"]["section_id"] == sec1
+        assert r_sel.json()["selected_chapter"]["state"] == "not_started"
+
+        # Adding unrequested chapter sec1 onto FAILED generation via prepare -> 202 queued!
+        r_add = client.post(
+            "/books/book-part/illustrations/prepare",
+            json={"expected_revision": 1, "expected_generation_id": gen_id, "section_id": sec1},
+        )
+        assert r_add.status_code == 202
+        assert r_add.json()["active_generation_id"] == gen_id
+        assert r_add.json()["state"] == "queued"
     finally:
         import asyncio
 

@@ -1016,3 +1016,62 @@ async def test_huge_scene_splits_by_blocks_and_atomic_block_fails(tmp_path: Path
         )
         assert len(failed) == 1
         assert failed[0].reason_code == IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value
+
+
+async def test_candidates_invalid_insert_after_block_id_triggers_repair_and_fails(
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal attempts
+        attempts += 1
+        data = json.loads(req.input_text)
+        assert req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES
+        blk0, blk1 = data["blocks"][0], data["blocks"][1]
+        # Anchor is on blk1 (later block), but insert_after_block_id points to blk0 (earlier) or foreign block!
+        bad_insert = blk0["block_id"] if attempts == 1 else "foreign-blk-999"
+        return IllustrationCandidatesResponse(
+            scene_id=data["scene_id"],
+            events=(
+                IllustrationCandidateEventDTO(
+                    event_id="ev-bad-ins",
+                    title_ru="Плохая вставка",
+                    event_ru="Событие на втором абзаце.",
+                    significance_ru="Ключевой момент",
+                    event_kind="action",
+                    quote_anchors=(
+                        IllustrationQuoteAnchorDTO(
+                            block_id=blk1["block_id"], quote=blk1["text"][:10]
+                        ),
+                    ),
+                    insert_after_block_id=bad_insert,
+                ),
+            ),
+            covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+            complete=True,
+        )
+
+    harness = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            (
+                "Сцена 1",
+                [
+                    ("b-0", "First paragraph sets the scene."),
+                    ("b-1", "Second paragraph contains the climax."),
+                ],
+            )
+        ],
+        handler=_handler,
+    )
+    await _drain_selection_tasks(harness)
+    assert attempts == 2
+    with harness.uow.transaction() as tx:
+        failed = tx.illustrations.list_scopes(
+            harness.generation_id,
+            stage=IllustrationScopeStage.CANDIDATES,
+            state=IllustrationScopeState.FAILED,
+        )
+        assert len(failed) == 1
+        assert failed[0].reason_code == IllustrationReasonCode.MODEL_OUTPUT_INVALID.value

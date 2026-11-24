@@ -150,6 +150,46 @@ def has_unfinished_illustration_work(tx: UnitOfWork, book_id: str) -> bool:
     }
 
 
+def finalize_generation_state_in_tx(
+    tx: UnitOfWork,
+    book_id: str,
+    generation_id: str,
+    *,
+    fallback_reason: str | None = None,
+) -> None:
+    """Transition a non-revoked generation out of `RUNNING`/`QUEUED` when no active scopes remain.
+
+    Called on both failure and acceptance paths so a generation with an earlier failed scope
+    does not stay stuck in `RUNNING` after remaining parallel scopes finish.
+    """
+    gen = tx.illustrations.get_generation(book_id, generation_id)
+    if gen is None or gen.state in {
+        IllustrationGenerationState.REVOKED,
+        IllustrationGenerationState.READY,
+        IllustrationGenerationState.SKIPPED,
+    }:
+        return
+    scopes = tx.illustrations.list_scopes(generation_id)
+    active_scopes = [s for s in scopes if s.state is not IllustrationScopeState.SPLIT]
+    has_active = any(
+        s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
+        for s in active_scopes
+    )
+    if has_active:
+        return
+    failed_scope = next(
+        (s for s in active_scopes if s.state is IllustrationScopeState.FAILED),
+        None,
+    )
+    if failed_scope is not None:
+        tx.illustrations.update_generation_state(
+            book_id,
+            generation_id,
+            state=IllustrationGenerationState.FAILED,
+            reason_code=failed_scope.reason_code or fallback_reason,
+        )
+
+
 def revoke_active_in_transaction(
     tx: UnitOfWork,
     book_id: str,
@@ -344,7 +384,6 @@ class IllustrationService:
                     (snapshot.source_sha256 is not None and snapshot.source_sha256 != active_gen.source_sha256)
                     or (
                         active_gen.manifest_sha256 is not None
-                        and snapshot.manifest_sha256 is not None
                         and snapshot.manifest_sha256 != active_gen.manifest_sha256
                     )
                 )
@@ -384,13 +423,23 @@ class IllustrationService:
                         book_id, active_gen.id, target_sections
                     )
                     if added:
-                        if gen.state is IllustrationGenerationState.READY:
-                            tx.illustrations.update_generation_state(
-                                book_id,
-                                gen.id,
-                                state=IllustrationGenerationState.QUEUED,
-                                reason_code=None,
+                        if gen.state in {
+                            IllustrationGenerationState.READY,
+                            IllustrationGenerationState.FAILED,
+                        }:
+                            scopes_for_add = tx.illustrations.list_scopes(gen.id)
+                            ref_failed = any(
+                                s.stage in _REFERENCE_STAGE_SET
+                                and s.state is IllustrationScopeState.FAILED
+                                for s in scopes_for_add
                             )
+                            if gen.state is IllustrationGenerationState.READY or not ref_failed:
+                                tx.illustrations.update_generation_state(
+                                    book_id,
+                                    gen.id,
+                                    state=IllustrationGenerationState.QUEUED,
+                                    reason_code=None,
+                                )
                         if self._reconcile_in_tx_fn is not None and self._reconcile_in_tx_fn(
                             tx, book_id
                         ):
@@ -406,7 +455,10 @@ class IllustrationService:
                             )
                             for s in scopes
                         )
-                        if has_failed or active_gen.state is IllustrationGenerationState.FAILED:
+                        if has_failed or (
+                            section_id is None
+                            and active_gen.state is IllustrationGenerationState.FAILED
+                        ):
                             raise IllustrationConflictError(
                                 IllustrationReasonCode.GENERATION_CONFLICT,
                                 "в поколении есть неуспешные области; используйте retry",
@@ -473,6 +525,7 @@ class IllustrationService:
             )
 
         enqueued = False
+        revoked_for_source_change = False
         with self._uow.transaction() as tx:
             book = tx.books.get(book_id)
             if book is None:
@@ -525,64 +578,66 @@ class IllustrationService:
                     or (snapshot.source_sha256 is not None and snapshot.source_sha256 != gen.source_sha256)
                     or (
                         gen.manifest_sha256 is not None
-                        and snapshot.manifest_sha256 is not None
                         and snapshot.manifest_sha256 != gen.manifest_sha256
                     )
                 ):
                     revoke_active_in_transaction(
                         tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
                     )
-                    raise IllustrationConflictError(
-                        IllustrationReasonCode.SOURCE_CHANGED,
-                        "исходные данные книги изменились",
+                    revoked_for_source_change = True
+
+            if not revoked_for_source_change:
+                policy = head.effective_settings.policy
+                failed_scopes = tx.illustrations.list_scopes(
+                    gen.id, state=IllustrationScopeState.FAILED, section_id=section_id
+                )
+                if (
+                    gen.calls_reserved + gen.calls_sent >= policy.max_calls_per_generation
+                    or any(
+                        s.reason_code == IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value
+                        for s in failed_scopes
+                    )
+                ):
+                    raise IllustrationLimitError(
+                        IllustrationReasonCode.CALL_LIMIT_EXHAUSTED,
+                        "исчерпан лимит вызовов поколения; создайте новое поколение с force_new_generation",
                     )
 
-            policy = head.effective_settings.policy
-            failed_scopes = tx.illustrations.list_scopes(
-                gen.id, state=IllustrationScopeState.FAILED, section_id=section_id
-            )
-            if (
-                gen.calls_reserved + gen.calls_sent >= policy.max_calls_per_generation
-                or any(
-                    s.reason_code == IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value
-                    for s in failed_scopes
+                requeued = tx.illustrations.requeue_failed_scopes(
+                    book_id, gen.id, section_id=section_id
                 )
-            ):
-                raise IllustrationLimitError(
-                    IllustrationReasonCode.CALL_LIMIT_EXHAUSTED,
-                    "исчерпан лимит вызовов поколения; создайте новое поколение с force_new_generation",
+                if not requeued:
+                    raise IllustrationConflictError(
+                        IllustrationReasonCode.NOTHING_TO_RETRY,
+                        "нет перезапускаемых неуспешных областей",
+                    )
+                for scope in requeued:
+                    task_type = (
+                        TaskType.PREPARE_ILLUSTRATION_REFERENCE
+                        if scope.stage in _REFERENCE_STAGE_SET
+                        else TaskType.PREPARE_CHAPTER_ILLUSTRATIONS
+                    )
+                    dispatch_scope_task(
+                        tx,
+                        scope,
+                        generation_id=gen.id,
+                        task_type=task_type,
+                        id_factory=self._id_factory,
+                        book_id=book_id,
+                    )
+                    enqueued = True
+                tx.illustrations.update_generation_state(
+                    book_id,
+                    gen.id,
+                    state=IllustrationGenerationState.QUEUED,
+                    reason_code=None,
                 )
 
-            requeued = tx.illustrations.requeue_failed_scopes(
-                book_id, gen.id, section_id=section_id
+        if revoked_for_source_change:
+            raise IllustrationConflictError(
+                IllustrationReasonCode.SOURCE_CHANGED,
+                "исходные данные книги изменились",
             )
-            if not requeued:
-                raise IllustrationConflictError(
-                    IllustrationReasonCode.NOTHING_TO_RETRY,
-                    "нет перезапускаемых неуспешных областей",
-                )
-            for scope in requeued:
-                task_type = (
-                    TaskType.PREPARE_ILLUSTRATION_REFERENCE
-                    if scope.stage in _REFERENCE_STAGE_SET
-                    else TaskType.PREPARE_CHAPTER_ILLUSTRATIONS
-                )
-                dispatch_scope_task(
-                    tx,
-                    scope,
-                    generation_id=gen.id,
-                    task_type=task_type,
-                    id_factory=self._id_factory,
-                    book_id=book_id,
-                )
-                enqueued = True
-            tx.illustrations.update_generation_state(
-                book_id,
-                gen.id,
-                state=IllustrationGenerationState.QUEUED,
-                reason_code=None,
-            )
-
         if enqueued and self._notify_work_available is not None:
             self._notify_work_available()
         return self.get(book_id, section_id=section_id)
@@ -637,6 +692,7 @@ __all__ = [
     "ILLUSTRATION_TASK_TYPES",
     "IllustrationService",
     "dispatch_scope_task",
+    "finalize_generation_state_in_tx",
     "has_unfinished_illustration_work",
     "revoke_active_in_transaction",
 ]

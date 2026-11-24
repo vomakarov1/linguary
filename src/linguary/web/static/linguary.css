@@ -469,6 +469,13 @@ pre code {
   border-radius: 8px;
   background: var(--panel);
   padding: 0.85rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.metrics dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
 }
 
 .metrics strong,
@@ -721,6 +728,34 @@ a.lg-ref sup,
   }
 }
 
+.muted {
+  color: var(--muted);
+}
+
+.button-link.button-secondary {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.button-link.button-secondary:hover {
+  border-color: var(--muted);
+  background: var(--paper);
+}
+
+.illustration-actions-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin-top: 1rem;
+  min-width: 0;
+}
+
+.illustration-registry-filters {
+  margin-top: 0.75rem;
+}
+
 .illustration-list {
   list-style: none;
   margin: 0.75rem 0 0;
@@ -782,11 +817,14 @@ a.lg-ref sup,
   display: grid;
   gap: 0.65rem;
   min-width: 0;
+  max-width: 100%;
 }
 
 .illustration-form input[type="text"],
 .illustration-form select,
 .illustration-action-form select {
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
   box-sizing: border-box;
 }

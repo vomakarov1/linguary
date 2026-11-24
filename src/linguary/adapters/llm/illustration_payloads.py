@@ -30,8 +30,10 @@ from linguary.application.illustration_dto import (
 )
 
 _MAX_STR = 4000
+_MAX_COMPACT_DESC = 600
 _MAX_QUOTE = 2000
 _MAX_LIST = 32
+_MAX_COVERED_IDS = 256
 _MAX_ANCHORS = 16
 _MAX_ALIAS_PAIRS = 16
 
@@ -75,7 +77,7 @@ class IllustrationFactSchema(_IllustrationStrictBase):
 class IllustrationExtractSchema(_VersionedIllustrationBase):
     mentions: list[IllustrationMentionSchema] = Field(max_length=_MAX_LIST)
     facts: list[IllustrationFactSchema] = Field(max_length=_MAX_LIST)
-    covered_source_unit_ids: list[str] = Field(max_length=_MAX_LIST)
+    covered_source_unit_ids: list[str] = Field(max_length=_MAX_COVERED_IDS)
     complete: bool
 
     @field_validator("covered_source_unit_ids")
@@ -188,9 +190,9 @@ class IllustrationDesignSchema(_VersionedIllustrationBase):
 class IllustrationFactScopeSchema(_VersionedIllustrationBase):
     event_id: str = Field(min_length=1, max_length=200)
     applicable_fact_ids: list[str] = Field(max_length=_MAX_LIST)
-    excluded_fact_ids: list[str] = Field(max_length=_MAX_LIST)
-    compact_description_ru: str = Field(max_length=_MAX_STR)
-    compact_description_en: str = Field(max_length=_MAX_STR)
+    excluded_fact_ids: list[str] = Field(max_length=_MAX_COVERED_IDS)
+    compact_description_ru: str = Field(max_length=_MAX_COMPACT_DESC)
+    compact_description_en: str = Field(max_length=_MAX_COMPACT_DESC)
     assumptions_ru: list[str] = Field(max_length=_MAX_LIST)
     complete: bool
 

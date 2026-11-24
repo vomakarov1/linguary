@@ -27,10 +27,12 @@ from linguary.application.illustration_source import (
 )
 from linguary.application.illustrations import (
     dispatch_scope_task,
+    finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
 from linguary.application.ports.illustrations import IllustrationRuntimePort
 from linguary.application.ports.llm import (
+    LLMConfigurationError,
     LLMContextCapacityError,
     LLMProviderError,
     LLMRequest,
@@ -850,6 +852,15 @@ class IllustrationSelection:
                     or head.active_generation_id != gen.id
                     or gen.state is IllustrationGenerationState.REVOKED
                 ):
+                    if not first_call:
+                        self._abort_stale_running_scope(
+                            tx,
+                            scope,
+                            task_id=task.id,
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            reason_code=IllustrationReasonCode.STALE_ATTEMPT.value,
+                        )
                     return
                 revision = tx.illustrations.get_settings(book_id, gen.settings_id)
                 if (
@@ -857,6 +868,20 @@ class IllustrationSelection:
                     or head.settings_id != revision.id
                     or not revision.settings.enabled
                 ):
+                    if not first_call:
+                        stale_code = (
+                            IllustrationReasonCode.CHANNEL_DISABLED.value
+                            if revision is not None and not revision.settings.enabled
+                            else IllustrationReasonCode.SETTINGS_CHANGED.value
+                        )
+                        self._abort_stale_running_scope(
+                            tx,
+                            scope,
+                            task_id=task.id,
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            reason_code=stale_code,
+                        )
                     return
 
                 snapshot = self._source.snapshot(tx, book_id)
@@ -871,6 +896,7 @@ class IllustrationSelection:
                     revoke_active_in_transaction(
                         tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
                     )
+                    self._supersede_task(tx, task.id)
                     return
 
                 section_id = scope.section_id
@@ -898,6 +924,8 @@ class IllustrationSelection:
                             tx, gen, revision, snapshot, section_id, id_factory=self._id_factory
                         ):
                             notify_after = True
+                        else:
+                            finalize_generation_state_in_tx(tx, book_id, gen.id)
                         self._mark_task_succeeded(tx, task.id)
                         break
 
@@ -1127,13 +1155,18 @@ class IllustrationSelection:
                     )
                     return
 
+                fallback_reason = (
+                    IllustrationReasonCode.ROUTE_UNAVAILABLE.value
+                    if isinstance(call_error, LLMConfigurationError)
+                    else IllustrationReasonCode.PROVIDER_ERROR.value
+                )
                 self._finalize_failure(
                     book_id=book_id,
                     generation_id=generation_id,
                     task_id=task.id,
                     scope_id=scope.id,
                     attempt_id=attempt.id,
-                    reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+                    reason_code=fallback_reason,
                 )
                 return
 
@@ -1221,7 +1254,16 @@ class IllustrationSelection:
                         revoke_active_in_transaction(
                             tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
                         )
-                    tx.illustrations.fail_scope(scope.id, attempt_id=None, reason_code=stale_reason)
+                    elif stale_reason != IllustrationReasonCode.STALE_ATTEMPT.value:
+                        try:
+                            tx.illustrations.fail_scope(
+                                scope.id, attempt_id=None, reason_code=stale_reason
+                            )
+                        except IllustrationOwnershipError:
+                            pass
+                        finalize_generation_state_in_tx(
+                            tx, book_id, generation_id, fallback_reason=stale_reason
+                        )
                     self._supersede_task(tx, task.id)
                     return
 
@@ -1247,6 +1289,8 @@ class IllustrationSelection:
                     tx, gen, revision, cur_snap, section_id, id_factory=self._id_factory
                 ):
                     notify_after = True
+                else:
+                    finalize_generation_state_in_tx(tx, book_id, gen.id)
                 self._mark_task_succeeded(tx, task.id)
                 break
 
@@ -1316,10 +1360,13 @@ class IllustrationSelection:
                 },
             )
 
-        allowed_blocks = set(str(b) for b in scope.summary.get("ordered_block_ids", ()))
+        ordered_blocks = [str(b) for b in scope.summary.get("ordered_block_ids", ())]
+        allowed_blocks = set(ordered_blocks)
+        pos_by_block_id = {bid: idx for idx, bid in enumerate(ordered_blocks)}
         section_id = str(scope.section_id or "")
         scene_start = str(scope.summary.get("scene_start_block_id", ""))
         scene_end = str(scope.summary.get("scene_end_block_id", ""))
+        scene_end_idx = pos_by_block_id.get(scene_end, len(ordered_blocks) - 1)
         cards: list[dict[str, Any]] = []
         seen_local_ids: set[str] = set()
 
@@ -1371,6 +1418,25 @@ class IllustrationSelection:
                 )
 
             seen_local_ids.add(ev.event_id)
+            insert_after_candidate = (
+                ev.insert_after_block_id.strip() if ev.insert_after_block_id else None
+            )
+            if insert_after_candidate is not None:
+                last_anchor_idx = max(pos_by_block_id[a.block_id] for a in resolved_anchors)
+                cand_idx = pos_by_block_id.get(insert_after_candidate)
+                if (
+                    cand_idx is None
+                    or insert_after_candidate not in block_lookup
+                    or cand_idx < last_anchor_idx
+                    or cand_idx > scene_end_idx
+                ):
+                    return _ValidationOutcome(
+                        ok=False,
+                        repair_reason=(
+                            f"insert_after_block_id {insert_after_candidate} для события {ev.event_id} "
+                            "должен быть текстовым блоком этой сцены не раньше последней цитатной опоры"
+                        ),
+                    )
             event_pos = max(a.position_key for a in resolved_anchors)
             cand_hash = canonical_sha(
                 {
@@ -1393,9 +1459,7 @@ class IllustrationSelection:
                 event_kind=ev.event_kind.strip(),
                 event_position_key=event_pos,
                 anchors=tuple(resolved_anchors),
-                insert_after_block_id=(
-                    ev.insert_after_block_id.strip() if ev.insert_after_block_id else None
-                ),
+                insert_after_block_id=insert_after_candidate,
                 participant_names=tuple(n.strip() for n in ev.participant_names if n.strip()),
                 location_names=tuple(n.strip() for n in ev.location_names if n.strip()),
                 scene_start_block_id=scene_start,
@@ -2138,12 +2202,65 @@ class IllustrationSelection:
     ) -> bool:
         notify = False
         with self._uow.transaction() as tx:
-            if depth >= policy.max_split_depth:
-                tx.illustrations.fail_scope(
-                    scope.id,
-                    attempt_id=attempt_id,
-                    reason_code=IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+            head = tx.illustrations.get_head(book_id)
+            gen = tx.illustrations.get_generation(book_id, generation_id)
+            cur_rev = tx.illustrations.get_settings(book_id, revision.id)
+            stale_reason: str | None = None
+            if gen is None or gen.state is IllustrationGenerationState.REVOKED:
+                stale_reason = IllustrationReasonCode.STALE_ATTEMPT.value
+            elif head.active_generation_id != gen.id or head.settings_id != revision.id:
+                stale_reason = IllustrationReasonCode.SETTINGS_CHANGED.value
+            elif cur_rev is None or not cur_rev.settings.enabled:
+                stale_reason = IllustrationReasonCode.CHANNEL_DISABLED.value
+            else:
+                cur_snap = self._source.snapshot(tx, book_id)
+                if (
+                    not cur_snap.compatible
+                    or (cur_snap.source_sha256 is not None and cur_snap.source_sha256 != gen.source_sha256)
+                    or (
+                        gen.manifest_sha256 is not None
+                        and cur_snap.manifest_sha256 != gen.manifest_sha256
+                    )
+                ):
+                    stale_reason = IllustrationReasonCode.SOURCE_CHANGED.value
+
+            if stale_reason is not None:
+                tx.illustrations.record_attempt_outcome(
+                    attempt_id,
+                    state=IllustrationAttemptState.STALE,
+                    outcome={"reason_code": stale_reason},
                 )
+                if stale_reason == IllustrationReasonCode.SOURCE_CHANGED.value:
+                    revoke_active_in_transaction(
+                        tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
+                    )
+                elif stale_reason != IllustrationReasonCode.STALE_ATTEMPT.value:
+                    try:
+                        tx.illustrations.fail_scope(
+                            scope.id, attempt_id=None, reason_code=stale_reason
+                        )
+                    except IllustrationOwnershipError:
+                        pass
+                    finalize_generation_state_in_tx(
+                        tx, book_id, generation_id, fallback_reason=stale_reason
+                    )
+                self._supersede_task(tx, task_id)
+                return False
+
+            if depth >= policy.max_split_depth:
+                try:
+                    tx.illustrations.fail_scope(
+                        scope.id,
+                        attempt_id=attempt_id,
+                        reason_code=IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+                    )
+                except IllustrationOwnershipError:
+                    tx.illustrations.record_attempt_outcome(
+                        attempt_id,
+                        state=IllustrationAttemptState.STALE,
+                        outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
+                    )
+                    return False
                 self._mark_task_failed(
                     tx, task_id, IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value
                 )
@@ -2156,9 +2273,17 @@ class IllustrationSelection:
                 return False
             children = self._split_children_for_scope(scope, revision, depth)
             if not children:
-                tx.illustrations.fail_scope(
-                    scope.id, attempt_id=attempt_id, reason_code=fail_reason
-                )
+                try:
+                    tx.illustrations.fail_scope(
+                        scope.id, attempt_id=attempt_id, reason_code=fail_reason
+                    )
+                except IllustrationOwnershipError:
+                    tx.illustrations.record_attempt_outcome(
+                        attempt_id,
+                        state=IllustrationAttemptState.STALE,
+                        outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
+                    )
+                    return False
                 self._mark_task_failed(tx, task_id, fail_reason)
                 self._refresh_generation_state(tx, book_id, generation_id, fail_reason)
                 return False
@@ -2169,10 +2294,20 @@ class IllustrationSelection:
                     children=children,
                     max_scopes=policy.max_scopes_per_generation,
                 )
-            except IllustrationLimitError as limit_err:
-                tx.illustrations.fail_scope(
-                    scope.id, attempt_id=attempt_id, reason_code=limit_err.reason_code
+            except IllustrationOwnershipError:
+                tx.illustrations.record_attempt_outcome(
+                    attempt_id,
+                    state=IllustrationAttemptState.STALE,
+                    outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
                 )
+                return False
+            except IllustrationLimitError as limit_err:
+                try:
+                    tx.illustrations.fail_scope(
+                        scope.id, attempt_id=attempt_id, reason_code=limit_err.reason_code
+                    )
+                except IllustrationOwnershipError:
+                    return False
                 self._mark_task_failed(tx, task_id, limit_err.reason_code)
                 self._refresh_generation_state(tx, book_id, generation_id, limit_err.reason_code)
                 return False
@@ -2200,9 +2335,17 @@ class IllustrationSelection:
         reason_code: str,
     ) -> None:
         with self._uow.transaction() as tx:
-            tx.illustrations.fail_scope(
-                scope_id, attempt_id=attempt_id, reason_code=reason_code
-            )
+            try:
+                tx.illustrations.fail_scope(
+                    scope_id, attempt_id=attempt_id, reason_code=reason_code
+                )
+            except IllustrationOwnershipError:
+                tx.illustrations.record_attempt_outcome(
+                    attempt_id,
+                    state=IllustrationAttemptState.STALE,
+                    outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
+                )
+                return
             self._mark_task_failed(tx, task_id, reason_code)
             self._refresh_generation_state(tx, book_id, generation_id, reason_code)
 
@@ -2291,24 +2434,37 @@ class IllustrationSelection:
             tx.tasks.save(task.supersede())
 
     @staticmethod
+    def _abort_stale_running_scope(
+        tx: UnitOfWork,
+        scope: IllustrationScope,
+        *,
+        task_id: str,
+        book_id: str,
+        generation_id: str,
+        reason_code: str,
+    ) -> None:
+        if scope.state is IllustrationScopeState.RUNNING:
+            try:
+                tx.illustrations.fail_scope(
+                    scope.id, attempt_id=None, reason_code=reason_code
+                )
+            except IllustrationOwnershipError:
+                pass
+            finalize_generation_state_in_tx(
+                tx, book_id, generation_id, fallback_reason=reason_code
+            )
+        IllustrationSelection._supersede_task(tx, task_id)
+
+    @staticmethod
     def _refresh_generation_state(
         tx: UnitOfWork,
         book_id: str,
         generation_id: str,
         reason_code: str,
     ) -> None:
-        scopes = tx.illustrations.list_scopes(generation_id)
-        has_active = any(
-            s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
-            for s in scopes
+        finalize_generation_state_in_tx(
+            tx, book_id, generation_id, fallback_reason=reason_code
         )
-        if not has_active:
-            tx.illustrations.update_generation_state(
-                book_id,
-                generation_id,
-                state=IllustrationGenerationState.FAILED,
-                reason_code=reason_code,
-            )
 
 
 __all__ = [

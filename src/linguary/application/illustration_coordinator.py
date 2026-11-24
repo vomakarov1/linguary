@@ -86,10 +86,7 @@ class IllustrationCoordinator:
             if (
                 not snapshot.compatible
                 or (snapshot.source_sha256 is not None and snapshot.source_sha256 != gen.source_sha256)
-                or (
-                    snapshot.manifest_sha256 is not None
-                    and snapshot.manifest_sha256 != gen.manifest_sha256
-                )
+                or snapshot.manifest_sha256 != gen.manifest_sha256
             ):
                 revoke_active_in_transaction(
                     tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
@@ -151,6 +148,9 @@ class IllustrationCoordinator:
         ):
             if self._plan_reference_scopes(tx, gen, snapshot, id_factory=self._id_factory):
                 enqueued = True
+            refreshed_gen = illustrations_repo.get_generation(book_id, gen.id)
+            if refreshed_gen is not None:
+                gen = refreshed_gen
 
         if (
             gen.manifest_sha256 is not None

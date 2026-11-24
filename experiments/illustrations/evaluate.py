@@ -314,7 +314,7 @@ class SyntheticEvalLLMClient:
             data = _extract_json_block(request.input_text)
             entity = data.get("entity", {})
             eid = str(entity.get("entity_id") or data.get("entity_id") or "ent-unknown")
-            allowed_traits = data.get("allowed_traits") or ["clothing"]
+            allowed_traits = data.get("allowed_traits") or ["attire_default"]
             trait = str(allowed_traits[0])
             return LLMResponse(
                 payload=IllustrationDesignResponse(
@@ -812,6 +812,7 @@ def run_fake_evaluation(fixture_path: Path, output_dir: Path) -> dict[str, Any]:
                     "registry_entities": len(entity_items),
                     "registry_facts": len(fact_items),
                     "registry_items_total": registry.pagination.total,
+                    "ch2_moments": len(ch2_moments),
                     "ch10_moments": len(ch10_view.selected_chapter.moments)
                     if ch10_view.selected_chapter
                     else 0,
@@ -897,7 +898,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        settings = load_settings(args.config)
+        settings = load_settings(config_path=args.config)
         if not settings.llm.api_key or not settings.llm.api_key.strip():
             print(
                 "Refusing --mode live: provider API key is not configured (0 HTTP calls made).",
@@ -915,6 +916,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report["hashes"], ensure_ascii=False))
     all_ok = (
         report["invariants"]["generation_ready"]
+        and report["invariants"]["ch2_moments"] >= 1
+        and report["invariants"]["ch10_moments"] >= 1
         and all(report["adversarial_rejections"].values())
         and report["invariants"]["no_ch10_scar_in_ch2"]
         and report["invariants"]["no_prompt_injection_leak"]

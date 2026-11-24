@@ -58,6 +58,8 @@ def test_synthetic_regression_suite_with_adversarial_replies(tmp_path: Path) -> 
     report = eval_mod.run_fake_evaluation(FIXTURES_PATH, out_dir)
 
     assert report["invariants"]["generation_ready"] is True
+    assert report["invariants"]["ch2_moments"] >= 1
+    assert report["invariants"]["ch10_moments"] >= 1
     assert report["invariants"]["empty_chapter_skipped"] is True
     assert report["invariants"]["ordinary_chapter_zero_moments"] is True
     assert report["invariants"]["no_ch10_scar_in_ch2"] is True
@@ -244,6 +246,29 @@ def test_evaluate_live_refuses_without_allow_paid_calls_before_http(
     assert rc != 0
     assert http_attempts == []
     assert "--allow-paid-calls" in err
+
+    # With --allow-paid-calls and unconfigured API key in explicit --config: refuses cleanly (no TypeError, 0 HTTP calls)
+    cfg = tmp_path / "empty_key.toml"
+    cfg.write_text('[llm]\nprovider = "openai_compatible"\nmodel = "gpt-5-mini"\napi_key = ""\n', encoding="utf-8")
+    monkeypatch.delenv("LINGUARY_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    rc2 = eval_mod.main(
+        [
+            "--fixtures",
+            str(FIXTURES_PATH),
+            "--mode",
+            "live",
+            "--allow-paid-calls",
+            "--config",
+            str(cfg),
+            "--output",
+            str(tmp_path / "live_out_2"),
+        ]
+    )
+    err2 = capsys.readouterr().err
+    assert rc2 == 2
+    assert http_attempts == []
+    assert "API key" in err2
 
 
 def test_evaluate_fake_artifacts_contain_hashes_bytes_calls_and_rubric(tmp_path: Path) -> None:

@@ -336,14 +336,36 @@ def test_illustrations_long_prompt_small_viewport_no_overflow(tmp_path: Path) ->
     long_token = "MonochromeInkIllustrationCrosshatching" * 15
     moments = _sample_moments("book-vp")
     moments[0]["prompt_en"] = f"{long_token} {'wide scene details ' * 40}"
+    moments[0]["character_descriptions"] = [
+        {
+            "entity_id": "ent-alice",
+            "name_ru": "Алиса",
+            "description_ru": "Длинное описание персонажа " + ("без переносов " * 10),
+            "description_en": long_token,
+            "fact_ids": ["f1"],
+            "assumptions_ru": ["Допущение по эпохе " + long_token[:60]],
+        }
+    ]
+    moments[0]["location_descriptions"] = [
+        {
+            "entity_id": "loc-gate",
+            "name_ru": "Железные ворота",
+            "description_ru": "Старые кованые ворота в ливень.",
+            "description_en": "Wrought-iron gate under heavy rain " + long_token[:80],
+            "fact_ids": [],
+            "assumptions_ru": [],
+        }
+    ]
     with _live_illustrations_server(tmp_path, book_id="book-vp", moments=moments) as (base_url, sec_id):
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            context = browser.new_context(viewport={"width": 360, "height": 800})
-            page = context.new_page()
-            page.goto(f"{base_url}/books/book-vp/illustrations?section_id={sec_id}")
-            overflow = page.evaluate(
-                "() => document.documentElement.scrollWidth - document.documentElement.clientWidth"
-            )
-            assert overflow <= 0, f"Horizontal overflow detected at 360px: {overflow}px"
+            for width in (360, 820):
+                context = browser.new_context(viewport={"width": width, "height": 800})
+                page = context.new_page()
+                page.goto(f"{base_url}/books/book-vp/illustrations?section_id={sec_id}")
+                overflow = page.evaluate(
+                    "() => document.documentElement.scrollWidth - document.documentElement.clientWidth"
+                )
+                assert overflow <= 0, f"Horizontal overflow detected at {width}px: {overflow}px"
+                context.close()
             browser.close()

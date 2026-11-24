@@ -634,6 +634,13 @@ def _sanitize_details(payload: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+_ALIAS_VERDICT_LABELS_RU: Mapping[str, str] = {
+    "same_entity": "один и тот же образ",
+    "different": "разные образы",
+    "unknown": "связь не подтверждена",
+}
+
+
 def _registry_summary_ru(item: RegistryItem) -> str:
     payload = item.payload
     for key in ("summary_ru", "description_ru", "name_ru", "canonical_name", "name"):
@@ -643,7 +650,8 @@ def _registry_summary_ru(item: RegistryItem) -> str:
     if item.kind is IllustrationRegistryKind.ALIAS_DECISION:
         verdict = payload.get("verdict")
         if isinstance(verdict, str) and verdict:
-            return f"Решение об алиасе: {verdict}"
+            verdict_ru = _ALIAS_VERDICT_LABELS_RU.get(verdict, verdict)
+            return f"Решение об алиасе: {verdict_ru}"
     return item.item_key
 
 
@@ -711,8 +719,13 @@ def build_illustration_view(
             blocking_section_id = eval_info["blocking_section_id"]
             content_section_ids = eval_info["content_section_ids"]
 
+        list_summaries_fn = getattr(tx.illustrations, "list_scope_summaries", None)
         scopes: tuple[IllustrationScope, ...] = (
-            tx.illustrations.list_scopes(viewed_generation.id)
+            (
+                list_summaries_fn(viewed_generation.id)
+                if callable(list_summaries_fn)
+                else tx.illustrations.list_scopes(viewed_generation.id)
+            )
             if viewed_generation is not None
             else ()
         )
@@ -729,10 +742,13 @@ def build_illustration_view(
                 stale_reason = source_reason_code or IllustrationReasonCode.SOURCE_INCOMPATIBLE.value
             elif source_sha256 is not None and viewed_generation.source_sha256 != source_sha256:
                 stale_reason = IllustrationReasonCode.SOURCE_CHANGED.value
-            elif (
-                viewed_generation.manifest_sha256 is not None
-                and source_manifest_sha is not None
-                and viewed_generation.manifest_sha256 != source_manifest_sha
+            elif viewed_generation.manifest_sha256 is not None and (
+                (source_snapshot_fn is not None and viewed_generation.manifest_sha256 != source_manifest_sha)
+                or (
+                    source_snapshot_fn is None
+                    and source_manifest_sha is not None
+                    and viewed_generation.manifest_sha256 != source_manifest_sha
+                )
             ):
                 stale_reason = IllustrationReasonCode.SOURCE_CHANGED.value
             else:
@@ -784,28 +800,28 @@ def build_illustration_view(
                 (s for s in chapter_scopes if s.section_id == section_id), None
             )
             if matched_scope is not None:
-                zero_reason_ru, moments = _decode_moments(matched_scope.payload, blocks_by_id)
+                full_scope = (
+                    tx.illustrations.get_scope(matched_scope.id)
+                    if matched_scope.payload is None
+                    else matched_scope
+                ) or matched_scope
+                zero_reason_ru, moments = _decode_moments(full_scope.payload, blocks_by_id)
                 sec_state = (
                     "ready"
-                    if matched_scope.state is IllustrationScopeState.ACCEPTED
+                    if full_scope.state is IllustrationScopeState.ACCEPTED
                     else "queued"
-                    if matched_scope.state is IllustrationScopeState.PENDING
+                    if full_scope.state is IllustrationScopeState.PENDING
                     else "running"
-                    if matched_scope.state is IllustrationScopeState.SPLIT
-                    else matched_scope.state.value
+                    if full_scope.state is IllustrationScopeState.SPLIT
+                    else full_scope.state.value
                 )
                 selected_chapter = IllustrationSelectedChapterView(
                     section_id=section_id,
-                    title=matched_scope.section_title or "",
+                    title=full_scope.section_title or "",
                     state=sec_state,
-                    reason_code=matched_scope.reason_code,
+                    reason_code=full_scope.reason_code,
                     zero_reason_ru=zero_reason_ru,
                     moments=moments,
-                )
-            elif chapter_scopes:
-                raise IllustrationNotFoundError(
-                    IllustrationReasonCode.SECTION_NOT_FOUND,
-                    f"глава {section_id} не найдена в поколении",
                 )
             elif viewed_generation is not None and viewed_generation.manifest is not None:
                 manifest_secs = viewed_generation.manifest.get("sections") or ()
@@ -822,15 +838,43 @@ def build_illustration_view(
                         IllustrationReasonCode.SECTION_NOT_FOUND,
                         f"глава {section_id} не найдена в поколении",
                     )
+                if bool(found_meta.get("skipped")):
+                    sec_state = "skipped"
+                    sec_reason = (
+                        str(found_meta["skip_reason"])
+                        if found_meta.get("skip_reason") is not None
+                        else None
+                    )
+                elif section_id in set(viewed_generation.requested_sections):
+                    sec_state = (
+                        "waiting_source"
+                        if viewed_generation.state is IllustrationGenerationState.WAITING_SOURCE
+                        else "queued"
+                    )
+                    sec_reason = viewed_generation.reason_code
+                else:
+                    sec_state = "not_started"
+                    sec_reason = None
                 selected_chapter = IllustrationSelectedChapterView(
                     section_id=section_id,
                     title=str(found_meta.get("title") or ""),
-                    state="waiting_source"
-                    if viewed_generation.state is IllustrationGenerationState.WAITING_SOURCE
-                    else "queued",
-                    reason_code=viewed_generation.reason_code,
+                    state=sec_state,
+                    reason_code=sec_reason,
                     zero_reason_ru=None,
                     moments=(),
+                )
+            elif (
+                viewed_generation is not None
+                and chapter_scopes
+                and not all(
+                    s.section_id in doc_sections_by_id
+                    for s in chapter_scopes
+                    if s.section_id is not None
+                )
+            ):
+                raise IllustrationNotFoundError(
+                    IllustrationReasonCode.SECTION_NOT_FOUND,
+                    f"глава {section_id} не найдена в поколении",
                 )
             else:
                 doc_sec = doc_sections_by_id.get(section_id)
@@ -877,6 +921,7 @@ def build_illustration_view(
         has_pending = any(s.state is IllustrationScopeState.PENDING for s in active_scopes)
         has_unfinished_work = has_running or has_pending or (
             viewed_generation is not None
+            and failed_scope is None
             and viewed_generation.state
             in {
                 IllustrationGenerationState.WAITING_SOURCE,
@@ -908,6 +953,15 @@ def build_illustration_view(
         elif viewed_generation.state is IllustrationGenerationState.SKIPPED:
             state = "skipped"
             reason_code = viewed_generation.reason_code or IllustrationReasonCode.NO_CONTENT.value
+        elif paused and has_unfinished_work:
+            state = "paused"
+            reason_code = IllustrationReasonCode.BOOK_PAUSED.value
+        elif has_running:
+            state = "running"
+            reason_code = None
+        elif has_pending:
+            state = "queued"
+            reason_code = None
         elif failed_scope is not None or viewed_generation.state is IllustrationGenerationState.FAILED:
             state = "failed"
             reason_code = (
@@ -918,13 +972,10 @@ def build_illustration_view(
         elif viewed_generation.state is IllustrationGenerationState.READY:
             state = "ready"
             reason_code = None
-        elif paused and has_unfinished_work:
-            state = "paused"
-            reason_code = IllustrationReasonCode.BOOK_PAUSED.value
-        elif has_running or viewed_generation.state is IllustrationGenerationState.RUNNING:
+        elif viewed_generation.state is IllustrationGenerationState.RUNNING:
             state = "running"
             reason_code = None
-        elif has_pending or viewed_generation.state is IllustrationGenerationState.QUEUED:
+        elif viewed_generation.state is IllustrationGenerationState.QUEUED:
             state = "queued"
             reason_code = None
         else:

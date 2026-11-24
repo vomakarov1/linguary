@@ -353,7 +353,23 @@ def test_failed_illustration_does_not_block_export(tmp_path: Path) -> None:
 def test_cli_worker_once_isolated_from_optional_illustration_failure(
     tmp_path: Path, capsys: Any
 ) -> None:
+    import hashlib
+    from linguary.application.analysis_pass_cache import encode_pass
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.illustration_source import _pass_model_dependencies
+    from linguary.application.llm_dto import NarrativeAnalysisResponse, QuotedSceneResponse
+    from linguary.application.token_budget import narrative_max_fragment_blocks_for
+    from linguary.composition.book_runtime import conditions_payload
+    from linguary.domain import AnalysisPassKind, AnalysisPassResult
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
     data_root = tmp_path / "data"
+    epub_path = tmp_path / "book-cli-w.epub"
+    epub_bytes = b"PK\x03\x04worker-isolation-epub"
+    epub_path.write_bytes(epub_bytes)
+    epub_sha = hashlib.sha256(epub_bytes).hexdigest()
+
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         f"""
@@ -365,6 +381,10 @@ provider = "openai_compatible"
 base_url = "https://api.openai.com/v1"
 model = "gpt-5-mini"
 api_key = ""
+staged_analysis = true
+
+[checks]
+sequential_analysis = false
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -373,22 +393,125 @@ api_key = ""
     app = build_application(
         settings=AppSettings(
             storage=StorageSettings(data_root=str(data_root)),
-            llm=LLMSettings(api_key=None, model="gpt-5-mini"),
-        )
+            llm=LLMSettings(api_key="seed-key", model="gpt-5-mini", staged_analysis=True),
+        ),
+        content_plan_profile="content-plan-v3",
     )
     try:
-        _seed_basic_book(app.unit_of_work, "book-cli-w")
-        # Enqueue an illustration task whose scope fails with route_unavailable (api_key is empty)
-        from linguary.domain.illustrations import (
-            IllustrationGenerationState,
-            IllustrationScopeSpec,
-            IllustrationScopeStage,
-            IllustrationSettings,
+        book_id = "book-cli-w"
+        sec_id = f"{book_id}-sec-0"
+        blk_id = f"{book_id}:b0"
+        cond_id = str(uuid4())
+        sec = DocumentSection(
+            id=sec_id,
+            document_id=book_id,
+            title="Chapter 1",
+            order=0,
+            source_resource_path="Text/ch1.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id=blk_id,
+                    section_id=sec_id,
+                    type=BlockType.PARAGRAPH,
+                    order=0,
+                    text="Alice opened the heavy door.",
+                    source_reference=SourceReference("Text/ch1.xhtml", "p[0]"),
+                    support_status=SupportStatus.SUPPORTED,
+                ),
+            ),
         )
+        doc = CanonicalDocument(
+            id=book_id,
+            metadata=BookMetadata(title="Isolation Novel"),
+            source_language="en",
+            target_language="ru",
+            sections=(sec,),
+        )
+        book = BookRecord(
+            id=book_id,
+            metadata=doc.metadata,
+            source_language="en",
+            target_language="ru",
+            status=BookStatus.READY_TO_EXPORT,
+            source_epub_path=str(epub_path),
+            created_at=datetime(2026, 11, 1, tzinfo=UTC),
+        )
+        cond_payload = conditions_payload(book, app.settings, revision=1, profile="content-plan-v3")
+        cond_payload["source_sha256"] = epub_sha
+        cond_payload["staged_analysis"] = True
+        cond_payload["llm_parameters"]["staged_analysis"] = True
+        cond_payload["checks"]["sequential_analysis"] = False
+        ctx_builder = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            name_translation_policy=NameTranslationPolicy(
+                version=1,
+                strategy=NameTranslationStrategy(app.settings.reading.name_translation_strategy),
+            ),
+            reader_level=app.settings.reading.normalized_level,
+        )
+        narrative = NarrativeAnalysisResponse(
+            translation_instructions="Сохраняй тон.",
+            chapter_summary="Alice opens the heavy door.",
+            scenes=(
+                QuotedSceneResponse(
+                    start_block_id=blk_id,
+                    end_block_id=blk_id,
+                    summary="Алиса открыла дверь.",
+                    location="Холл",
+                    participants=("Alice",),
+                ),
+            ),
+        )
+        encoded = encode_pass(narrative)
+        encoded["input_suggestions"] = []
+        encoded["input_context"] = {
+            "schema_version": 1,
+            "sequential_analysis": False,
+            "parallel_batch": False,
+            "seed_active": False,
+            "user_decisions": [],
+            "nonbinding_suggestions": [],
+            "prompts_version": int(cond_payload["versions"]["prompts"]),
+        }
+        input_sha = ctx_builder.narrative_input_sha256(
+            doc,
+            sec,
+            (),
+            (),
+            (),
+            model_dependencies=_pass_model_dependencies(cond_payload),
+            max_fragment_blocks=narrative_max_fragment_blocks_for(cond_payload["llm_parameters"]),
+        )
+        from linguary.domain.illustrations import IllustrationSettings
 
         with app.unit_of_work.transaction() as tx:
-            rev = tx.illustrations.save_settings(
-                "book-cli-w",
+            tx.books.add(book)
+            tx.documents.save(doc)
+            tx.work.add_conditions(
+                BookConditions(
+                    id=cond_id,
+                    book_id=book_id,
+                    revision=1,
+                    payload=cond_payload,
+                    created_at=datetime(2026, 11, 1, tzinfo=UTC),
+                )
+            )
+            tx.analyses.save_pass(
+                AnalysisPassResult(
+                    id=f"pass-{sec_id}",
+                    book_id=book_id,
+                    section_id=sec_id,
+                    pass_kind=AnalysisPassKind.NARRATIVE,
+                    scope_key="",
+                    input_sha256=input_sha,
+                    output_sha256=canonical_sha(encoded),
+                    conditions_id=cond_id,
+                    attempt_id=None,
+                    payload=encoded,
+                )
+            )
+            tx.illustrations.save_settings(
+                book_id,
                 expected_revision=0,
                 settings=IllustrationSettings(
                     enabled=True,
@@ -397,38 +520,7 @@ api_key = ""
                     model_prompts="gpt-5-mini",
                 ),
             )
-            gen, _ = tx.illustrations.create_or_get_generation(
-                "book-cli-w",
-                settings_id=rev.id,
-                request_key="req-cli-w",
-                source_sha256="a" * 64,
-                source_authority={},
-                requested_sections=("book-cli-w-sec-0",),
-            )
-            tx.illustrations.update_generation_state(
-                "book-cli-w", gen.id, state=IllustrationGenerationState.QUEUED
-            )
-            sc = tx.illustrations.upsert_scopes(
-                gen.id,
-                [
-                    IllustrationScopeSpec(
-                        stage=IllustrationScopeStage.EXTRACT,
-                        scope_key="extract:p0",
-                        input_sha256="b" * 64,
-                        summary={"request_input": {"units": []}},
-                    )
-                ],
-            )[0]
-            from linguary.application.illustrations import dispatch_scope_task
-
-            dispatch_scope_task(
-                tx,
-                sc,
-                generation_id=gen.id,
-                task_type=TaskType.PREPARE_ILLUSTRATION_REFERENCE,
-                id_factory=app.task_queue.new_task_id,
-                book_id="book-cli-w",
-            )
+        asyncio.run(app.illustrations.prepare(book_id, expected_revision=1))
     finally:
         asyncio.run(app.aclose())
 
@@ -437,4 +529,4 @@ api_key = ""
     # Exit code MUST be 0 because primary_failed == 0!
     assert rc == 0
     assert "Tasks failed: 0" in out
-    assert "Optional illustration tasks failed:" in out
+    assert "Optional illustration tasks failed: 1" in out

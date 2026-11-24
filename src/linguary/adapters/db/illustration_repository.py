@@ -501,6 +501,16 @@ class SqlAlchemyIllustrationRepository:
         row.state = IllustrationGenerationState.REVOKED.value
         row.reason_code = reason_code
         row.updated_at = _now()
+        running_scopes = self._session.scalars(
+            select(IllustrationScopeRow).where(
+                IllustrationScopeRow.generation_id == generation_id,
+                IllustrationScopeRow.state == IllustrationScopeState.RUNNING.value,
+            )
+        ).all()
+        for scope_row in running_scopes:
+            scope_row.state = IllustrationScopeState.FAILED.value
+            scope_row.reason_code = reason_code
+            scope_row.updated_at = row.updated_at
         head = self._session.get(IllustrationHeadRow, book_id)
         if head is not None and head.active_generation_id == generation_id:
             head.active_generation_id = None
@@ -604,6 +614,72 @@ class SqlAlchemyIllustrationRepository:
         ).all()
         return tuple(_to_scope(row) for row in rows)
 
+    def list_scope_summaries(
+        self,
+        generation_id: str,
+        *,
+        stage: IllustrationScopeStage | None = None,
+        state: IllustrationScopeState | None = None,
+        section_id: str | None = None,
+    ) -> tuple[IllustrationScope, ...]:
+        """List scope metadata without loading `payload_json`."""
+        statement = select(
+            IllustrationScopeRow.id,
+            IllustrationScopeRow.generation_id,
+            IllustrationScopeRow.parent_scope_id,
+            IllustrationScopeRow.stage,
+            IllustrationScopeRow.scope_key,
+            IllustrationScopeRow.section_id,
+            IllustrationScopeRow.section_order,
+            IllustrationScopeRow.section_title,
+            IllustrationScopeRow.task_id,
+            IllustrationScopeRow.input_sha256,
+            IllustrationScopeRow.state,
+            IllustrationScopeRow.reason_code,
+            IllustrationScopeRow.attempt_id,
+            IllustrationScopeRow.output_sha256,
+            IllustrationScopeRow.summary_json,
+            IllustrationScopeRow.created_at,
+            IllustrationScopeRow.updated_at,
+        ).where(IllustrationScopeRow.generation_id == generation_id)
+        if stage is not None:
+            statement = statement.where(IllustrationScopeRow.stage == stage.value)
+        if state is not None:
+            statement = statement.where(IllustrationScopeRow.state == state.value)
+        if section_id is not None:
+            statement = statement.where(IllustrationScopeRow.section_id == section_id)
+        rows = self._session.execute(
+            statement.order_by(
+                IllustrationScopeRow.stage,
+                func.coalesce(IllustrationScopeRow.section_order, -1),
+                IllustrationScopeRow.scope_key,
+                IllustrationScopeRow.created_at,
+            )
+        ).all()
+        return tuple(
+            IllustrationScope(
+                id=row.id,
+                generation_id=row.generation_id,
+                parent_scope_id=row.parent_scope_id,
+                stage=IllustrationScopeStage(row.stage),
+                scope_key=row.scope_key,
+                section_id=row.section_id,
+                section_order=row.section_order,
+                section_title=row.section_title,
+                task_id=row.task_id,
+                input_sha256=row.input_sha256,
+                state=IllustrationScopeState(row.state),
+                reason_code=row.reason_code,
+                attempt_id=row.attempt_id,
+                output_sha256=row.output_sha256,
+                payload=None,
+                summary=dict(row.summary_json) if isinstance(row.summary_json, Mapping) else {},
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        )
+
     def get_chapter_header_page(
         self,
         book_id: str,
@@ -615,61 +691,131 @@ class SqlAlchemyIllustrationRepository:
         self._require_book(book_id)
         if generation_id is not None:
             gen = self._require_generation(book_id, generation_id)
-            chapter_total = int(
-                self._session.scalar(
-                    select(func.count(IllustrationScopeRow.id)).where(
-                        IllustrationScopeRow.generation_id == gen.id,
-                        IllustrationScopeRow.stage == IllustrationScopeStage.CHAPTER.value,
-                    )
+            scope_rows = self._session.execute(
+                select(
+                    IllustrationScopeRow.id,
+                    IllustrationScopeRow.section_id,
+                    IllustrationScopeRow.section_order,
+                    IllustrationScopeRow.section_title,
+                    IllustrationScopeRow.state,
+                    IllustrationScopeRow.reason_code,
+                    IllustrationScopeRow.summary_json,
+                    IllustrationScopeRow.scope_key,
                 )
-                or 0
+                .where(
+                    IllustrationScopeRow.generation_id == gen.id,
+                    IllustrationScopeRow.stage == IllustrationScopeStage.CHAPTER.value,
+                )
+                .order_by(
+                    func.coalesce(IllustrationScopeRow.section_order, 0),
+                    IllustrationScopeRow.scope_key,
+                )
+            ).all()
+            headers_by_sid: dict[str, ChapterHeaderRow] = {}
+            ordered_scope_headers: list[ChapterHeaderRow] = []
+            for row in scope_rows:
+                scope_state = IllustrationScopeState(row.state)
+                summary = row.summary_json if isinstance(row.summary_json, Mapping) else {}
+                raw_count = summary.get("moment_count")
+                moment_count = (
+                    int(raw_count)
+                    if scope_state is IllustrationScopeState.ACCEPTED
+                    and type(raw_count) is int
+                    else None
+                )
+                sid = row.section_id or row.scope_key
+                header = ChapterHeaderRow(
+                    section_id=sid,
+                    order=0 if row.section_order is None else row.section_order,
+                    title=row.section_title or "",
+                    state=_chapter_header_state(scope_state),
+                    reason_code=row.reason_code,
+                    moment_count=moment_count,
+                    scope_id=row.id,
+                )
+                headers_by_sid[sid] = header
+                ordered_scope_headers.append(header)
+
+            manifest_sections = (
+                gen.manifest_json.get("sections")
+                if isinstance(gen.manifest_json, Mapping)
+                else None
             )
-            if chapter_total > 0:
-                rows = self._session.execute(
-                    select(
-                        IllustrationScopeRow.id,
-                        IllustrationScopeRow.section_id,
-                        IllustrationScopeRow.section_order,
-                        IllustrationScopeRow.section_title,
-                        IllustrationScopeRow.state,
-                        IllustrationScopeRow.reason_code,
-                        IllustrationScopeRow.summary_json,
-                        IllustrationScopeRow.scope_key,
-                    )
-                    .where(
-                        IllustrationScopeRow.generation_id == gen.id,
-                        IllustrationScopeRow.stage == IllustrationScopeStage.CHAPTER.value,
-                    )
-                    .order_by(
-                        func.coalesce(IllustrationScopeRow.section_order, 0),
-                        IllustrationScopeRow.scope_key,
-                    )
-                    .offset(offset)
-                    .limit(limit)
-                ).all()
-                headers = []
-                for row in rows:
-                    scope_state = IllustrationScopeState(row.state)
-                    summary = row.summary_json if isinstance(row.summary_json, Mapping) else {}
-                    raw_count = summary.get("moment_count")
-                    moment_count = (
-                        int(raw_count)
-                        if scope_state is IllustrationScopeState.ACCEPTED
-                        and type(raw_count) is int
-                        else None
-                    )
-                    headers.append(
-                        ChapterHeaderRow(
-                            section_id=row.section_id or row.scope_key,
-                            order=0 if row.section_order is None else row.section_order,
-                            title=row.section_title or "",
-                            state=_chapter_header_state(scope_state),
-                            reason_code=row.reason_code,
-                            moment_count=moment_count,
-                            scope_id=row.id,
+            if isinstance(manifest_sections, list) and manifest_sections:
+                merged: list[ChapterHeaderRow] = []
+                seen: set[str] = set()
+                sorted_entries = sorted(
+                    (e for e in manifest_sections if isinstance(e, Mapping) and e.get("section_id")),
+                    key=lambda e: (int(e.get("order", 0)), str(e.get("section_id", ""))),
+                )
+                for entry in sorted_entries:
+                    sid = str(entry["section_id"])
+                    seen.add(sid)
+                    existing = headers_by_sid.get(sid)
+                    if existing is not None:
+                        merged.append(existing)
+                    elif bool(entry.get("skipped")):
+                        merged.append(
+                            ChapterHeaderRow(
+                                section_id=sid,
+                                order=int(entry.get("order", 0)),
+                                title=str(entry.get("title") or ""),
+                                state="skipped",
+                                reason_code=(
+                                    str(entry["skip_reason"])
+                                    if entry.get("skip_reason") is not None
+                                    else None
+                                ),
+                                moment_count=None,
+                                scope_id=None,
+                            )
                         )
-                    )
-                return tuple(headers), chapter_total
+                    else:
+                        merged.append(
+                            ChapterHeaderRow(
+                                section_id=sid,
+                                order=int(entry.get("order", 0)),
+                                title=str(entry.get("title") or ""),
+                                state="not_started",
+                                reason_code=None,
+                                moment_count=None,
+                                scope_id=None,
+                            )
+                        )
+                for header in ordered_scope_headers:
+                    if header.section_id not in seen:
+                        merged.append(header)
+                return tuple(merged[offset : offset + limit]), len(merged)
+
+            if ordered_scope_headers:
+                live_sections = self._session.execute(
+                    select(SectionRow.id, SectionRow.order, SectionRow.title)
+                    .where(SectionRow.book_id == book_id)
+                    .order_by(SectionRow.order, SectionRow.id)
+                ).all()
+                live_ids = {row.id for row in live_sections}
+                if live_sections and set(headers_by_sid).issubset(live_ids):
+                    merged_live: list[ChapterHeaderRow] = []
+                    for row in live_sections:
+                        existing = headers_by_sid.get(row.id)
+                        if existing is not None:
+                            merged_live.append(existing)
+                        else:
+                            merged_live.append(
+                                ChapterHeaderRow(
+                                    section_id=row.id,
+                                    order=row.order,
+                                    title=row.title,
+                                    state="not_started",
+                                    reason_code=None,
+                                    moment_count=None,
+                                    scope_id=None,
+                                )
+                            )
+                    return tuple(merged_live[offset : offset + limit]), len(merged_live)
+                return tuple(ordered_scope_headers[offset : offset + limit]), len(
+                    ordered_scope_headers
+                )
 
         section_total = int(
             self._session.scalar(
@@ -1036,6 +1182,12 @@ class SqlAlchemyIllustrationRepository:
                 IllustrationReasonCode.STALE_ATTEMPT,
                 f"область {scope_id} не найдена",
             )
+        gen_row = self._session.get(IllustrationGenerationRow, scope_row.generation_id)
+        if gen_row is None or gen_row.state == IllustrationGenerationState.REVOKED.value:
+            raise IllustrationOwnershipError(
+                IllustrationReasonCode.STALE_ATTEMPT,
+                "поколение отозвано",
+            )
         if scope_row.state not in {
             IllustrationScopeState.PENDING.value,
             IllustrationScopeState.RUNNING.value,
@@ -1060,10 +1212,14 @@ class SqlAlchemyIllustrationRepository:
         now = _now()
         if attempt_id is not None:
             attempt_row = self._session.get(IllustrationAttemptRow, attempt_id)
-            if attempt_row is None or attempt_row.scope_id != scope_id:
+            if (
+                attempt_row is None
+                or attempt_row.scope_id != scope_id
+                or scope_row.attempt_id != attempt_id
+            ):
                 raise IllustrationOwnershipError(
                     IllustrationReasonCode.STALE_ATTEMPT,
-                    "попытка не принадлежит разбиваемой области",
+                    "попытка не владеет разбиваемой областью",
                 )
             if attempt_row.state == IllustrationAttemptState.RESERVED.value:
                 self.release_reserved_call(attempt_id, reason_code=IllustrationReasonCode.CONTEXT_LIMIT.value)
@@ -1211,13 +1367,31 @@ class SqlAlchemyIllustrationRepository:
                 f"область {scope_id} не найдена",
             )
         gen_row = self._session.get(IllustrationGenerationRow, scope_row.generation_id)
+        if gen_row is None or gen_row.state == IllustrationGenerationState.REVOKED.value:
+            raise IllustrationOwnershipError(
+                IllustrationReasonCode.STALE_ATTEMPT,
+                "поколение отозвано",
+            )
+        if scope_row.state in {
+            IllustrationScopeState.ACCEPTED.value,
+            IllustrationScopeState.SKIPPED.value,
+            IllustrationScopeState.SPLIT.value,
+        }:
+            raise IllustrationOwnershipError(
+                IllustrationReasonCode.STALE_ATTEMPT,
+                f"область {scope_id} уже завершена в состоянии {scope_row.state}",
+            )
         now = _now()
         if attempt_id is not None:
             attempt_row = self._session.get(IllustrationAttemptRow, attempt_id)
-            if attempt_row is None or attempt_row.scope_id != scope_id:
+            if (
+                attempt_row is None
+                or attempt_row.scope_id != scope_id
+                or (scope_row.attempt_id is not None and scope_row.attempt_id != attempt_id)
+            ):
                 raise IllustrationOwnershipError(
                     IllustrationReasonCode.STALE_ATTEMPT,
-                    "попытка не принадлежит области",
+                    "попытка не владеет областью",
                 )
             if attempt_row.state == IllustrationAttemptState.RESERVED.value:
                 attempt_row.state = IllustrationAttemptState.CANCELLED.value

@@ -43,10 +43,12 @@ from linguary.application.illustration_validation import (
 )
 from linguary.application.illustrations import (
     dispatch_scope_task,
+    finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
 from linguary.application.ports.illustrations import IllustrationRuntimePort
 from linguary.application.ports.llm import (
+    LLMConfigurationError,
     LLMContextCapacityError,
     LLMProviderError,
     LLMRequest,
@@ -299,6 +301,7 @@ def _build_fact_scope_spec(
     running_summary_en: str,
     running_applicable_ids: Sequence[str],
     is_consolidation: bool,
+    max_applicable_fact_ids: int = _MAX_APPLICABLE_FACTS,
     revision: IllustrationSettingsRevision,
     route_id: str,
     reusable: IllustrationScope | None = None,
@@ -329,7 +332,7 @@ def _build_fact_scope_spec(
         "page_index": page_index,
         "total_pages": total_pages,
         "is_consolidation": is_consolidation,
-        "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
+        "max_applicable_fact_ids": max_applicable_fact_ids,
         "running_summary_ru": running_summary_ru,
         "running_summary_en": running_summary_en,
         "facts": compact_facts,
@@ -354,6 +357,7 @@ def _build_fact_scope_spec(
         "page_index": page_index,
         "total_pages": total_pages,
         "is_consolidation": is_consolidation,
+        "max_applicable_fact_ids": max_applicable_fact_ids,
         "valid_fact_ids": valid_ids,
         "running_applicable_ids": list(running_applicable_ids),
         "ordered_block_ids": [a.block_id for a in moment_card.anchors],
@@ -974,39 +978,82 @@ class IllustrationChapter:
                     if not folding_done:
                         continue
 
-                    # Cap accumulated_app_ids to <=32 via final consolidation FACT_SCOPE if needed!
-                    if len(accumulated_app_ids) > _MAX_APPLICABLE_FACTS:
-                        consol_key = f"fact_scope:{section_id}:{card.candidate_id}:{eid}:consolidate"
-                        existing_consol = fact_scopes_by_key.get(consol_key)
+                    # Cap accumulated_app_ids to <=32 via wire-budgeted consolidation FACT_SCOPE rounds!
+                    consol_round = 0
+                    consol_pending = False
+                    while len(accumulated_app_ids) > _MAX_APPLICABLE_FACTS:
                         consol_facts = [
                             all_registry_facts[fid]
                             for fid in accumulated_app_ids
                             if fid in all_registry_facts
                         ]
-                        if existing_consol is None:
-                            draft = _build_fact_scope_spec(
-                                section_id=section_id,
-                                section_order=entry.order,
-                                section_title=entry.title,
-                                scope_key=consol_key,
-                                moment_card=card,
-                                entity=ent,
-                                facts_page=consol_facts,
-                                page_index=len(fact_pages),
-                                total_pages=len(fact_pages) + 1,
-                                running_summary_ru=running_ru,
-                                running_summary_en=running_en,
-                                running_applicable_ids=accumulated_app_ids,
-                                is_consolidation=True,
-                                revision=revision,
-                                route_id=route_id,
-                            )
-                            reusable = tx.illustrations.find_reusable_scope(
-                                generation.book_id,
+
+                        def _build_consol_probe(
+                            c_page: Sequence[Mapping[str, Any]],
+                            *,
+                            _card: SelectedMomentCard = card,
+                            _eid: str = eid,
+                            _ent: Mapping[str, Any] = ent,
+                        ) -> LLMRequest[Any]:
+                            return IllustrationContext.build_for_kind(
+                                kind=LLMResponseKind.ILLUSTRATION_FACT_SCOPE,
                                 stage=IllustrationScopeStage.FACT_SCOPE,
-                                input_sha256=draft.input_sha256,
+                                input_payload={
+                                    "event_id": _card.candidate_id,
+                                    "event_position_key": _card.event_position_key,
+                                    "event_ru": _card.event_ru,
+                                    "entity_id": _eid,
+                                    "entity_name": str(_ent["canonical_name"]),
+                                    "entity_kind": str(_ent["entity_kind"]),
+                                    "page_index": 0,
+                                    "total_pages": 1,
+                                    "is_consolidation": True,
+                                    "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
+                                    "running_summary_ru": "x" * 600,
+                                    "running_summary_en": "x" * 600,
+                                    "facts": [
+                                        {
+                                            "fact_id": str(f["fact_id"]),
+                                            "temporal_scope": str(f["temporal_scope"]),
+                                            "position_key": str(f["position_key"]),
+                                            "is_back_applicable": bool(
+                                                f.get("is_back_applicable", False)
+                                            ),
+                                            "description_ru": str(f["description_ru"])[:80],
+                                            "description_en": str(f["description_en"])[:80],
+                                        }
+                                        for f in c_page
+                                    ],
+                                },
+                                book_id=snapshot.book_id,
+                                conditions_id=snapshot.conditions_id,
+                                policy=policy,
                             )
-                            if reusable is not None:
+
+                        consol_pages = pack_items_by_wire_budget(
+                            consol_facts,
+                            build_request=_build_consol_probe,
+                            sizer=sizer,
+                            target_bytes=policy.initial_target_bytes,
+                        )
+                        per_page_cap = (
+                            _MAX_APPLICABLE_FACTS
+                            if len(consol_pages) == 1
+                            else max(1, _MAX_APPLICABLE_FACTS // len(consol_pages))
+                        )
+                        round_app_ids: list[str] = []
+                        round_assumps: list[str] = []
+                        round_ru = running_ru
+                        round_en = running_en
+                        for c_idx, c_page in enumerate(consol_pages):
+                            consol_key = (
+                                f"fact_scope:{section_id}:{card.candidate_id}:{eid}:consolidate"
+                                if consol_round == 0 and len(consol_pages) == 1
+                                else f"fact_scope:{section_id}:{card.candidate_id}:{eid}:consolidate:r{consol_round}:p{c_idx:03d}"
+                            )
+                            page_fids = [str(f["fact_id"]) for f in c_page]
+                            existing_consol = fact_scopes_by_key.get(consol_key)
+                            if existing_consol is None:
                                 draft = _build_fact_scope_spec(
                                     section_id=section_id,
                                     section_order=entry.order,
@@ -1014,42 +1061,84 @@ class IllustrationChapter:
                                     scope_key=consol_key,
                                     moment_card=card,
                                     entity=ent,
-                                    facts_page=consol_facts,
-                                    page_index=len(fact_pages),
-                                    total_pages=len(fact_pages) + 1,
-                                    running_summary_ru=running_ru,
-                                    running_summary_en=running_en,
-                                    running_applicable_ids=accumulated_app_ids,
+                                    facts_page=c_page,
+                                    page_index=c_idx,
+                                    total_pages=len(consol_pages),
+                                    running_summary_ru=round_ru,
+                                    running_summary_en=round_en,
+                                    running_applicable_ids=page_fids,
                                     is_consolidation=True,
+                                    max_applicable_fact_ids=per_page_cap,
                                     revision=revision,
                                     route_id=route_id,
-                                    reusable=reusable,
                                 )
-                            created = tx.illustrations.upsert_scopes(generation.id, [draft])
-                            existing_consol = created[0]
-                            fact_scopes_by_key[consol_key] = existing_consol
-                            if existing_consol.state is IllustrationScopeState.PENDING:
-                                dispatch_scope_task(
-                                    tx,
-                                    existing_consol,
-                                    generation_id=generation.id,
-                                    task_type=TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
-                                    id_factory=id_factory,
-                                    book_id=generation.book_id,
+                                reusable = tx.illustrations.find_reusable_scope(
+                                    generation.book_id,
+                                    stage=IllustrationScopeStage.FACT_SCOPE,
+                                    input_sha256=draft.input_sha256,
                                 )
-                                dispatched = True
-                        if existing_consol.state is not IllustrationScopeState.ACCEPTED:
-                            pending_fact_scopes = True
-                            continue
-                        c_pay = existing_consol.payload or {}
-                        accumulated_app_ids = [
-                            str(fid) for fid in c_pay.get("applicable_fact_ids", ())
-                        ][:_MAX_APPLICABLE_FACTS]
-                        running_ru = str(c_pay.get("compact_description_ru", running_ru))
-                        running_en = str(c_pay.get("compact_description_en", running_en))
-                        accumulated_assumps = [
-                            str(x).strip() for x in c_pay.get("assumptions_ru", ()) if str(x).strip()
-                        ]
+                                if reusable is not None:
+                                    draft = _build_fact_scope_spec(
+                                        section_id=section_id,
+                                        section_order=entry.order,
+                                        section_title=entry.title,
+                                        scope_key=consol_key,
+                                        moment_card=card,
+                                        entity=ent,
+                                        facts_page=c_page,
+                                        page_index=c_idx,
+                                        total_pages=len(consol_pages),
+                                        running_summary_ru=round_ru,
+                                        running_summary_en=round_en,
+                                        running_applicable_ids=page_fids,
+                                        is_consolidation=True,
+                                        max_applicable_fact_ids=per_page_cap,
+                                        revision=revision,
+                                        route_id=route_id,
+                                        reusable=reusable,
+                                    )
+                                created = tx.illustrations.upsert_scopes(generation.id, [draft])
+                                existing_consol = created[0]
+                                fact_scopes_by_key[consol_key] = existing_consol
+                                if existing_consol.state is IllustrationScopeState.PENDING:
+                                    dispatch_scope_task(
+                                        tx,
+                                        existing_consol,
+                                        generation_id=generation.id,
+                                        task_type=TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
+                                        id_factory=id_factory,
+                                        book_id=generation.book_id,
+                                    )
+                                    dispatched = True
+                            if existing_consol.state is not IllustrationScopeState.ACCEPTED:
+                                consol_pending = True
+                                pending_fact_scopes = True
+                                break
+                            c_pay = existing_consol.payload or {}
+                            for fid in c_pay.get("applicable_fact_ids", ()):
+                                fid_s = str(fid)
+                                if fid_s not in round_app_ids:
+                                    round_app_ids.append(fid_s)
+                            round_ru = str(c_pay.get("compact_description_ru", round_ru))
+                            round_en = str(c_pay.get("compact_description_en", round_en))
+                            for x in c_pay.get("assumptions_ru", ()):
+                                if str(x).strip():
+                                    round_assumps.append(str(x).strip())
+
+                        if consol_pending:
+                            break
+                        prev_len = len(accumulated_app_ids)
+                        accumulated_app_ids = round_app_ids
+                        running_ru = round_ru
+                        running_en = round_en
+                        accumulated_assumps = round_assumps
+                        consol_round += 1
+                        if len(accumulated_app_ids) >= prev_len:
+                            accumulated_app_ids = accumulated_app_ids[:_MAX_APPLICABLE_FACTS]
+                            break
+
+                    if consol_pending:
+                        continue
 
                     # Combine explicit applicable facts with non-conflicting design fallbacks!
                     applicable_fact_objs = [
@@ -1267,6 +1356,7 @@ class IllustrationChapter:
             pass_mirror=pass_mirror,
         )
         self._maybe_mark_generation_ready(tx, generation)
+        finalize_generation_state_in_tx(tx, generation.book_id, generation.id)
 
     async def _run_render_scope_task(self, task: ProcessingTask) -> None:
         scope_id = task.scope_id
@@ -1293,6 +1383,15 @@ class IllustrationChapter:
                     or head.active_generation_id != gen.id
                     or gen.state is IllustrationGenerationState.REVOKED
                 ):
+                    if not first_call:
+                        self._abort_stale_running_scope(
+                            tx,
+                            scope,
+                            task_id=task.id,
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            reason_code=IllustrationReasonCode.STALE_ATTEMPT.value,
+                        )
                     return
                 revision = tx.illustrations.get_settings(book_id, gen.settings_id)
                 if (
@@ -1300,6 +1399,20 @@ class IllustrationChapter:
                     or head.settings_id != revision.id
                     or not revision.settings.enabled
                 ):
+                    if not first_call:
+                        stale_code = (
+                            IllustrationReasonCode.CHANNEL_DISABLED.value
+                            if revision is not None and not revision.settings.enabled
+                            else IllustrationReasonCode.SETTINGS_CHANGED.value
+                        )
+                        self._abort_stale_running_scope(
+                            tx,
+                            scope,
+                            task_id=task.id,
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            reason_code=stale_code,
+                        )
                     return
                 snapshot = self._source.snapshot(tx, book_id)
                 if (
@@ -1313,6 +1426,7 @@ class IllustrationChapter:
                     revoke_active_in_transaction(
                         tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
                     )
+                    self._supersede_task(tx, task.id)
                     return
 
                 section_id = scope.section_id
@@ -1340,6 +1454,8 @@ class IllustrationChapter:
                             tx, gen, revision, snapshot, section_id, id_factory=self._id_factory
                         ):
                             notify_after = True
+                        else:
+                            finalize_generation_state_in_tx(tx, book_id, gen.id)
                         self._mark_task_succeeded(tx, task.id)
                         break
 
@@ -1535,13 +1651,18 @@ class IllustrationChapter:
                         reason_code=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
                     )
                     return
+                fallback_reason = (
+                    IllustrationReasonCode.ROUTE_UNAVAILABLE.value
+                    if isinstance(call_error, LLMConfigurationError)
+                    else IllustrationReasonCode.PROVIDER_ERROR.value
+                )
                 self._finalize_failure(
                     book_id=book_id,
                     generation_id=generation_id,
                     task_id=task.id,
                     scope_id=scope.id,
                     attempt_id=attempt.id,
-                    reason_code=IllustrationReasonCode.PROVIDER_ERROR.value,
+                    reason_code=fallback_reason,
                 )
                 return
 
@@ -1605,7 +1726,16 @@ class IllustrationChapter:
                         revoke_active_in_transaction(
                             tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
                         )
-                    tx.illustrations.fail_scope(scope.id, attempt_id=None, reason_code=stale_reason)
+                    elif stale_reason != IllustrationReasonCode.STALE_ATTEMPT.value:
+                        try:
+                            tx.illustrations.fail_scope(
+                                scope.id, attempt_id=None, reason_code=stale_reason
+                            )
+                        except IllustrationOwnershipError:
+                            pass
+                        finalize_generation_state_in_tx(
+                            tx, book_id, generation_id, fallback_reason=stale_reason
+                        )
                     self._supersede_task(tx, task.id)
                     return
 
@@ -1631,6 +1761,8 @@ class IllustrationChapter:
                     tx, gen, revision, cur_snap, section_id, id_factory=self._id_factory
                 ):
                     notify_after = True
+                else:
+                    finalize_generation_state_in_tx(tx, book_id, gen.id)
                 self._mark_task_succeeded(tx, task.id)
                 break
 
@@ -1654,9 +1786,10 @@ class IllustrationChapter:
             valid_fids = set(str(fid) for fid in scope.summary.get("valid_fact_ids", ()))
             running_fids = set(str(fid) for fid in scope.summary.get("running_applicable_ids", ()))
             allowed = valid_fids | running_fids
-            if len(payload.applicable_fact_ids) > _MAX_APPLICABLE_FACTS:
+            max_app = int(scope.summary.get("max_applicable_fact_ids", _MAX_APPLICABLE_FACTS))
+            if len(payload.applicable_fact_ids) > max_app:
                 return _ValidationOutcome(
-                    ok=False, repair_reason=f"не более {_MAX_APPLICABLE_FACTS} applicable_fact_ids"
+                    ok=False, repair_reason=f"не более {max_app} applicable_fact_ids"
                 )
             if any(fid not in allowed for fid in payload.applicable_fact_ids):
                 return _ValidationOutcome(
@@ -1742,9 +1875,17 @@ class IllustrationChapter:
         reason_code: str,
     ) -> None:
         with self._uow.transaction() as tx:
-            tx.illustrations.fail_scope(
-                scope_id, attempt_id=attempt_id, reason_code=reason_code
-            )
+            try:
+                tx.illustrations.fail_scope(
+                    scope_id, attempt_id=attempt_id, reason_code=reason_code
+                )
+            except IllustrationOwnershipError:
+                tx.illustrations.record_attempt_outcome(
+                    attempt_id,
+                    state=IllustrationAttemptState.STALE,
+                    outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
+                )
+                return
             self._mark_task_failed(tx, task_id, reason_code)
             self._refresh_generation_state(tx, book_id, generation_id, reason_code)
 
@@ -1839,24 +1980,37 @@ class IllustrationChapter:
             tx.tasks.save(task.supersede())
 
     @staticmethod
+    def _abort_stale_running_scope(
+        tx: UnitOfWork,
+        scope: IllustrationScope,
+        *,
+        task_id: str,
+        book_id: str,
+        generation_id: str,
+        reason_code: str,
+    ) -> None:
+        if scope.state is IllustrationScopeState.RUNNING:
+            try:
+                tx.illustrations.fail_scope(
+                    scope.id, attempt_id=None, reason_code=reason_code
+                )
+            except IllustrationOwnershipError:
+                pass
+            finalize_generation_state_in_tx(
+                tx, book_id, generation_id, fallback_reason=reason_code
+            )
+        IllustrationChapter._supersede_task(tx, task_id)
+
+    @staticmethod
     def _refresh_generation_state(
         tx: UnitOfWork,
         book_id: str,
         generation_id: str,
         reason_code: str,
     ) -> None:
-        scopes = tx.illustrations.list_scopes(generation_id)
-        has_active = any(
-            s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
-            for s in scopes
+        finalize_generation_state_in_tx(
+            tx, book_id, generation_id, fallback_reason=reason_code
         )
-        if not has_active:
-            tx.illustrations.update_generation_state(
-                book_id,
-                generation_id,
-                state=IllustrationGenerationState.FAILED,
-                reason_code=reason_code,
-            )
 
 
 __all__ = [

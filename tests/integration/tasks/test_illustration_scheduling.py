@@ -39,7 +39,6 @@ from linguary.application.use_cases.analyze_chapter import ChapterAnalysisSequen
 from linguary.application.use_cases.pause_book import (
     PauseBookCommand,
     PauseBookError,
-    ResumeBook,
     ResumeBookCommand,
 )
 from linguary.application.use_cases.reset_processing import (
@@ -619,15 +618,8 @@ def test_resume_reconciles_book_and_notifies_after_commit(tmp_path: Path) -> Non
 
         app.task_queue.notify_work_available = spy_notify  # type: ignore[method-assign]
         app.illustration_coordinator._notify_work_available = spy_notify  # type: ignore[attr-defined]
-        # Re-bind ResumeBook with spy using same coordinator + spy_notify
-        resume = ResumeBook(
-            unit_of_work=app.unit_of_work,
-            on_resumed=lambda bid: (
-                app.illustration_coordinator.reconcile(bid),
-                spy_notify(),
-            ),
-        )
-        res = resume(ResumeBookCommand(book_id="book-res"))
+        # Exercise the real wired app.resume_book() directly!
+        res = app.resume_book(ResumeBookCommand(book_id="book-res"))
         assert res.pause_requested is False
         assert observed_events
         assert all(paused is False for _, paused in observed_events)

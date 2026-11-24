@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -42,6 +43,9 @@ def _invalid(message: str = "некорректные параметры зап�
     return IllustrationValidationError(IllustrationReasonCode.INVALID_REQUEST, message)
 
 
+_STRICT_INT_RE = re.compile(r"-?[0-9]{1,18}")
+
+
 def _strict_int(value: Any, *, min_value: int, max_value: int | None = None, from_str: bool = False) -> int:
     if isinstance(value, bool):
         raise _invalid("логическое значение недопустимо там, где ожидается целое число")
@@ -49,7 +53,7 @@ def _strict_int(value: Any, *, min_value: int, max_value: int | None = None, fro
         parsed = value
     elif from_str and isinstance(value, str):
         raw = value.strip()
-        if not raw or (raw[0] == "-" and not raw[1:].isdigit()) or (raw[0] != "-" and not raw.isdigit()):
+        if not _STRICT_INT_RE.fullmatch(raw):
             raise _invalid("ожидалось целое число")
         parsed = int(raw)
     else:

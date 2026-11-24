@@ -34,7 +34,7 @@
     <p class="muted">Подготовка промтов для книжных иллюстраций (необязательный канал, не меняет перевод и EPUB).</p>
   </div>
   <div class="actions">
-    <a class="button secondary" href="{{ illustrations_url() }}">Обновить</a>
+    <a class="button-link button-secondary" href="{{ illustrations_url() }}">Обновить</a>
   </div>
 </section>
 
@@ -133,14 +133,14 @@
     <input type="hidden" name="return_section_id" value="{{ data.selected_chapter.section_id }}">
     {% endif %}
 
-    <div class="field">
+    <div class="settings-field">
       <label for="ill-enabled">
         <input type="checkbox" id="ill-enabled" name="enabled" value="true" {% if data.settings.enabled %}checked{% endif %}>
         Включить подготовку иллюстраций для этой книги
       </label>
     </div>
 
-    <div class="field">
+    <div class="settings-field">
       <label for="ill-max-per-chapter">Максимум промтов на главу (1–3)</label>
       <select id="ill-max-per-chapter" name="max_per_chapter">
         {% for limit_opt in (1, 2, 3) %}
@@ -149,7 +149,7 @@
       </select>
     </div>
 
-    <div class="field">
+    <div class="settings-field">
       <label for="ill-model-reference">Текстовая модель для справочника образов</label>
       <input
         type="text"
@@ -160,7 +160,7 @@
       >
     </div>
 
-    <div class="field">
+    <div class="settings-field">
       <label for="ill-model-prompts">Текстовая модель для отбора сцен и промтов</label>
       <input
         type="text"
@@ -172,13 +172,13 @@
     </div>
 
     <div class="actions">
-      <button type="submit" class="button">Сохранить параметры</button>
+      <button type="submit">Сохранить параметры</button>
     </div>
   </form>
   {% endif %}
 
   {% if "prepare" in data.allowed_actions or "retry" in data.allowed_actions or "new_generation" in data.allowed_actions %}
-  <div class="action-panel" style="margin-top: 1rem;">
+  <div class="illustration-actions-panel">
     {% if "prepare" in data.allowed_actions %}
     <form method="post" action="/books/{{ book_id | urlencode }}/illustrations/prepare" class="illustration-action-form">
       <input type="hidden" name="expected_revision" value="{{ data.settings_revision }}">
@@ -190,7 +190,7 @@
       {% if data.selected_chapter %}
       <input type="hidden" name="return_section_id" value="{{ data.selected_chapter.section_id }}">
       {% endif %}
-      {% if requested_generation_id %}
+      {% if requested_generation_id and data.state != "stale" %}
       <input type="hidden" name="return_generation_id" value="{{ requested_generation_id }}">
       {% endif %}
 
@@ -201,7 +201,7 @@
         <option value="{{ data.selected_chapter.section_id }}">Только текущая глава: {{ data.selected_chapter.title or data.selected_chapter.section_id }}</option>
         {% endif %}
       </select>
-      <button type="submit" class="button">Подготовить промты</button>
+      <button type="submit">Подготовить промты</button>
     </form>
     {% endif %}
 
@@ -225,7 +225,7 @@
         <option value="{{ data.selected_chapter.section_id }}">Только текущая глава: {{ data.selected_chapter.title or data.selected_chapter.section_id }}</option>
         {% endif %}
       </select>
-      <button type="submit" class="button secondary">Повторить неуспешные области</button>
+      <button type="submit" class="button-secondary">Повторить неуспешные области</button>
     </form>
     {% endif %}
 
@@ -238,7 +238,7 @@
       {% if data.selected_chapter %}
       <input type="hidden" name="return_section_id" value="{{ data.selected_chapter.section_id }}">
       {% endif %}
-      <button type="submit" class="button secondary">Начать новое поколение</button>
+      <button type="submit" class="button-secondary">Начать новое поколение</button>
     </form>
     {% endif %}
   </div>
@@ -252,12 +252,12 @@
     <summary id="illustration-registry-heading">
       Справочник образов книги (только чтение, всего записей: {{ registry.pagination.total }})
     </summary>
-    <div class="actions" style="margin-top: 0.75rem;">
-      <a class="button secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=None) }}" {% if not registry_kind %}aria-current="true"{% endif %}>Все виды</a>
+    <div class="actions illustration-registry-filters">
+      <a class="button-link button-secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=None) }}" {% if not registry_kind %}aria-current="true"{% endif %}>Все виды</a>
       {% for kind_key, kind_label in illustration_registry_kind_labels.items() %}
-      <a class="button secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=kind_key) }}" {% if registry_kind == kind_key %}aria-current="true"{% endif %}>{{ kind_label }}</a>
+      <a class="button-link button-secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=kind_key) }}" {% if registry_kind == kind_key %}aria-current="true"{% endif %}>{{ kind_label }}</a>
       {% endfor %}
-      <a class="button secondary" href="{{ registry_json_url() }}">JSON справочника</a>
+      <a class="button-link button-secondary" href="{{ registry_json_url() }}">JSON справочника</a>
     </div>
     {% if registry.items %}
     <ul class="illustration-list">
@@ -276,10 +276,10 @@
     {% endif %}
     <nav class="actions" aria-label="Страницы справочника">
       {% if registry.pagination.previous_offset is not none %}
-      <a class="button secondary" href="{{ illustrations_url(registry_offset=registry.pagination.previous_offset) }}">Предыдущая страница справочника</a>
+      <a class="button-link button-secondary" href="{{ illustrations_url(registry_offset=registry.pagination.previous_offset) }}">Предыдущая страница справочника</a>
       {% endif %}
       {% if registry.pagination.next_offset is not none %}
-      <a class="button secondary" href="{{ illustrations_url(registry_offset=registry.pagination.next_offset) }}">Следующая страница справочника</a>
+      <a class="button-link button-secondary" href="{{ illustrations_url(registry_offset=registry.pagination.next_offset) }}">Следующая страница справочника</a>
       {% endif %}
     </nav>
   </details>
@@ -315,10 +315,10 @@
   {% endif %}
   <nav class="actions" aria-label="Страницы глав">
     {% if data.pagination.previous_offset is not none %}
-    <a class="button secondary" href="{{ illustrations_url(offset=data.pagination.previous_offset) }}">Предыдущие главы</a>
+    <a class="button-link button-secondary" href="{{ illustrations_url(offset=data.pagination.previous_offset) }}">Предыдущие главы</a>
     {% endif %}
     {% if data.pagination.next_offset is not none %}
-    <a class="button secondary" href="{{ illustrations_url(offset=data.pagination.next_offset) }}">Следующие главы</a>
+    <a class="button-link button-secondary" href="{{ illustrations_url(offset=data.pagination.next_offset) }}">Следующие главы</a>
     {% endif %}
   </nav>
 </section>
@@ -409,7 +409,7 @@
         <div class="actions illustration-copy-row">
           <button
             type="button"
-            class="button secondary"
+            class="button-secondary"
             data-copy-illustration-prompt
             data-prompt-id="prompt-{{ moment.id }}"
             data-status-id="copy-status-{{ moment.id }}"

@@ -134,6 +134,15 @@ class IllustrationRepository(Protocol):
         section_id: str | None = None,
     ) -> tuple[IllustrationScope, ...]: ...
 
+    def list_scope_summaries(
+        self,
+        generation_id: str,
+        *,
+        stage: IllustrationScopeStage | None = None,
+        state: IllustrationScopeState | None = None,
+        section_id: str | None = None,
+    ) -> tuple[IllustrationScope, ...]: ...
+
     def get_chapter_header_page(
         self,
         book_id: str,

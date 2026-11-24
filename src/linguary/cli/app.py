@@ -42,8 +42,11 @@ from linguary.domain import BookStatus, DomainError, TaskStatus, TaskType
 from linguary.domain.book_conditions import WorkStateError
 from linguary.domain.illustrations import (
     IllustrationError,
+    IllustrationReasonCode,
     IllustrationRegistryKind,
     IllustrationSettings,
+    IllustrationValidationError,
+    normalize_model_name,
 )
 from linguary.web.illustration_schemas import (
     IllustrationRegistryResponse,
@@ -68,7 +71,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{error.reason_code}: {error}", file=sys.stderr)
         return 1
     except (ApplicationError, DomainError, SettingsError, OSError) as error:
-        print(str(error), file=sys.stderr)
+        if getattr(args, "json_output", False):
+            print(
+                json.dumps(
+                    {"detail": {"reason_code": "error", "message": str(error)}},
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(str(error), file=sys.stderr)
         return 1
 
 
@@ -685,6 +697,9 @@ def _illustrations_settings(args: argparse.Namespace) -> int:
     async def execute() -> int:
         try:
             current = application.illustrations.get(args.book_id)
+            with application.unit_of_work.read_transaction() as tx:
+                head = tx.illustrations.get_head(args.book_id)
+                existing_policy = head.effective_settings.policy
             enabled = current.settings.enabled if args.enabled is None else bool(args.enabled)
             max_per = (
                 current.settings.max_per_chapter
@@ -694,12 +709,12 @@ def _illustrations_settings(args: argparse.Namespace) -> int:
             model_ref = (
                 current.settings.model_reference
                 if args.model_reference is None
-                else (args.model_reference.strip() or None)
+                else (None if args.model_reference == "" else normalize_model_name(args.model_reference))
             )
             model_prompts = (
                 current.settings.model_prompts
                 if args.model_prompts is None
-                else (args.model_prompts.strip() or None)
+                else (None if args.model_prompts == "" else normalize_model_name(args.model_prompts))
             )
             new_settings = IllustrationSettings(
                 enabled=enabled,
@@ -707,6 +722,7 @@ def _illustrations_settings(args: argparse.Namespace) -> int:
                 style=current.settings.style,
                 model_reference=model_ref,
                 model_prompts=model_prompts,
+                policy=existing_policy,
             )
             application.illustrations.save_settings(
                 args.book_id,
@@ -770,6 +786,11 @@ def _illustrations_retry(args: argparse.Namespace) -> int:
 
 
 def _illustrations_status(args: argparse.Namespace) -> int:
+    if args.offset < 0 or args.limit < 1 or args.limit > 50:
+        raise IllustrationValidationError(
+            IllustrationReasonCode.INVALID_REQUEST,
+            "допустимы offset >= 0 и 1 <= limit <= 50",
+        )
     application = _application(args)
 
     async def execute() -> int:
@@ -807,6 +828,11 @@ def _illustrations_show(args: argparse.Namespace) -> int:
 
 
 def _illustrations_registry(args: argparse.Namespace) -> int:
+    if args.offset < 0 or args.limit < 1 or args.limit > 100:
+        raise IllustrationValidationError(
+            IllustrationReasonCode.INVALID_REQUEST,
+            "допустимы offset >= 0 и 1 <= limit <= 100",
+        )
     application = _application(args)
 
     async def execute() -> int:
