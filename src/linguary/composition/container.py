@@ -262,8 +262,10 @@ class Application:
             self.book_runtime.aclose,
             self.correction.resolver.aclose,
             self._close_quality,
-            self._close_illustrations,
+            getattr(self, "_close_illustrations", None),
         ):
+            if close is None:
+                continue
             try:
                 await close()
             except Exception:

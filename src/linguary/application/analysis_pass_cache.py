@@ -182,7 +182,10 @@ def decode_illustration_pass(payload: Mapping[str, Any]) -> ChapterIllustrationP
     raw_response = payload.get("response")
     if not isinstance(raw_response, Mapping):
         raise ValueError("отсутствует тело прохода иллюстраций")
-    return ChapterIllustrationPlan.from_dict(thaw(raw_response))
+    try:
+        return ChapterIllustrationPlan.from_dict(thaw(raw_response))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"некорректное тело прохода иллюстраций: {error}") from error
 
 
 def decode_pass(
