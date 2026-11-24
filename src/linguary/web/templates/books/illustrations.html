@@ -406,6 +406,16 @@
       <div class="illustration-prompt-block">
         <label for="prompt-{{ moment.id }}"><strong>Промт для иллюстрации (на английском):</strong></label>
         <textarea readonly id="prompt-{{ moment.id }}" class="illustration-prompt-field" rows="6">{{ moment.prompt_en }}</textarea>
+        <div class="actions illustration-copy-row">
+          <button
+            type="button"
+            class="button secondary"
+            data-copy-illustration-prompt
+            data-prompt-id="prompt-{{ moment.id }}"
+            data-status-id="copy-status-{{ moment.id }}"
+          >Скопировать промт</button>
+          <span id="copy-status-{{ moment.id }}" class="muted" role="status"></span>
+        </div>
       </div>
     </article>
     {% endfor %}

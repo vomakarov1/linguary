@@ -961,8 +961,8 @@ def test_result_groups_template_keeps_original_and_one_ipa_key(client, applicati
 def test_result_page_versions_updated_script(client, application):
     scenario = _pronunciation_book(application)
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers=HTML_HEADERS).text)
-    assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=4')
-    assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=4')
+    assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=5')
+    assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=5')
 
 
 def _units_book(application: Application) -> WebScenario:
