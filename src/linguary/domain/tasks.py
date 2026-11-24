@@ -23,6 +23,8 @@ class TaskType(StrEnum):
     REGENERATE_BLOCK = "regenerate_block"
     CHAPTER_CORRECTION = "chapter_correction"
     EXPORT_BOOK = "export_book"
+    PREPARE_ILLUSTRATION_REFERENCE = "prepare_illustration_reference"
+    PREPARE_CHAPTER_ILLUSTRATIONS = "prepare_chapter_illustrations"
 
 
 class TaskStatus(StrEnum):
@@ -179,6 +181,12 @@ class ProcessingTask:
                 detail="Interrupted",
             )
         )
+
+    def supersede(self) -> ProcessingTask:
+        """Mark task as superseded, clearing any previous failure error (idempotent)."""
+        if self.status is TaskStatus.SUPERSEDED:
+            return self
+        return replace(self, status=TaskStatus.SUPERSEDED, last_error=None)
 
     def _ensure_status(self, expected: TaskStatus, *, target: TaskStatus) -> None:
         if self.status is not expected:

@@ -96,6 +96,8 @@ TASK_TYPE_LABELS: Mapping[TaskType, str] = {
     TaskType.CHAPTER_CORRECTION: "Исправление главы",
     TaskType.EXPORT_BOOK: "Сборка EPUB",
     TaskType.QUALITY_REVIEW: "Вычитка качества",
+    TaskType.PREPARE_ILLUSTRATION_REFERENCE: "Справочник образов для иллюстраций",
+    TaskType.PREPARE_CHAPTER_ILLUSTRATIONS: "Промты иллюстраций главы",
 }
 
 TASK_STATUS_LABELS: Mapping[TaskStatus, str] = {
@@ -103,6 +105,7 @@ TASK_STATUS_LABELS: Mapping[TaskStatus, str] = {
     TaskStatus.RUNNING: "Выполняется",
     TaskStatus.SUCCEEDED: "Готово",
     TaskStatus.FAILED: "Не удалось выполнить",
+    TaskStatus.SUPERSEDED: "Заменено новой задачей",
 }
 
 #: What error type means to the user: whether retry is possible and what it depends on

@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from linguary.application.errors import ApplicationError
+from linguary.application.ports.illustrations import IllustrationRepository
 from linguary.domain import (
     BlockProcessingResult,
     BookImportWarning,
@@ -519,6 +520,10 @@ class UnitOfWork(Protocol):
     @property
     def work(self) -> WorkRepository:
         """Immutable work history and transactional execution state."""
+
+    @property
+    def illustrations(self) -> IllustrationRepository:
+        """Optional book illustration preparation storage."""
 
     def transaction(self) -> AbstractContextManager[UnitOfWork]:
         """Opens a transaction and makes repositories accessible.

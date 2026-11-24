@@ -26,6 +26,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from time import sleep
 
+from linguary.adapters.db.illustration_repository import SqlAlchemyIllustrationRepository
 from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -166,6 +167,11 @@ class SqlAlchemyUnitOfWork:
     def work(self) -> SqlAlchemyWorkRepository:
         """Versioned work, provenance, and monetary reservations."""
         return SqlAlchemyWorkRepository(self._active_session())
+
+    @property
+    def illustrations(self) -> SqlAlchemyIllustrationRepository:
+        """Optional book illustration preparation storage."""
+        return SqlAlchemyIllustrationRepository(self._active_session())
 
     def _active_session(self) -> Session:
         """Active transaction session in current execution context."""
