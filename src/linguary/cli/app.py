@@ -561,10 +561,24 @@ def _worker(args: argparse.Namespace) -> int:
         try:
             if args.once:
                 tasks = await drain_tasks(application)
-                failed = [task for task in tasks if task.last_error is not None]
+                ill_types = {
+                    TaskType.PREPARE_ILLUSTRATION_REFERENCE,
+                    TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
+                }
+                primary_failed = [
+                    task
+                    for task in tasks
+                    if task.last_error is not None and task.task_type not in ill_types
+                ]
+                illustration_failed = [
+                    task
+                    for task in tasks
+                    if task.last_error is not None and task.task_type in ill_types
+                ]
                 print(f"Tasks finished: {len(tasks)}")
-                print(f"Tasks failed: {len(failed)}")
-                return 1 if failed else 0
+                print(f"Tasks failed: {len(primary_failed)}")
+                print(f"Optional illustration tasks failed: {len(illustration_failed)}")
+                return 1 if primary_failed else 0
             await run_worker(application)
             return 0
         finally:

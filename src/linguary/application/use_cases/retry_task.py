@@ -75,8 +75,20 @@ class RetryTask:
         return restarted
 
 
+_ILLUSTRATION_TASKS = frozenset(
+    {
+        TaskType.PREPARE_ILLUSTRATION_REFERENCE,
+        TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
+    }
+)
+
+
 def _ensure_retryable(task: ProcessingTask) -> None:
     """Ensures that retrying the task makes sense."""
+    if task.task_type in _ILLUSTRATION_TASKS:
+        raise RetryTaskError(
+            "задачи подготовки иллюстраций повторяются через команду illustrations retry"
+        )
     if task.status is TaskStatus.SUPERSEDED:
         raise RetryTaskError(f"задача {task.id} вытеснена новой операцией и не может быть повторена")
     if task.status is TaskStatus.SUCCEEDED:
@@ -114,6 +126,12 @@ def evaluate_task_retryable(
     task_attempts: Sequence[Any] | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Pure recovery-guard check returning ``(allowed, reason, requires_unknown_ack)``."""
+    if task.task_type in _ILLUSTRATION_TASKS:
+        return (
+            False,
+            "задачи подготовки иллюстраций повторяются через команду illustrations retry",
+            False,
+        )
     if task.task_type is TaskType.CHAPTER_CORRECTION:
         if task_attempts is None:
             return True, None, False
@@ -184,6 +202,11 @@ def evaluate_task_retryable(
 
 def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]:
     """Whether ordinary retry may resume this task's bound recovery roots."""
+    if task.task_type in _ILLUSTRATION_TASKS:
+        return (
+            False,
+            "задачи подготовки иллюстраций повторяются через команду illustrations retry",
+        )
     if task.task_type is TaskType.CHAPTER_CORRECTION:
         work = getattr(transaction, "work", None)
         if work is None:
