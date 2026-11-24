@@ -1,0 +1,295 @@
+{% extends "base.html" %}
+
+{% macro illustrations_url(
+    offset=data.pagination.offset,
+    limit=data.pagination.limit,
+    section_id=(data.selected_chapter.section_id if data.selected_chapter else None),
+    generation_id=requested_generation_id,
+    registry_offset=(registry.pagination.offset if registry else None),
+    registry_limit=(registry.pagination.limit if registry else None),
+    reg_kind=registry_kind
+) -%}
+/books/{{ book_id | urlencode }}/illustrations?offset={{ offset }}&amp;limit={{ limit }}
+{%- if section_id %}&amp;section_id={{ section_id | urlencode }}{% endif -%}
+{%- if generation_id %}&amp;generation_id={{ generation_id | urlencode }}{% endif -%}
+{%- if registry_offset is not none %}&amp;registry_offset={{ registry_offset }}{% endif -%}
+{%- if registry_limit is not none %}&amp;registry_limit={{ registry_limit }}{% endif -%}
+{%- if reg_kind %}&amp;registry_kind={{ reg_kind | urlencode }}{% endif -%}
+{%- endmacro %}
+
+{% macro registry_json_url() -%}
+/books/{{ book_id | urlencode }}/illustrations/registry
+{%- set ns = namespace(sep='?') -%}
+{%- if registry and registry.generation_id %}{{ ns.sep }}generation_id={{ registry.generation_id | urlencode }}{% set ns.sep = '&amp;' %}{% elif requested_generation_id %}{{ ns.sep }}generation_id={{ requested_generation_id | urlencode }}{% set ns.sep = '&amp;' %}{% endif -%}
+{%- if registry_kind %}{{ ns.sep }}kind={{ registry_kind | urlencode }}{% set ns.sep = '&amp;' %}{% endif -%}
+{%- if registry %}{{ ns.sep }}offset={{ registry.pagination.offset }}&amp;limit={{ registry.pagination.limit }}{% endif -%}
+{%- endmacro %}
+
+{% block title %}Иллюстрации — {{ data.book_title }} — Linguary{% endblock %}
+
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>{{ data.book_title }}</h1>
+    <p class="muted">Подготовка промтов для книжных иллюстраций (необязательный канал, не меняет перевод и EPUB).</p>
+  </div>
+  <div class="actions">
+    <a class="button secondary" href="{{ illustrations_url() }}">Обновить</a>
+  </div>
+</section>
+
+{% include "partials/book_tabs.html" %}
+
+{% if data.is_history %}
+<section class="notice" role="region" aria-label="Исторический просмотр">
+  <p>
+    <strong>Историческое поколение (только чтение).</strong>
+    Запуск, повтор и изменение этого поколения недоступны.
+    <a href="/books/{{ book_id | urlencode }}/illustrations">Вернуться к текущему состоянию книги</a>
+  </p>
+</section>
+{% endif %}
+
+<section class="panel" aria-labelledby="illustration-status-heading">
+  <h2 id="illustration-status-heading">Состояние подготовки</h2>
+  <p class="status">
+    <strong>Статус:</strong>
+    {{ illustration_state_labels.get(data.state, data.state) }}
+  </p>
+  {% if data.reason_code %}
+  <p class="muted">
+    <strong>Причина:</strong>
+    {{ illustration_reason_labels.get(data.reason_code, data.reason_code) }}
+  </p>
+  {% endif %}
+  <dl class="metrics">
+    <div>
+      <dt>Повествовательный анализ</dt>
+      <dd>{{ data.source_progress.ready_chapters }} / {{ data.source_progress.expected_chapters }} глав</dd>
+      {% if data.source_progress.skipped_sections %}
+      <dd class="muted">Пропущено служебных разделов: {{ data.source_progress.skipped_sections }}</dd>
+      {% endif %}
+      {% if data.source_progress.blocking_section_id %}
+      <dd class="muted">Ожидаемая глава: {{ data.source_progress.blocking_section_id }}</dd>
+      {% endif %}
+    </div>
+    <div>
+      <dt>Справочник образов</dt>
+      <dd>{{ illustration_state_labels.get(data.registry_progress.state, data.registry_progress.state) }}</dd>
+      {% if data.registry_progress.reason_code %}
+      <dd class="muted">{{ illustration_reason_labels.get(data.registry_progress.reason_code, data.registry_progress.reason_code) }}</dd>
+      {% endif %}
+      <dd class="muted">
+        Персонажей и мест: {{ data.registry_progress.entities }}, фактов: {{ data.registry_progress.facts }}
+        {% if data.registry_progress.total_scopes is not none %}
+        ({{ data.registry_progress.completed_scopes }} / {{ data.registry_progress.total_scopes }} областей)
+        {% endif %}
+      </dd>
+    </div>
+    <div>
+      <dt>Профиль оформления</dt>
+      <dd>{{ illustration_style_labels.get(data.settings.style, data.settings.style) }}</dd>
+      <dd class="muted">Максимум на главу: {{ data.settings.max_per_chapter }}</dd>
+    </div>
+    <div>
+      <dt>Расходы канала иллюстраций</dt>
+      <dd>Вызовов: {{ data.costs.total.calls }}</dd>
+      <dd class="muted">
+        Токены: {{ data.costs.total.total_tokens if data.costs.total.total_tokens is not none else "нет данных" }}
+        · Стоимость: {{ ("$" ~ data.costs.total.cost_usd) if data.costs.total.cost_usd is not none else "нет данных" }}
+      </dd>
+      <dd class="muted">
+        Справочник: {{ data.costs.reference.calls }} выз., главы: {{ data.costs.chapters.calls }} выз.
+      </dd>
+    </div>
+  </dl>
+</section>
+
+{% if registry is not none %}
+<section class="panel" aria-labelledby="illustration-registry-heading">
+  <details {% if registry_kind or registry.pagination.offset > 0 %}open{% endif %}>
+    <summary id="illustration-registry-heading">
+      Справочник образов книги (только чтение, всего записей: {{ registry.pagination.total }})
+    </summary>
+    <div class="actions" style="margin-top: 0.75rem;">
+      <a class="button secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=None) }}" {% if not registry_kind %}aria-current="true"{% endif %}>Все виды</a>
+      {% for kind_key, kind_label in illustration_registry_kind_labels.items() %}
+      <a class="button secondary" href="{{ illustrations_url(registry_offset=0, reg_kind=kind_key) }}" {% if registry_kind == kind_key %}aria-current="true"{% endif %}>{{ kind_label }}</a>
+      {% endfor %}
+      <a class="button secondary" href="{{ registry_json_url() }}">JSON справочника</a>
+    </div>
+    {% if registry.items %}
+    <ul class="illustration-list">
+      {% for item in registry.items %}
+      <li class="row-card">
+        <div>
+          <strong>{{ illustration_registry_kind_labels.get(item.kind, item.kind) }}</strong>
+          <span class="muted">({{ item.position_key }})</span>
+          <p>{{ item.summary_ru }}</p>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">В справочнике пока нет записей для выбранного фильтра.</p>
+    {% endif %}
+    <nav class="actions" aria-label="Страницы справочника">
+      {% if registry.pagination.previous_offset is not none %}
+      <a class="button secondary" href="{{ illustrations_url(registry_offset=registry.pagination.previous_offset) }}">Предыдущая страница справочника</a>
+      {% endif %}
+      {% if registry.pagination.next_offset is not none %}
+      <a class="button secondary" href="{{ illustrations_url(registry_offset=registry.pagination.next_offset) }}">Следующая страница справочника</a>
+      {% endif %}
+    </nav>
+  </details>
+</section>
+{% endif %}
+
+<section class="panel" aria-labelledby="illustration-chapters-heading">
+  <h2 id="illustration-chapters-heading">Главы книги ({{ data.pagination.total }})</h2>
+  {% if data.chapter_headers %}
+  <ul class="illustration-list">
+    {% for ch in data.chapter_headers %}
+    <li class="row-card">
+      <div>
+        <a href="{{ illustrations_url(section_id=ch.section_id) }}" {% if data.selected_chapter and data.selected_chapter.section_id == ch.section_id %}aria-current="true"{% endif %}>
+          {{ ch.title or ch.section_id }}
+        </a>
+        <span class="status">{{ illustration_state_labels.get(ch.state, ch.state) }}</span>
+        {% if ch.moment_count is not none %}
+        <span class="muted">Моментов: {{ ch.moment_count }}</span>
+        {% endif %}
+        {% if ch.reason_code %}
+        <span class="muted">— {{ illustration_reason_labels.get(ch.reason_code, ch.reason_code) }}</span>
+        {% endif %}
+      </div>
+      {% if ch.source_url %}
+      <a href="{{ ch.source_url }}">К тексту главы</a>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Главы книги не найдены.</p>
+  {% endif %}
+  <nav class="actions" aria-label="Страницы глав">
+    {% if data.pagination.previous_offset is not none %}
+    <a class="button secondary" href="{{ illustrations_url(offset=data.pagination.previous_offset) }}">Предыдущие главы</a>
+    {% endif %}
+    {% if data.pagination.next_offset is not none %}
+    <a class="button secondary" href="{{ illustrations_url(offset=data.pagination.next_offset) }}">Следующие главы</a>
+    {% endif %}
+  </nav>
+</section>
+
+{% if data.selected_chapter is not none %}
+<section class="panel" aria-labelledby="selected-chapter-heading">
+  <h2 id="selected-chapter-heading">Глава: {{ data.selected_chapter.title or data.selected_chapter.section_id }}</h2>
+  <p class="status">
+    <strong>Статус главы:</strong>
+    {{ illustration_state_labels.get(data.selected_chapter.state, data.selected_chapter.state) }}
+  </p>
+  {% if data.selected_chapter.reason_code %}
+  <p class="muted">
+    <strong>Причина:</strong>
+    {{ illustration_reason_labels.get(data.selected_chapter.reason_code, data.selected_chapter.reason_code) }}
+  </p>
+  {% endif %}
+  {% if data.selected_chapter.zero_reason_ru %}
+  <p class="notice">{{ data.selected_chapter.zero_reason_ru }}</p>
+  {% endif %}
+
+  {% if data.selected_chapter.moments %}
+    {% for moment in data.selected_chapter.moments %}
+    <article class="panel illustration-moment" id="moment-{{ moment.id }}">
+      <h3>{{ moment.title_ru }}</h3>
+      <p><strong>Событие:</strong> {{ moment.event_ru }}</p>
+      <p><strong>Почему выбран момент:</strong> {{ moment.reason_ru }}</p>
+      <p class="muted"><strong>Место вставки (после блока):</strong> {{ moment.insert_after_block_id }}</p>
+
+      {% if moment.anchors %}
+      <div>
+        <strong>Опорные цитаты:</strong>
+        <ul>
+          {% for anchor in moment.anchors %}
+          <li>
+            <blockquote>{{ anchor.quote }}</blockquote>
+            <span class="muted">Блок {{ anchor.block_id }} ({{ anchor.start }}–{{ anchor.end }})</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% if moment.source_url %}
+        <p><a href="{{ moment.source_url }}">Открыть место в тексте книги</a></p>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if moment.character_descriptions %}
+      <div>
+        <strong>Описания персонажей:</strong>
+        <ul>
+          {% for char in moment.character_descriptions %}
+          <li>
+            <strong>{{ char.name_ru }}</strong>: {{ char.description_ru }}
+            <div class="muted">{{ char.description_en }}</div>
+            {% if char.assumptions_ru %}
+            <div class="muted">Допущения: {{ char.assumptions_ru | join("; ") }}</div>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% if moment.location_descriptions %}
+      <div>
+        <strong>Описания локаций:</strong>
+        <ul>
+          {% for loc in moment.location_descriptions %}
+          <li>
+            <strong>{{ loc.name_ru }}</strong>: {{ loc.description_ru }}
+            <div class="muted">{{ loc.description_en }}</div>
+            {% if loc.assumptions_ru %}
+            <div class="muted">Допущения: {{ loc.assumptions_ru | join("; ") }}</div>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      {% if moment.assumptions_ru %}
+      <p class="muted"><strong>Художественные решения:</strong> {{ moment.assumptions_ru | join("; ") }}</p>
+      {% endif %}
+
+      <div class="illustration-prompt-block">
+        <label for="prompt-{{ moment.id }}"><strong>Промт для иллюстрации (на английском):</strong></label>
+        <textarea readonly id="prompt-{{ moment.id }}" class="illustration-prompt-field" rows="6">{{ moment.prompt_en }}</textarea>
+      </div>
+    </article>
+    {% endfor %}
+  {% elif not data.selected_chapter.zero_reason_ru %}
+  <p class="muted">Для этой главы промты пока не подготовлены.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if data.history %}
+<section class="panel" aria-labelledby="illustration-history-heading">
+  <h2 id="illustration-history-heading">История поколений</h2>
+  <ul class="illustration-list">
+    {% for item in data.history %}
+    <li class="row-card">
+      <div>
+        <a href="/books/{{ book_id | urlencode }}/illustrations?generation_id={{ item.generation_id | urlencode }}">
+          Поколение №{{ item.generation_number }}
+        </a>
+        <span class="status">{{ illustration_state_labels.get(item.state, item.state) }}</span>
+        <span class="muted">Ревизия настроек: {{ item.settings_revision }}</span>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}
