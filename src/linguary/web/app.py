@@ -75,7 +75,17 @@ from linguary.domain.errors import (
     TaskTransitionError,
 )
 from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
-from linguary.web.routes import books, export, glossary, processing, result, system, quality, diagnostics
+from linguary.web.routes import (
+    books,
+    diagnostics,
+    export,
+    glossary,
+    illustrations,
+    processing,
+    quality,
+    result,
+    system,
+)
 from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
 from linguary.web.views import STATIC_DIRECTORY, render_error, wants_html
@@ -157,6 +167,7 @@ def create_app(
     app.include_router(system.router)
     app.include_router(quality.router)
     app.include_router(diagnostics.router)
+    app.include_router(illustrations.router)
     _register_error_handlers(app)
     return app
 

@@ -73,6 +73,12 @@ from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
 from linguary.application.context_builder import ContextBuilder
+from linguary.application.illustration_chapter import IllustrationChapter
+from linguary.application.illustration_coordinator import IllustrationCoordinator
+from linguary.application.illustration_reference import IllustrationReference
+from linguary.application.illustration_source import IllustrationSource
+from linguary.application.illustrations import IllustrationService
+from linguary.composition.illustration_runtime import IllustrationRuntime
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskHandler, TaskRunner
@@ -184,7 +190,10 @@ class Application:
     regeneration: RuntimeSequence
     correction: CorrectionSequence
     quality_review: QualityReviewService
+    illustrations: IllustrationService
+    illustration_coordinator: IllustrationCoordinator
     _close_quality: Callable
+    _close_illustrations: Callable
     _dispose: Callable[[], None]
     resolve_correction_candidate: ResolveCorrectionCandidate | None = None
     pause_book: PauseBook | None = None
@@ -253,7 +262,10 @@ class Application:
             self.book_runtime.aclose,
             self.correction.resolver.aclose,
             self._close_quality,
+            getattr(self, "_close_illustrations", None),
         ):
+            if close is None:
+                continue
             try:
                 await close()
             except Exception:
@@ -352,6 +364,16 @@ def build_application(
     rate_limiter = LLMRateLimiter(
         app_settings.llm.requests_per_minute,
         max_concurrency=app_settings.worker.concurrency,
+    )
+    illustration_source = IllustrationSource(
+        language_detector=Py3LangidDetector(),
+        source_digest_fn=_cached_file_sha256,
+    )
+    illustration_coordinator = IllustrationCoordinator(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
     )
 
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
@@ -466,6 +488,7 @@ def build_application(
                 task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy, conditions_id=conditions_id,
                 start_processing=_start_book_processing,
+                on_narrative_ready=illustration_coordinator.on_narrative_ready,
             ),
             processing=processing_seq,
             regeneration=_regeneration_sequence(
@@ -556,9 +579,37 @@ def build_application(
 
     maintain_work = _MaintainWork()
 
+    illustration_runtime = IllustrationRuntime(
+        runtime_settings=runtime_settings,
+        rate_limiter=rate_limiter,
+        unit_of_work=unit_of_work,
+        on_logged=on_logged,
+        injected_client=llm_client,
+    )
+    illustration_chapter = IllustrationChapter(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        runtime=illustration_runtime,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
+    )
+    illustration_reference = IllustrationReference(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        runtime=illustration_runtime,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
+        plan_chapter_scopes=illustration_chapter.plan_chapter_scopes,
+    )
+    illustration_coordinator.bind_planners(
+        plan_reference_scopes=illustration_reference.plan_scopes,
+        plan_chapter_scopes=illustration_chapter.plan_chapter_scopes,
+    )
+
     runner = TaskRunner(
         queue=task_queue,
         recover_work=recover_work,
+        after_recovery=illustration_coordinator.recover_interrupted,
         maintenance=maintain_work,
         handlers=_handlers(
             unit_of_work=unit_of_work,
@@ -570,6 +621,8 @@ def build_application(
             regeneration=regeneration,
             correction=correction,
             quality_review=quality_review,
+            illustration_reference=illustration_reference,
+            illustration_chapter=illustration_chapter,
         ),
     )
     worker_pool = TaskWorkerPool(
@@ -579,6 +632,27 @@ def build_application(
     system_settings = SystemSettingsService(
         runtime=runtime_settings, store=settings_store,
         limiter=rate_limiter, worker_pool=worker_pool,
+    )
+    def _is_book_paused(tx: SqlAlchemyUnitOfWork, book_id: str) -> bool:
+        try:
+            is_paused = getattr(tx.work, "is_book_paused", None)
+            return bool(is_paused(book_id)) if callable(is_paused) else False
+        except Exception:
+            return False
+
+    def _on_book_resumed(book_id: str) -> None:
+        illustration_coordinator.reconcile(book_id)
+        task_queue.notify_work_available()
+
+    illustrations = IllustrationService(
+        unit_of_work=unit_of_work,
+        provider_ready_fn=illustration_runtime.is_provider_ready,
+        default_model_fn=illustration_runtime.default_model,
+        source_snapshot_fn=illustration_source.snapshot,
+        is_book_paused_fn=_is_book_paused,
+        reconcile_in_tx_fn=illustration_coordinator.reconcile_in_transaction,
+        notify_work_available=task_queue.notify_work_available,
+        id_factory=task_queue.new_task_id,
     )
     return Application(
         runtime_settings=runtime_settings,
@@ -626,9 +700,15 @@ def build_application(
             validator_factory=lambda conditions: _validator(replace(runtime_settings.current.settings,
                 checks=check_settings_from_mapping(thaw(conditions.payload['checks']))))),
         pause_book=PauseBook(unit_of_work=unit_of_work),
-        resume_book=ResumeBook(unit_of_work=unit_of_work),
+        resume_book=ResumeBook(
+            unit_of_work=unit_of_work,
+            on_resumed=_on_book_resumed,
+        ),
         quality_review=quality_review,
+        illustrations=illustrations,
+        illustration_coordinator=illustration_coordinator,
         _close_quality=quality_configured.aclose,
+        _close_illustrations=illustration_runtime.aclose,
         _dispose=engine.dispose,
     )
 
@@ -689,6 +769,7 @@ def _analysis_sequence(
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
     start_processing: Callable[[str], Awaitable[object]] | None = None,
+    on_narrative_ready: Callable[[str, str], None] | None = None,
 ) -> ChapterAnalysisSequence:
     """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
@@ -713,6 +794,7 @@ def _analysis_sequence(
             sequential_analysis=settings.checks.sequential_analysis,
             max_output_tokens=settings.llm.effective_output_token_budget_for(32_768),
             staged_analysis=settings.llm.staged_analysis,
+            on_narrative_ready=on_narrative_ready,
         ),
     )
 
@@ -832,6 +914,8 @@ def _handlers(
     regeneration: BlockRegenerationSequence | RuntimeSequence,
     correction: CorrectionSequence,
     quality_review: QualityReviewService,
+    illustration_reference: IllustrationReference,
+    illustration_chapter: IllustrationChapter,
 ) -> dict[TaskType, TaskHandler]:
     """Handlers for all queue task types (ALG-02).
 
@@ -851,6 +935,8 @@ def _handlers(
         TaskType.REGENERATE_BLOCK: regeneration.run_task,
         TaskType.CHAPTER_CORRECTION: correction.run_task,
         TaskType.QUALITY_REVIEW: quality_review.run_task,
+        TaskType.PREPARE_ILLUSTRATION_REFERENCE: illustration_reference.run_task,
+        TaskType.PREPARE_CHAPTER_ILLUSTRATIONS: illustration_chapter.run_task,
     }
 
 
@@ -912,6 +998,8 @@ async def run_worker(application: Application) -> None:
         if alone:
             await application.runner.recover_interrupted()
             lock.share()
+        else:
+            application.illustration_coordinator.reconcile_active()
         if not application.worker_pool.stop_requested:
             await application.worker_pool.run_forever()
     finally:
@@ -930,6 +1018,8 @@ async def drain_tasks(application: Application) -> tuple[ProcessingTask, ...]:
     try:
         if alone:
             await application.runner.recover_interrupted()
+        else:
+            application.illustration_coordinator.reconcile_active()
         lock.share()
         return await application.worker_pool.drain()
     finally:

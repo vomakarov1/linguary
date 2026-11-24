@@ -32,6 +32,15 @@ from typing import Any, Literal, Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.correction_dto import ChapterCorrectionResponse, ChapterCorrectionReviewResponse
+from linguary.application.illustration_dto import (
+    IllustrationAliasResponse,
+    IllustrationCandidatesResponse,
+    IllustrationDesignResponse,
+    IllustrationExtractResponse,
+    IllustrationFactScopeResponse,
+    IllustrationPromptResponse,
+    IllustrationSelectionResponse,
+)
 from linguary.application.llm_dto import (
     ChapterAnalysisResponse, TranslationResultResponse,
     NarrativeAnalysisResponse, PedagogicalAnalysisResponse,
@@ -41,7 +50,22 @@ from linguary.application.quality_context import QualityReviewResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
-type LLMPayload = NarrativeAnalysisResponse | PedagogicalAnalysisResponse | ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse | ChapterCorrectionReviewResponse
+type LLMPayload = (
+    NarrativeAnalysisResponse
+    | PedagogicalAnalysisResponse
+    | ChapterAnalysisResponse
+    | TranslationResultResponse
+    | QualityReviewResponse
+    | ChapterCorrectionResponse
+    | ChapterCorrectionReviewResponse
+    | IllustrationExtractResponse
+    | IllustrationAliasResponse
+    | IllustrationDesignResponse
+    | IllustrationFactScopeResponse
+    | IllustrationCandidatesResponse
+    | IllustrationSelectionResponse
+    | IllustrationPromptResponse
+)
 
 
 class LLMError(ApplicationError):
@@ -86,6 +110,21 @@ class LLMTransportError(LLMError):
 
 class LLMProviderError(LLMError):
     """Provider rejected the request and will return the same rejection on retry."""
+
+
+class LLMRequestTooLargeError(LLMProviderError):
+    """Serialized wire payload exceeded `LLMRequest.max_request_bytes` before HTTP send."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        size_bytes: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.size_bytes = size_bytes
+        self.max_bytes = max_bytes
 
 
 class LLMContextCapacityError(LLMProviderError):
@@ -152,6 +191,13 @@ class LLMResponseKind(StrEnum):
     CHAPTER_ANALYSIS_NARRATIVE = "chapter_analysis_narrative"
     CHAPTER_ANALYSIS_PEDAGOGICAL = "chapter_analysis_pedagogical"
     TRANSLATION_RESULT = "translation_result"
+    ILLUSTRATION_EXTRACT = "illustration_extract"
+    ILLUSTRATION_ALIAS = "illustration_alias"
+    ILLUSTRATION_DESIGN = "illustration_design"
+    ILLUSTRATION_FACT_SCOPE = "illustration_fact_scope"
+    ILLUSTRATION_CANDIDATES = "illustration_candidates"
+    ILLUSTRATION_SELECTION = "illustration_selection"
+    ILLUSTRATION_PROMPT = "illustration_prompt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,8 +228,13 @@ class LLMRequest[PayloadT: LLMPayload]:
     repair_instructions: tuple[str, ...] = ()
     repair_turns: tuple[tuple[str | None, str], ...] = ()
     block_aliases: tuple[tuple[str, str], ...] = ()
+    max_request_bytes: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_request_bytes is not None and (
+            type(self.max_request_bytes) is not int or self.max_request_bytes <= 0
+        ):
+            raise LLMError("предел размера запроса в байтах должен быть положительным целым числом")
         object.__setattr__(self, "block_aliases", tuple(tuple(item) for item in self.block_aliases))
         repair_turns = tuple(
             (turn[0], str(turn[1])) if len(turn) == 2 else (None, str(turn[0]))
@@ -346,6 +397,7 @@ __all__ = [
     "LLMPayload",
     "LLMProviderError",
     "LLMRequest",
+    "LLMRequestTooLargeError",
     "LLMResponse",
     "LLMResponseFormatError",
     "LLMResponseKind",

@@ -85,6 +85,36 @@ class ConditionsError(LLMConfigurationError):
         super().__init__(reason_code)
 
 
+def effective_content_plan_profile(conditions) -> str:
+    """Select the pinned internal plan without changing the reader's saved choice."""
+    payload = conditions.payload
+    profile = payload['profile']
+    versions = thaw(payload.get('versions', {}))
+    if profile != 'legacy-v1' or versions.get('validators') != 4:
+        return profile
+    prompt_templates = thaw(payload.get('prompt_templates', {}))
+    marker = (
+        prompt_templates.get('analysis_contract_version')
+        if isinstance(prompt_templates, dict)
+        else None
+    )
+    expected_a2_versions = supported_condition_versions(
+        profile,
+        reader_level=payload.get('reader_level'),
+        english_help=bool(payload.get('english_help', False)),
+        analysis_contract_version=marker,
+    )
+    if (
+        payload.get('reader_level') != 'a2'
+        or payload.get('english_help', False)
+        or not isinstance(versions, dict)
+        or versions not in expected_a2_versions
+        or any(type(value) is not int for value in versions.values())
+    ):
+        raise ConditionsError('conditions_unavailable')
+    return 'content-plan-v3'
+
+
 class BookConditionsService:
     def __init__(self, unit_of_work, snapshot_factory, settings_revision, source_digest):
         self.uow = unit_of_work

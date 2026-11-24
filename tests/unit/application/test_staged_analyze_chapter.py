@@ -1403,7 +1403,7 @@ async def test_a2_dialogue_longer_than_eight_words_promoted_to_translate(stored_
         'TRANSLATE', 'READ_AS_IS',
     ]
 
-    decoded = decode_pass(saved.payload, narrative=False)
+    decoded = decode_pass(saved.payload, pass_kind=AnalysisPassKind.PEDAGOGICAL)
     reverted = replace(decoded, treatment_plan=tuple(
         replace(item, treatment=BlockTreatment.READ_AS_IS, segments=())
         if item.source_block_id == quote_block.id else item
@@ -4585,7 +4585,7 @@ async def test_staged_narrative_validation_passes_name_policy_and_preserves_v6_c
     cached_conflict_raw['glossary_candidates'] = conflicting_narrative['glossary_candidates']
     decoded_conflict = decode_pass(
         {'schema_version': 1, 'response': cached_conflict_raw},
-        narrative=True,
+        pass_kind=AnalysisPassKind.NARRATIVE,
     )
     nar_hash = ctx.narrative_input_sha256(
         doc,
@@ -4927,7 +4927,7 @@ async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh
     )
     frag0_raw = json.loads(narrative(('b1',)).content)
     frag0_raw['glossary_candidates'] = [conflicting_candidate]
-    decoded_frag0 = decode_pass({'schema_version': 1, 'response': frag0_raw}, narrative=True)
+    decoded_frag0 = decode_pass({'schema_version': 1, 'response': frag0_raw}, pass_kind=AnalysisPassKind.NARRATIVE)
     ac_v6._save_pass(
         COMMAND,
         AnalysisPassKind.NARRATIVE,

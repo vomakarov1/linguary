@@ -17,7 +17,7 @@ from time import sleep
 from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import Engine, exists, func, select, update
+from sqlalchemy import Engine, case, exists, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -27,7 +27,7 @@ from linguary.adapters.db.engine import create_session_factory
 from linguary.adapters.db.models import ProcessingTaskRow, WorkBindingRow
 from linguary.adapters.db.repositories import SqlAlchemyTaskRepository
 from linguary.application.ports.persistence import PersistenceError
-from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus
+from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
 
 #: Explicit write transaction start. A deferred SQLite transaction acquires write locks only
 #: on the first write, where upgrading locks after reading a candidate fails with an error
@@ -194,13 +194,21 @@ class SqliteTaskStore:
                 func.coalesce(func.json_extract(WorkBindingRow.payload_json, "$.paused"), 1) != 0,
             )
         )
+        low_priority = (
+            TaskType.PREPARE_ILLUSTRATION_REFERENCE.value,
+            TaskType.PREPARE_CHAPTER_ILLUSTRATIONS.value,
+        )
+        priority_expr = case(
+            (ProcessingTaskRow.task_type.in_(low_priority), 1),
+            else_=0,
+        )
         row = session.scalars(
             select(ProcessingTaskRow)
             .where(
                 ProcessingTaskRow.status == TaskStatus.PENDING.value,
                 ~paused_book,
             )
-            .order_by(ProcessingTaskRow.created_at, ProcessingTaskRow.id)
+            .order_by(priority_expr, ProcessingTaskRow.created_at, ProcessingTaskRow.id)
             .limit(1)
         ).first()
         return None if row is None else mapping.to_task(row)

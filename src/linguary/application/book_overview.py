@@ -580,7 +580,16 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         if stored_calls is None
         else stored_calls
     )
-    ordinary = [call for call in calls if call.stage != LLMCallStage.QUALITY_REVIEW]
+    ordinary = [
+        call
+        for call in calls
+        if call.stage
+        not in {
+            LLMCallStage.QUALITY_REVIEW,
+            LLMCallStage.ILLUSTRATION_REFERENCE,
+            LLMCallStage.ILLUSTRATION_CHAPTER,
+        }
+    ]
     known_cost = sum((call.cost for call in ordinary if call.cost is not None), Decimal('0'))
     regeneration_cost = sum((call.cost for call in ordinary if call.cost is not None
         and call.stage == LLMCallStage.BLOCK_REGENERATION), Decimal('0'))
@@ -721,7 +730,9 @@ def book_overview(
             active_run=run,
             preload=preload,
         )
-    is_paused = bool(pause_requested and progress.running_tasks == 0)
+    is_paused = bool(
+        pause_requested and not any(task.status is TaskStatus.RUNNING for task in tasks)
+    )
     stage_estimate = _stage_estimate(
         status=book.status,
         document=document,
@@ -1557,7 +1568,16 @@ def _progress(
     sections = document.ordered_sections if document is not None else ()
     numbers = _chapter_numbers(document)
     titles = {section.id: section.title for section in sections}
-    failed_tasks = tuple(task for task in tasks if task.status is TaskStatus.FAILED)
+    primary_tasks = tuple(
+        task
+        for task in tasks
+        if task.task_type
+        not in {
+            TaskType.PREPARE_ILLUSTRATION_REFERENCE,
+            TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
+        }
+    )
+    failed_tasks = tuple(task for task in primary_tasks if task.status is TaskStatus.FAILED)
     failures = _build_failures(
         failed_tasks,
         transaction=transaction,
@@ -1574,10 +1594,10 @@ def _progress(
         treatment_counts=_merge_counts(
             _treatment_counts(analysis) for analysis in analyses
         ),
-        running_chapters=_running_chapters(tasks, numbers=numbers, titles=titles),
+        running_chapters=_running_chapters(primary_tasks, numbers=numbers, titles=titles),
         failures=failures,
-        pending_tasks=sum(1 for task in tasks if task.status is TaskStatus.PENDING),
-        running_tasks=sum(1 for task in tasks if task.status is TaskStatus.RUNNING),
+        pending_tasks=sum(1 for task in primary_tasks if task.status is TaskStatus.PENDING),
+        running_tasks=sum(1 for task in primary_tasks if task.status is TaskStatus.RUNNING),
     )
 
 

@@ -20,7 +20,9 @@ from urllib.parse import quote, unquote, urlsplit
 from linguary.application.analysis_merge import fragment_blocks_for
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
-from linguary.application.token_budget import REASONING_EFFORT_RESERVE_PCT
+from linguary.application.token_budget import (
+    effective_output_token_budget_for as _effective_output_token_budget_for,
+)
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.domain.name_translation import NameTranslationStrategy
 
@@ -227,12 +229,12 @@ class LLMSettings:
             raise SettingsError("цена выходных токенов не может быть отрицательной")
 
     def _budget_after_reasoning(self, total_output_tokens: int) -> int:
-        if self.reasoning_max_tokens is not None:
-            return max(1, total_output_tokens - self.reasoning_max_tokens)
-        if self.reasoning_effort is not None:
-            reserve_pct = REASONING_EFFORT_RESERVE_PCT[self.reasoning_effort]
-            return max(1, (total_output_tokens * (100 - reserve_pct)) // 100)
-        return total_output_tokens
+        return _effective_output_token_budget_for(
+            total_output_tokens,
+            default_max_output_tokens=total_output_tokens,
+            reasoning_effort=self.reasoning_effort,
+            reasoning_max_tokens=self.reasoning_max_tokens,
+        )
 
     @property
     def effective_output_token_budget(self) -> int | None:
@@ -243,12 +245,12 @@ class LLMSettings:
 
     def effective_output_token_budget_for(self, default_max_output_tokens: int) -> int:
         """Visible output token budget using `default_max_output_tokens` when unset."""
-        total = (
-            self.max_output_tokens
-            if self.max_output_tokens is not None
-            else default_max_output_tokens
+        return _effective_output_token_budget_for(
+            self.max_output_tokens,
+            default_max_output_tokens=default_max_output_tokens,
+            reasoning_effort=self.reasoning_effort,
+            reasoning_max_tokens=self.reasoning_max_tokens,
         )
-        return self._budget_after_reasoning(total)
 
     @property
     def effective_max_fragment_blocks(self) -> int:

@@ -20,6 +20,15 @@ from pydantic import BaseModel, ValidationError
 from linguary.adapters.llm.correction_payloads import (
     ChapterCorrectionSchema, ChapterCorrectionV2Schema, ChapterCorrectionReviewSchema,
 )
+from linguary.adapters.llm.illustration_payloads import (
+    IllustrationAliasSchema,
+    IllustrationCandidatesSchema,
+    IllustrationDesignSchema,
+    IllustrationExtractSchema,
+    IllustrationFactScopeSchema,
+    IllustrationPromptSchema,
+    IllustrationSelectionSchema,
+)
 from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
@@ -95,6 +104,17 @@ from linguary.domain.content_plan import ContextFact, Difficulty, SourceAnchor, 
 from linguary.domain.errors import DomainError
 from linguary.domain.name_translation import NameTranslationAssessment
 
+_ILLUSTRATION_SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
+    LLMResponseKind.ILLUSTRATION_EXTRACT: IllustrationExtractSchema,
+    LLMResponseKind.ILLUSTRATION_ALIAS: IllustrationAliasSchema,
+    LLMResponseKind.ILLUSTRATION_DESIGN: IllustrationDesignSchema,
+    LLMResponseKind.ILLUSTRATION_FACT_SCOPE: IllustrationFactScopeSchema,
+    LLMResponseKind.ILLUSTRATION_CANDIDATES: IllustrationCandidatesSchema,
+    LLMResponseKind.ILLUSTRATION_SELECTION: IllustrationSelectionSchema,
+    LLMResponseKind.ILLUSTRATION_PROMPT: IllustrationPromptSchema,
+}
+_ILLUSTRATION_KINDS = frozenset(_ILLUSTRATION_SCHEMAS)
+
 #: Response schema for each request kind.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.CHAPTER_CORRECTION: ChapterCorrectionSchema,
@@ -104,6 +124,7 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE: NarrativeAnalysisSchema,
     LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL: PedagogicalAnalysisSchema,
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
+    **_ILLUSTRATION_SCHEMAS,
 }
 
 def schema_for(
@@ -112,6 +133,15 @@ def schema_for(
     pronunciation_candidates_version: int | None = None,
 ) -> type[BaseModel]:
     """Structured response schema for request kind."""
+    if kind in _ILLUSTRATION_KINDS:
+        if (
+            type(contract_version) is not int
+            or contract_version != 1
+            or name_translation_policy_version is not None
+            or pronunciation_candidates_version is not None
+        ):
+            raise LLMResponseFormatError("неизвестная версия контракта подготовки иллюстраций")
+        return _ILLUSTRATION_SCHEMAS[kind]
     if kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
         if (type(contract_version) is not int or contract_version not in {1, 2}
                 or name_translation_policy_version is not None or pronunciation_candidates_version is not None):
@@ -274,6 +304,17 @@ def parse_payload(
             'ответ исправления оборван по лимиту токенов', truncated=True, raw_content=content,
             violation=Violation('provider_truncated', kind.value, safe_message='Ответ исправления оборван'),
         )
+    if kind in _ILLUSTRATION_KINDS and truncated:
+        raise LLMResponseFormatError(
+            'ответ подготовки иллюстраций оборван по лимиту токенов',
+            truncated=True,
+            raw_content=content,
+            violation=Violation(
+                'provider_truncated',
+                kind.value,
+                safe_message='Ответ подготовки иллюстраций оборван',
+            ),
+        )
     try:
         raw_object = json.loads(_strip_markdown_fence(content))
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -383,6 +424,19 @@ def _pronunciation_candidate(item: PronunciationCandidateSchema) -> Pronunciatio
 def _to_dto(validated: BaseModel) -> LLMPayload:
     """Converts validated schema object into an application layer DTO."""
     if isinstance(validated, (ChapterCorrectionSchema, ChapterCorrectionV2Schema, ChapterCorrectionReviewSchema)):
+        return validated.to_dto()
+    if isinstance(
+        validated,
+        (
+            IllustrationExtractSchema,
+            IllustrationAliasSchema,
+            IllustrationDesignSchema,
+            IllustrationFactScopeSchema,
+            IllustrationCandidatesSchema,
+            IllustrationSelectionSchema,
+            IllustrationPromptSchema,
+        ),
+    ):
         return validated.to_dto()
     if isinstance(validated, QualityReviewSchema):
         return validated.to_dto()

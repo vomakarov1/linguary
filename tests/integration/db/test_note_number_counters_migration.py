@@ -161,7 +161,7 @@ def test_migration_0018_backfill_is_idempotent_and_matches_models_and_downgrades
         assert "note_number_counters" in inspect(connection).get_table_names()
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "0018"
+        ).scalar_one() == "0019"
         restored = connection.execute(
             text(
                 "SELECT last_ordinal FROM note_number_counters "

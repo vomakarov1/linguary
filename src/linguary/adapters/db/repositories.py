@@ -343,10 +343,18 @@ class SqlAlchemyChapterAnalysisRepository:
         )).one_or_none()
         return None if row is None else mapping.to_analysis_pass_result(row)
 
-    def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
-        rows = self._session.scalars(select(AnalysisPassResultRow).where(
-            AnalysisPassResultRow.book_id == book_id, AnalysisPassResultRow.section_id == section_id,
-        ).order_by(AnalysisPassResultRow.pass_kind, AnalysisPassResultRow.scope_key)).all()
+    def list_passes_for_section(
+        self, book_id: str, section_id: str, *, pass_kind: AnalysisPassKind | None = None
+    ) -> tuple[AnalysisPassResult, ...]:
+        statement = select(AnalysisPassResultRow).where(
+            AnalysisPassResultRow.book_id == book_id,
+            AnalysisPassResultRow.section_id == section_id,
+        )
+        if pass_kind is not None:
+            statement = statement.where(AnalysisPassResultRow.pass_kind == pass_kind.value)
+        rows = self._session.scalars(
+            statement.order_by(AnalysisPassResultRow.pass_kind, AnalysisPassResultRow.scope_key)
+        ).all()
         return tuple(mapping.to_analysis_pass_result(row) for row in rows)
 
     def list_passes_for_book(
@@ -1013,7 +1021,8 @@ class SqlAlchemyLLMCallLogRepository:
         if row is None:
             return None
         return {'call_id': row.id, 'attempt_id': row.attempt_id, 'book_id': row.book_id,
-                'started_at': row.started_at, 'metadata': row.diagnostic_meta_json, 'body': row.response_text}
+                'stage': row.stage, 'started_at': row.started_at,
+                'metadata': row.diagnostic_meta_json, 'body': row.response_text}
 
     def update_diagnostics(self, call_id, *, metadata):
         row = self._session.get(LLMCallLogRow, call_id)

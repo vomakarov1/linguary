@@ -16,6 +16,7 @@ and rejected requests are permanent. The provider API key is never exposed in er
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -40,6 +41,7 @@ from linguary.application.ports.llm import (
     LLMPayload,
     LLMProviderError,
     LLMRequest,
+    LLMRequestTooLargeError,
     LLMResponseKind,
     LLMResponse,
     LLMResponseFormatError,
@@ -135,14 +137,36 @@ class OpenAICompatibleLLMClient(LLMClient):
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
         """Executes request and returns parsed structured response."""
+        explicit_cache = self._uses_explicit_prompt_cache(self._settings)
         try:
-            document = await self._post(
-                _body(
+            if request.max_request_bytes is not None:
+                include_openrouter = _is_openrouter_url(self._settings.base_url)
+                wire_bytes = serialize_request(
                     request,
-                    settings=self._settings,
-                    explicit_cache=self._uses_explicit_prompt_cache(self._settings),
+                    self._settings,
+                    include_openrouter_provider=include_openrouter,
+                    explicit_cache=explicit_cache,
                 )
-            )
+                if len(wire_bytes) > request.max_request_bytes:
+                    raise LLMRequestTooLargeError(
+                        f"размер запроса {len(wire_bytes)} Б превышает лимит {request.max_request_bytes} Б",
+                        size_bytes=len(wire_bytes),
+                        max_bytes=request.max_request_bytes,
+                    )
+                if isinstance(self._http, httpx.AsyncClient):
+                    document = await self._post_bytes(wire_bytes)
+                else:
+                    document = await self._post(
+                        _body(request, settings=self._settings, explicit_cache=explicit_cache)
+                    )
+            else:
+                document = await self._post(
+                    _body(
+                        request,
+                        settings=self._settings,
+                        explicit_cache=explicit_cache,
+                    )
+                )
         except LLMContextCapacityError as error:
             error.provider = self._settings.provider
             error.model = self._safe(self._settings.model)
@@ -351,6 +375,65 @@ class OpenAICompatibleLLMClient(LLMClient):
             headers=response.headers,
         )
         return document
+
+    async def _post_bytes(self, wire_bytes: bytes) -> dict[str, Any]:
+        """Sends pre-serialized UTF-8 JSON bytes over `httpx.AsyncClient`."""
+        hard_timeout = self._settings.timeout_seconds + min(
+            0.5, max(0.05, self._settings.timeout_seconds * 0.2)
+        )
+        try:
+            async with asyncio.timeout(hard_timeout):
+                response = await self._http.post(
+                    _endpoint(self._settings.base_url),
+                    content=wire_bytes,
+                    headers=_headers(self._settings),
+                    timeout=self._settings.timeout_seconds,
+                )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+            raise LLMTransportError(
+                _transport_failure_message(error, settings=self._settings, secrets=self._proxy_secrets),
+                outcome=_connect_outcome(self._settings.base_url, self._settings.proxy_mode),
+            ) from None
+        except (
+            httpx.WriteTimeout, httpx.WriteError, httpx.ReadTimeout, httpx.ReadError,
+            httpx.RemoteProtocolError, httpx.CloseError, httpx.DecodingError,
+            httpx.TimeoutException, httpx.HTTPError, TimeoutError,
+        ) as error:
+            raise LLMTransportError(
+                _transport_failure_message(error, settings=self._settings, secrets=self._proxy_secrets),
+                outcome='unknown',
+            ) from None
+        _raise_for_status(
+            response, provider=self._settings.provider, api_key=self._settings.api_key, secrets=self._proxy_secrets
+        )
+        document = _document(response, api_key=self._settings.api_key, secrets=self._proxy_secrets)
+        _raise_embedded_gateway_error(
+            document,
+            provider=self._settings.provider,
+            api_key=self._settings.api_key,
+            secrets=self._proxy_secrets,
+            headers=response.headers,
+        )
+        return document
+
+
+def serialize_request(
+    request: LLMRequest[Any],
+    settings: LLMSettings,
+    *,
+    include_openrouter_provider: bool,
+    explicit_cache: bool = False,
+) -> bytes:
+    """Serialize an LLM request to the exact UTF-8 JSON wire payload."""
+    body = _body(request, settings=settings, explicit_cache=explicit_cache)
+    if include_openrouter_provider:
+        body = {**body, "provider": {"require_parameters": True}}
+    return json.dumps(
+        body,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 def _connect_outcome(base_url: str, proxy_mode: str) -> TransportOutcome:

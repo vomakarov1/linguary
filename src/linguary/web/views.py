@@ -38,6 +38,12 @@ _template_globals["concept_types"] = tuple(
     for concept_type, label in labels.CONCEPT_TYPE_LABELS.items()
 )
 
+#: Russian labels for optional illustration preparation screens.
+_template_globals["illustration_state_labels"] = labels.ILLUSTRATION_STATE_LABELS
+_template_globals["illustration_reason_labels"] = labels.ILLUSTRATION_REASON_LABELS
+_template_globals["illustration_registry_kind_labels"] = labels.ILLUSTRATION_REGISTRY_KIND_LABELS
+_template_globals["illustration_style_labels"] = labels.ILLUSTRATION_STYLE_LABELS
+
 
 def wants_html(request: Request) -> bool:
     """Whether the client requests HTML rather than JSON."""

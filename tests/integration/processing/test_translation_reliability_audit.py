@@ -1021,7 +1021,7 @@ async def test_ac4_ac11_concurrent_note_ids_and_migration(migrated_database, eng
         assert _counts(connection) == before
     command.upgrade(migrated_database, "head")
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0018"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0019"
         restored = connection.execute(text(
             "SELECT last_ordinal FROM note_number_counters "
             "WHERE run_id = 'run-mig' AND chapter_number = 1"

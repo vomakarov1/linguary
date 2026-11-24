@@ -807,6 +807,45 @@ async function testLLMConnection() {
 window.initSettingsForm = initSettingsForm;
 window.testLLMConnection = testLLMConnection;
 
+document.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const button = target.closest("button[data-copy-illustration-prompt]");
+  if (!(button instanceof HTMLButtonElement)) {
+    return;
+  }
+  const promptId = button.dataset.promptId;
+  const statusId = button.dataset.statusId;
+  if (!promptId || !statusId) {
+    return;
+  }
+  const textarea = document.getElementById(promptId);
+  const statusEl = document.getElementById(statusId);
+  if (!(textarea instanceof HTMLTextAreaElement) || !(statusEl instanceof HTMLElement)) {
+    return;
+  }
+
+  const text = textarea.value;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(text);
+      statusEl.textContent = "Промт скопирован.";
+      return;
+    } catch (_error) {
+      // Fall through to accessible focus + selection fallback below.
+    }
+  }
+
+  textarea.focus();
+  textarea.select();
+  if (typeof textarea.setSelectionRange === "function") {
+    textarea.setSelectionRange(0, textarea.value.length);
+  }
+  statusEl.textContent = "Не удалось скопировать автоматически. Текст выделен — скопируйте его вручную.";
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   initSettingsTabs();
   initSettingsForm();

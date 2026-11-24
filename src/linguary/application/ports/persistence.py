@@ -18,6 +18,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from linguary.application.errors import ApplicationError
+from linguary.application.ports.illustrations import IllustrationRepository
 from linguary.domain import (
     BlockProcessingResult,
     BookImportWarning,
@@ -164,8 +165,10 @@ class ChapterAnalysisRepository(Protocol):
                  *, scope_key: str = "") -> AnalysisPassResult | None:
         """Accepted pass for the exact scope, or None."""
 
-    def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
-        """Accepted chapter passes ordered by kind and scope."""
+    def list_passes_for_section(
+        self, book_id: str, section_id: str, *, pass_kind: AnalysisPassKind | None = None
+    ) -> tuple[AnalysisPassResult, ...]:
+        """Accepted chapter passes ordered by kind and scope, optionally filtered by kind."""
 
     def list_passes_for_book(
         self, book_id: str, *, pass_kind: AnalysisPassKind | None = None, scope_key: str | None = ""
@@ -519,6 +522,10 @@ class UnitOfWork(Protocol):
     @property
     def work(self) -> WorkRepository:
         """Immutable work history and transactional execution state."""
+
+    @property
+    def illustrations(self) -> IllustrationRepository:
+        """Optional book illustration preparation storage."""
 
     def transaction(self) -> AbstractContextManager[UnitOfWork]:
         """Opens a transaction and makes repositories accessible.

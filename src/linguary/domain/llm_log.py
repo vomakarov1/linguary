@@ -27,6 +27,8 @@ class LLMCallStage(StrEnum):
     CHAPTER_ANALYSIS_PEDAGOGICAL = "chapter_analysis_pedagogical"
     TRANSLATION_UNIT = "translation_unit"
     BLOCK_REGENERATION = "block_regeneration"
+    ILLUSTRATION_REFERENCE = "illustration_reference"
+    ILLUSTRATION_CHAPTER = "illustration_chapter"
 
 
 @dataclass(frozen=True, slots=True)

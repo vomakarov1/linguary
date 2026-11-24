@@ -61,7 +61,17 @@ from linguary.application.analysis_merge import (
     unify_chapter_analysis_verse_stanzas,
     select_staged_a2_summary,
 )
-from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
+from linguary.application.analysis_pass_cache import (
+    decode_pass,
+    encode_pass,
+    pedagogical_response,
+    validate_narrative_input_context,
+)
+from linguary.application.analysis_pass_inputs import (
+    NarrativePassInputs,
+    build_narrative_input_context,
+    is_illustrable_content_section,
+)
 from linguary.application.block_labels import without_block_labels
 from linguary.application.context_builder import (
     ChapterAnalysisContext,
@@ -77,7 +87,6 @@ from linguary.application.reader_text import (
     record_reader_warnings,
     validate_a2_summary,
 )
-from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import (
     ChapterAnalysisResponse,
     GlossaryCandidateResponse,
@@ -186,6 +195,7 @@ class AnalyzeChapter:
         sequential_analysis: bool = True,
         max_output_tokens: int | None = 32_768,
         staged_analysis: bool = False,
+        on_narrative_ready: Callable[[str, str], None] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -201,11 +211,15 @@ class AnalyzeChapter:
         self._sequential_analysis = bool(sequential_analysis)
         self._max_output_tokens = int(max_output_tokens) if max_output_tokens is not None else 32_768
         self._staged_analysis = staged_analysis
+        self._on_narrative_ready = on_narrative_ready
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
         from contextvars import ContextVar
         self._loaded_concepts: ContextVar[tuple[TermConcept, ...] | None] = ContextVar(
             f"analyze_chapter_concepts_{id(self)}", default=None
+        )
+        self._loaded_run_mode: ContextVar[tuple[bool, bool, bool]] = ContextVar(
+            f"analyze_chapter_run_mode_{id(self)}", default=(True, False, False)
         )
         self._resolved_content_plan: ContextVar[ContentPlan | None] = ContextVar(
             f"analyze_chapter_content_plan_{id(self)}", default=None
@@ -224,6 +238,7 @@ class AnalyzeChapter:
         token_attempts = None
         token_responses = None
         token_concepts = self._loaded_concepts.set(None)
+        token_run_mode = self._loaded_run_mode.set((self._sequential_analysis, False, self._seed_first_chapter))
         token_plan = self._resolved_content_plan.set(None)
         token_staged_attempts = self._staged_attempt_ids.set(())
         attempts_var: Any = getattr(self._llm_client, "_attempts", None)
@@ -319,6 +334,7 @@ class AnalyzeChapter:
         finally:
             self._staged_attempt_ids.reset(token_staged_attempts)
             self._resolved_content_plan.reset(token_plan)
+            self._loaded_run_mode.reset(token_run_mode)
             self._loaded_concepts.reset(token_concepts)
             if token_attempts is not None and attempts_var is not None:
                 attempts_var.reset(token_attempts)
@@ -571,12 +587,26 @@ class AnalyzeChapter:
                 known_names=known_names,
                 name_translation_policy=merged_name_policy,
                 enforce_strict_gender_subject=enforce_v7)
+            seq_active, par_batch, seed_active = self._loaded_run_mode.get()
+            raw_versions = dependencies.get('versions') if isinstance(dependencies, Mapping) else None
+            raw_prompts_v = raw_versions.get('prompts') if isinstance(raw_versions, Mapping) else None
+            prompts_version = raw_prompts_v if type(raw_prompts_v) is int else 8
+            narrative_input_ctx = build_narrative_input_context(
+                sequential_analysis=seq_active,
+                parallel_batch=par_batch,
+                seed_active=seed_active,
+                user_decisions=user_decisions,
+                nonbinding_suggestions=suggestions,
+                target_language=document.target_language,
+                prompts_version=prompts_version,
+            )
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
-                                                            for s in suggestions))
+                                                            for s in suggestions),
+                                    input_context=narrative_input_ctx)
         else:
-            if saved.attempt_id is not None:
+            if saved.attempt_id is not None and saved.conditions_id == expected_conditions_id:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
             enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
             cached_name_policy = self._name_translation_policy if enforce_v7 else None
@@ -590,7 +620,25 @@ class AnalyzeChapter:
                 known_names=known_names,
                 name_translation_policy=cached_name_policy,
                 enforce_strict_gender_subject=enforce_v7)
+        self._notify_narrative_ready(command.book_id, document, section)
         return narrative, saved, scenes, facts, attempts, _total_usage(usages), dependencies, expected_conditions_id
+
+    def _notify_narrative_ready(
+        self, book_id: str, document: CanonicalDocument, section: DocumentSection
+    ) -> None:
+        callback = self._on_narrative_ready
+        if callback is None:
+            return
+        try:
+            if not is_illustrable_content_section(document, section):
+                return
+            callback(book_id, section.id)
+        except Exception:
+            try:
+                # Never allow optional channel callback or error reporting to fail primary analysis.
+                return
+            except Exception:
+                return
 
     async def _analyze_staged(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
@@ -661,7 +709,10 @@ class AnalyzeChapter:
         else:
             saved_pedagogical, pedagogical = cached_pedagogical
             assert isinstance(pedagogical, PedagogicalAnalysisResponse)
-            if saved_pedagogical.attempt_id is not None:
+            if (
+                saved_pedagogical.attempt_id is not None
+                and saved_pedagogical.conditions_id == expected_conditions_id
+            ):
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_pedagogical.attempt_id))
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
                                              accumulated, user_decisions,
@@ -828,7 +879,10 @@ class AnalyzeChapter:
         with self._unit_of_work.transaction() as tx:
             list_passes = getattr(tx.analyses, 'list_passes_for_section', None)
             if callable(list_passes):
-                saved_passes = list_passes(command.book_id, section.id)
+                try:
+                    saved_passes = list_passes(command.book_id, section.id, pass_kind=pass_kind)
+                except TypeError:
+                    saved_passes = list_passes(command.book_id, section.id)
                 saved_fragment_passes = tuple(
                     saved_pass
                     for saved_pass in saved_passes
@@ -1021,7 +1075,10 @@ class AnalyzeChapter:
             )
             if cached_frag is not None:
                 saved_frag, payload = cached_frag
-                if saved_frag.attempt_id is not None:
+                if (
+                    saved_frag.attempt_id is not None
+                    and saved_frag.conditions_id == expected_conditions_id
+                ):
                     self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_frag.attempt_id))
                 if not is_narrative:
                     payload = self._normalize_a2_dialogue(
@@ -1154,7 +1211,9 @@ class AnalyzeChapter:
     ) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse:
         kind = saved.pass_kind
         try:
-            decoded = decode_pass(saved.payload, narrative=kind is AnalysisPassKind.NARRATIVE)
+            decoded = decode_pass(saved.payload, pass_kind=kind)
+            if not isinstance(decoded, (NarrativeAnalysisResponse, PedagogicalAnalysisResponse)):
+                raise ValueError('недопустимый вид прохода для кеша анализа главы')
             normalized = encode_pass(decoded)
             if kind is AnalysisPassKind.NARRATIVE:
                 keys = saved.payload['input_suggestions']
@@ -1163,6 +1222,11 @@ class AnalyzeChapter:
                     or any(not isinstance(part, str) for part in item) for item in keys)):
                     raise ValueError('неверный список входных подсказок')
                 normalized['input_suggestions'] = keys
+                if 'input_context' in saved.payload:
+                    if saved.scope_key != '':
+                        raise ValueError('input_context запрещён на фрагментном проходе')
+                    validate_narrative_input_context(saved.payload['input_context'])
+                    normalized['input_context'] = thaw(saved.payload['input_context'])
             if (canonical_sha(thaw(saved.payload)) != saved.output_sha256
                     or canonical_sha(normalized) != saved.output_sha256):
                 raise ValueError('не совпадает контрольная сумма')
@@ -1174,11 +1238,13 @@ class AnalyzeChapter:
         self, command: AnalyzeChapterCommand, kind: AnalysisPassKind, input_sha: str,
         payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse, conditions_id: str | None,
         *, scope_key: str = "", input_suggestions: Sequence[tuple[str, str, str]] = (),
+        input_context: Mapping[str, Any] | None = None,
     ) -> AnalysisPassResult:
         from linguary.application.book_conditions import ConditionsError
         try:
             return self._save_pass_current(command, kind, input_sha, payload, conditions_id,
-                                           scope_key=scope_key, input_suggestions=input_suggestions)
+                                           scope_key=scope_key, input_suggestions=input_suggestions,
+                                           input_context=input_context)
         except ConditionsError:
             self._finalize_stale_responses()
             raise
@@ -1187,11 +1253,14 @@ class AnalyzeChapter:
         self, command: AnalyzeChapterCommand, kind: AnalysisPassKind, input_sha: str,
         payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse, conditions_id: str | None,
         *, scope_key: str = "", input_suggestions: Sequence[tuple[str, str, str]] = (),
+        input_context: Mapping[str, Any] | None = None,
     ) -> AnalysisPassResult:
         from linguary.application.book_conditions import ConditionsError
         encoded = encode_pass(payload)
         if kind is AnalysisPassKind.NARRATIVE:
             encoded['input_suggestions'] = input_suggestions
+            if scope_key == "" and input_context is not None:
+                encoded['input_context'] = validate_narrative_input_context(input_context)
         with self._unit_of_work.transaction() as tx:
             work = getattr(tx, 'work', None)
             if conditions_id is not None and work is not None:
@@ -1523,106 +1592,52 @@ class AnalyzeChapter:
             document = transaction.documents.get(command.book_id)
             if document is None:
                 raise AnalyzeChapterError(f"книги {command.book_id} нет в хранилище")
-            current_order = _section_of(document, command).order
-            orders = {section.id: section.order for section in document.sections}
+            section = _section_of(document, command)
             analyses = transaction.analyses.list_for_book(command.book_id)
             concepts = tuple(transaction.glossary.list_for_book(command.book_id))
             self._loaded_concepts.set(concepts)
+            sequential_active = self._is_sequential_active(transaction, command.book_id)
             parallel_batch, seed_active = self._parallel_batch_and_seed(transaction, command)
-            seed_section = _first_content_section(document) if (parallel_batch and seed_active) else None
-            seed_section_ids: set[str] = set()
-            if seed_section is not None:
-                if current_order >= seed_section.order:
-                    seed_section_ids.update(
-                        section.id
-                        for section in document.ordered_sections
-                        if section.order < seed_section.order
-                        and _is_meaningful_part_divider(document, section)
-                    )
-                if seed_section.order < current_order:
-                    seed_section_ids.add(seed_section.id)
-            seed_candidates = (
-                tuple(
-                    candidate
-                    for analysis in analyses
-                    if analysis.section_id in seed_section_ids
-                    for candidate in analysis.glossary_candidates
-                )
-                if seed_section_ids
-                else ()
+            self._loaded_run_mode.set((sequential_active, parallel_batch, seed_active))
+
+            verified_narratives: dict[str, tuple[NarrativeAnalysisResponse, str | None]] = {}
+            list_passes_for_book = getattr(transaction.analyses, "list_passes_for_book", None)
+            if callable(list_passes_for_book):
+                analyzed_ids = {a.section_id for a in analyses}
+                for saved_pass in list_passes_for_book(
+                    command.book_id, pass_kind=AnalysisPassKind.NARRATIVE, scope_key=""
+                ):
+                    if saved_pass.section_id in analyzed_ids:
+                        continue
+                    try:
+                        decoded_pass = self._verify_cached_pass(saved_pass)
+                    except AnalyzeChapterError:
+                        continue
+                    if isinstance(decoded_pass, NarrativeAnalysisResponse):
+                        verified_narratives[saved_pass.section_id] = (
+                            decoded_pass,
+                            saved_pass.conditions_id or self._conditions_id,
+                        )
+
+            effective = NarrativePassInputs.for_section(
+                document,
+                section,
+                analyses=analyses,
+                concepts=concepts,
+                name_translation_policy=self._context_builder.name_translation_policy,
+                glossary_confidence_threshold=self._glossary_confidence_threshold,
+                sequential_analysis=sequential_active,
+                parallel_batch=parallel_batch,
+                seed_active=seed_active,
+                verified_narratives_by_section=verified_narratives,
+                fallback_conditions_id=self._conditions_id,
             )
-            if self._context_builder.name_translation_policy is not None:
-                accumulated = (
-                    seed_candidates
-                    if parallel_batch
-                    else tuple(
-                        candidate
-                        for analysis in analyses
-                        if orders.get(analysis.section_id, current_order) < current_order
-                        for candidate in analysis.glossary_candidates
-                    )
-                )
-                decisions = tuple(concept for concept in concepts if concept.status.is_user_decision)
-                suggestions = tuple(concept for concept in concepts if not concept.status.is_user_decision)
-                return document, accumulated, decisions, suggestions
-            if parallel_batch:
-                all_candidates = tuple(
-                    candidate
-                    for analysis in analyses
-                    for candidate in analysis.glossary_candidates
-                )
-                non_seed_candidates = (
-                    tuple(
-                        candidate
-                        for analysis in analyses
-                        if analysis.section_id not in seed_section_ids
-                        for candidate in analysis.glossary_candidates
-                    )
-                    if seed_section_ids
-                    else all_candidates
-                )
-                known_keys = {glossary_key(c.source_text) for c in all_candidates}
-                concept_candidates = tuple(
-                    GlossaryCandidate.create(
-                        id=concept.id,
-                        analysis_id="user-decision",
-                        source_text=concept.canonical_source_text,
-                        type=concept.type,
-                        suggested_translation=variant.text,
-                        confidence=1.0,
-                        model_flagged_review=False,
-                        confidence_threshold=self._glossary_confidence_threshold,
-                        note=concept.note,
-                    )
-                    for concept in concepts
-                    if concept.status.is_user_decision
-                    and glossary_key(concept.canonical_source_text) not in known_keys
-                    and (variant := concept.variant_for(document.target_language)) is not None
-                )
-                accumulated = candidates_with_decisions(
-                    seed_candidates,
-                    concepts,
-                    language=document.target_language,
-                    decided_only=(*non_seed_candidates, *concept_candidates),
-                )
-            else:
-                accumulated = candidates_with_decisions(
-                    (
-                        candidate
-                        for analysis in analyses
-                        if orders.get(analysis.section_id, current_order) < current_order
-                        for candidate in analysis.glossary_candidates
-                    ),
-                    concepts,
-                    language=document.target_language,
-                    decided_only=(
-                        candidate
-                        for analysis in analyses
-                        if orders.get(analysis.section_id, current_order) >= current_order
-                        for candidate in analysis.glossary_candidates
-                    ),
-                )
-        return document, accumulated, (), ()
+            return (
+                document,
+                effective.accumulated,
+                effective.user_decisions,
+                effective.nonbinding_suggestions,
+            )
 
     async def _request_analysis(
         self,
@@ -2361,8 +2376,12 @@ class ChapterAnalysisSequence:
                             )
                             transaction.books.save(book)
             if not should_start_processing and work_repo is not None:
+                from linguary.application.illustrations import has_unfinished_illustration_work
+
                 set_book_paused = getattr(work_repo, "set_book_paused", None)
-                if callable(set_book_paused):
+                if callable(set_book_paused) and not has_unfinished_illustration_work(
+                    transaction, book_id
+                ):
                     set_book_paused(book_id, None, False)
         return should_start_processing
 
