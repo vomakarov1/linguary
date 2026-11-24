@@ -146,11 +146,11 @@ class TaskRunner:
         except Exception as error:  # any use case exception results in a failed task
             current = await self._reload_task(task)
             if current is not None and current.id == task.id and current.status in terminal:
-                return current
+                return await self._save(current)
             return await self._save(task.fail(self._classify_error(error)))
         current = await self._reload_task(task)
         if current is not None and current.id == task.id and current.status in terminal:
-            return current
+            return await self._save(current)
         return await self._save(task.succeed())
 
     async def _reload_task(self, task: ProcessingTask) -> ProcessingTask | None:
