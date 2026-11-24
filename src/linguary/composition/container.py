@@ -73,6 +73,8 @@ from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
 from linguary.application.context_builder import ContextBuilder
+from linguary.application.illustration_coordinator import IllustrationCoordinator
+from linguary.application.illustration_source import IllustrationSource
 from linguary.application.illustrations import IllustrationService
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
@@ -355,6 +357,16 @@ def build_application(
         app_settings.llm.requests_per_minute,
         max_concurrency=app_settings.worker.concurrency,
     )
+    illustration_source = IllustrationSource(
+        language_detector=Py3LangidDetector(),
+        source_digest_fn=_cached_file_sha256,
+    )
+    illustration_coordinator = IllustrationCoordinator(
+        unit_of_work=unit_of_work,
+        source=illustration_source,
+        id_factory=task_queue.new_task_id,
+        notify_work_available=task_queue.notify_work_available,
+    )
 
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
         profile = content_plan_profile if conditions is None else effective_content_plan_profile(conditions)
@@ -468,6 +480,7 @@ def build_application(
                 task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy, conditions_id=conditions_id,
                 start_processing=_start_book_processing,
+                on_narrative_ready=illustration_coordinator.on_narrative_ready,
             ),
             processing=processing_seq,
             regeneration=_regeneration_sequence(
@@ -588,6 +601,7 @@ def build_application(
             llm_client is not None or runtime_settings.current.settings.llm.api_key
         ),
         default_model_fn=lambda: (runtime_settings.current.settings.llm.model or None),
+        source_snapshot_fn=illustration_source.snapshot,
     )
     return Application(
         runtime_settings=runtime_settings,
@@ -699,6 +713,7 @@ def _analysis_sequence(
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
     start_processing: Callable[[str], Awaitable[object]] | None = None,
+    on_narrative_ready: Callable[[str, str], None] | None = None,
 ) -> ChapterAnalysisSequence:
     """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
@@ -723,6 +738,7 @@ def _analysis_sequence(
             sequential_analysis=settings.checks.sequential_analysis,
             max_output_tokens=settings.llm.effective_output_token_budget_for(32_768),
             staged_analysis=settings.llm.staged_analysis,
+            on_narrative_ready=on_narrative_ready,
         ),
     )
 

@@ -1242,6 +1242,56 @@ def select_staged_a2_summary(
     return best_fallback[4]
 
 
+def candidates_from_narrative(
+    narrative: NarrativeAnalysisResponse,
+    *,
+    analysis_id: str,
+    confidence_threshold: float,
+    id_factory: Callable[[], str],
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
+    merge_groups: bool = True,
+) -> tuple[GlossaryCandidate, ...]:
+    """Build domain `GlossaryCandidate` entries from a verified `NarrativeAnalysisResponse`."""
+    if not narrative.glossary_candidates:
+        return ()
+    if merge_groups:
+        groups = _candidate_groups(narrative.glossary_candidates)
+        return tuple(
+            _merged_candidate(
+                group,
+                id=id_factory(),
+                analysis_id=analysis_id,
+                confidence_threshold=confidence_threshold,
+                name_translation_policy=name_translation_policy,
+                conditions_id=conditions_id,
+            )
+            for group in groups
+        )
+    return tuple(
+        replace(
+            GlossaryCandidate.create(
+                id=id_factory(),
+                analysis_id=analysis_id,
+                source_text=candidate.source_text,
+                type=candidate.type,
+                suggested_translation=candidate.suggested_translation,
+                confidence=candidate.confidence,
+                model_flagged_review=candidate.model_flagged_review,
+                confidence_threshold=confidence_threshold,
+                note=candidate.note,
+            ),
+            name_translation_evidence=name_translation_evidence(
+                (candidate,),
+                policy=name_translation_policy,
+                conditions_id=conditions_id,
+            ),
+            description=kept_candidate_description(candidate.type, (candidate,)),
+        )
+        for candidate in narrative.glossary_candidates
+    )
+
+
 def _merged_candidates(
     fragments: Sequence[FragmentAnalysis],
     *,

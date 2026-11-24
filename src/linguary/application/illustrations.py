@@ -12,10 +12,12 @@ from linguary.application.illustration_view import (
     build_illustration_view,
 )
 from linguary.application.ports.persistence import UnitOfWork
-from linguary.domain import TaskStatus, TaskType
+from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.domain.illustrations import (
+    ILLUSTRATION_POLICY_VERSION,
     IllustrationReasonCode,
     IllustrationRegistryKind,
+    IllustrationScope,
     IllustrationSettings,
     IllustrationSettingsRevision,
 )
@@ -26,6 +28,76 @@ ILLUSTRATION_TASK_TYPES = frozenset(
         TaskType.PREPARE_CHAPTER_ILLUSTRATIONS,
     }
 )
+
+
+def _parse_activation_suffix(operation_id: str, generation_id: str) -> int:
+    prefix = f"{generation_id}:a"
+    if not operation_id.startswith(prefix):
+        return 0
+    suffix = operation_id[len(prefix) :]
+    return int(suffix) if suffix.isdigit() else 0
+
+
+def dispatch_scope_task(
+    tx: UnitOfWork,
+    scope: IllustrationScope,
+    *,
+    generation_id: str,
+    task_type: TaskType,
+    id_factory: Callable[[], str],
+    book_id: str | None = None,
+) -> ProcessingTask:
+    """Dispatch or re-activate a `ProcessingTask` for an illustration scope (`:a{n}` protocol).
+
+    - If `scope.task_id` already points to a `PENDING` or `RUNNING` task for this scope,
+      returns it idempotently without superseding.
+    - Otherwise supersedes any previous non-terminal/failed task for the scope via
+      `task.supersede()` (clearing `last_error=None`) and enqueues a fresh `PENDING` task
+      with `operation_id=f"{generation_id}:a{next_activation}"` and `policy_version='illustration-v1'`.
+    """
+    existing: ProcessingTask | None = None
+    if scope.task_id is not None:
+        existing = tx.tasks.get(scope.task_id)
+        if existing is not None and existing.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            return existing
+
+    resolved_book_id = book_id
+    if resolved_book_id is None and existing is not None:
+        resolved_book_id = existing.book_id
+    if resolved_book_id is None:
+        for gen in tx.illustrations.list_active_generations():
+            if gen.id == generation_id:
+                resolved_book_id = gen.book_id
+                break
+    if resolved_book_id is None:
+        raise ValueError(f"не удалось определить book_id для поколения {generation_id}")
+
+    prior_tasks = [
+        t
+        for t in tx.tasks.list_for_book(resolved_book_id)
+        if t.task_type is task_type and t.scope_id == scope.id
+    ]
+    max_activation = max(
+        (_parse_activation_suffix(t.operation_id, generation_id) for t in prior_tasks),
+        default=0,
+    )
+    next_activation = max_activation + 1
+
+    if existing is not None and existing.status is not TaskStatus.SUPERSEDED:
+        tx.tasks.save(existing.supersede())
+
+    new_task = ProcessingTask(
+        id=id_factory(),
+        book_id=resolved_book_id,
+        task_type=task_type,
+        scope_id=scope.id,
+        status=TaskStatus.PENDING,
+        operation_id=f"{generation_id}:a{next_activation}",
+        policy_version=ILLUSTRATION_POLICY_VERSION,
+    )
+    tx.tasks.add(new_task)
+    tx.illustrations.set_scope_task(scope.id, new_task.id)
+    return new_task
 
 
 def revoke_active_in_transaction(
@@ -144,5 +216,6 @@ class IllustrationService:
 __all__ = [
     "ILLUSTRATION_TASK_TYPES",
     "IllustrationService",
+    "dispatch_scope_task",
     "revoke_active_in_transaction",
 ]

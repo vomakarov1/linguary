@@ -13,7 +13,10 @@ from linguary.adapters.config.settings import LLMSettings, ReadingSettings, Chec
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
 from linguary.application.book_conditions import (
-    ConditionsError, payload_digest, supported_condition_versions,
+    ConditionsError,
+    effective_content_plan_profile as effective_content_plan_profile,
+    payload_digest,
+    supported_condition_versions,
 )
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.application.diagnostics import diagnostics_for
@@ -46,30 +49,6 @@ def check_settings_from_mapping(raw_checks: Mapping[str, Any]) -> CheckSettings:
     return CheckSettings(
         **{key: value for key, value in raw_checks.items() if key in allowed}
     )
-
-
-def effective_content_plan_profile(conditions):
-    """Select the pinned internal plan without changing the reader's saved choice."""
-    payload = conditions.payload
-    profile = payload['profile']
-    versions = thaw(payload.get('versions', {}))
-    if profile != 'legacy-v1' or versions.get('validators') != 4:
-        return profile
-    prompt_templates = thaw(payload.get('prompt_templates', {}))
-    marker = (prompt_templates.get('analysis_contract_version')
-              if isinstance(prompt_templates, dict) else None)
-    expected_a2_versions = supported_condition_versions(
-        profile,
-        reader_level=payload.get('reader_level'),
-        english_help=bool(payload.get('english_help', False)),
-        analysis_contract_version=marker,
-    )
-    if (payload.get('reader_level') != 'a2' or payload.get('english_help', False)
-            or not isinstance(versions, dict)
-            or versions not in expected_a2_versions
-            or any(type(value) is not int for value in versions.values())):
-        raise ConditionsError('conditions_unavailable')
-    return 'content-plan-v3'
 
 
 def public_url(value):

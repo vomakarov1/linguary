@@ -1746,7 +1746,8 @@ def test_repeated_quote_with_exact_offset_accepted() -> None:
     assert stored["anchors"][0]["end"] == second + 4
     assert "start" not in stored["subject_anchor"]
     assert "end" not in stored["subject_anchor"]
-    restored = decode_pass(encoded, narrative=True)
+    from linguary.domain import AnalysisPassKind
+    restored = decode_pass(encoded, pass_kind=AnalysisPassKind.NARRATIVE)
     assert restored.context_facts[0].anchors[0].start == second
     assert restored.context_facts[0].subject_anchor.start is None
 

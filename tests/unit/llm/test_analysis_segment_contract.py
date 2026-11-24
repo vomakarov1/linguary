@@ -211,18 +211,19 @@ def test_analysis_pass_cache_preserves_segments() -> None:
             SegmentTreatmentResponse(2, BlockTreatment.TRANSLATE),
         ),
     )
+    from linguary.domain import AnalysisPassKind
     payload = PedagogicalAnalysisResponse(treatment_plan=(item,))
-    restored = decode_pass(encode_pass(payload), narrative=False)
+    restored = decode_pass(encode_pass(payload), pass_kind=AnalysisPassKind.PEDAGOGICAL)
     assert restored.treatment_plan[0].segments == item.segments
     assert restored.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
 
     raw = json.loads(json.dumps(encode_pass(payload)))
-    from_json = decode_pass(raw, narrative=False)
+    from_json = decode_pass(raw, pass_kind=AnalysisPassKind.PEDAGOGICAL)
     assert from_json.treatment_plan[0].segments == item.segments
 
     for plan_item in raw["response"]["treatment_plan"]:
         plan_item.pop("segments")
-    legacy = decode_pass(raw, narrative=False)
+    legacy = decode_pass(raw, pass_kind=AnalysisPassKind.PEDAGOGICAL)
     assert legacy.treatment_plan[0].segments == ()
 
     whole_block = PedagogicalAnalysisResponse(
@@ -230,4 +231,4 @@ def test_analysis_pass_cache_preserves_segments() -> None:
     )
     encoded = encode_pass(whole_block)
     assert "segments" not in encoded["response"]["treatment_plan"][0]
-    assert decode_pass(encoded, narrative=False).treatment_plan[0].segments == ()
+    assert decode_pass(encoded, pass_kind=AnalysisPassKind.PEDAGOGICAL).treatment_plan[0].segments == ()
