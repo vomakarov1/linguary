@@ -184,7 +184,12 @@ class Diagnostics:
         except Exception:
             metadata['body_meta'].update(body_status='unavailable', stored_bytes=0)
             transaction.llm_calls.update_diagnostics(record['call_id'], metadata=metadata)
-        if attempt_id is not None and decision != 'unknown':
+        stage = record.get('stage') or (metadata.get('context') or {}).get('stage')
+        if (
+            attempt_id is not None
+            and decision != 'unknown'
+            and stage not in {'illustration_reference', 'illustration_chapter'}
+        ):
             from linguary.domain.book_conditions import thaw
             attempt = transaction.work.get_attempt(attempt_id)
             if attempt is None:

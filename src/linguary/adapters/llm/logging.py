@@ -27,6 +27,7 @@ from linguary.application.ports.llm import (
     LLMConfigurationError,
     LLMPayload,
     LLMRequest,
+    LLMRequestTooLargeError,
     LLMResponse,
     LLMResponseFormatError,
 )
@@ -102,6 +103,8 @@ class LoggingLLMClient(LLMClient):
                 body_meta=error.body_meta,
                 outcome=error,
             )
+            raise
+        except LLMRequestTooLargeError:
             raise
         except Exception as error:
             await self._log(

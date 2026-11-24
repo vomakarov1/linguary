@@ -1013,7 +1013,8 @@ class SqlAlchemyLLMCallLogRepository:
         if row is None:
             return None
         return {'call_id': row.id, 'attempt_id': row.attempt_id, 'book_id': row.book_id,
-                'started_at': row.started_at, 'metadata': row.diagnostic_meta_json, 'body': row.response_text}
+                'stage': row.stage, 'started_at': row.started_at,
+                'metadata': row.diagnostic_meta_json, 'body': row.response_text}
 
     def update_diagnostics(self, call_id, *, metadata):
         row = self._session.get(LLMCallLogRow, call_id)

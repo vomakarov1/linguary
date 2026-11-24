@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
+from linguary.application.ports.llm import LLMClient, LLMRequest
 from linguary.domain.analysis import AnalysisPassResult
+from linguary.domain.llm_log import LLMCallStage
 from linguary.domain.illustrations import (
     ChapterHeaderRow,
     IllustrationAttempt,
@@ -261,4 +264,41 @@ class IllustrationRepository(Protocol):
     ) -> tuple[tuple[RegistryItem, ...], int]: ...
 
 
-__all__ = ["IllustrationRepository"]
+@dataclass(frozen=True, slots=True)
+class RequestWireSnapshot:
+    """Exact UTF-8 JSON wire size and digest of a serialized LLM request."""
+
+    sha256: str
+    size_bytes: int
+
+
+class RequestWireSizer(Protocol):
+    """Measures exact serialized wire bytes of an `LLMRequest` without network I/O."""
+
+    def measure(self, request: LLMRequest[Any]) -> RequestWireSnapshot: ...
+
+
+class IllustrationRuntimePort(Protocol):
+    """Runtime port supplying bounded LLM clients and wire sizers for illustration stages."""
+
+    def client_for(
+        self, revision: IllustrationSettingsRevision, stage: LLMCallStage
+    ) -> LLMClient: ...
+
+    def sizer_for(
+        self, revision: IllustrationSettingsRevision, stage: LLMCallStage
+    ) -> RequestWireSizer: ...
+
+    def is_provider_ready(self) -> bool: ...
+
+    def default_model(self) -> str | None: ...
+
+    def route_id(self) -> str: ...
+
+
+__all__ = [
+    "IllustrationRepository",
+    "IllustrationRuntimePort",
+    "RequestWireSizer",
+    "RequestWireSnapshot",
+]

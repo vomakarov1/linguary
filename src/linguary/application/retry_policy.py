@@ -35,6 +35,7 @@ from linguary.application.ports.llm import (
     LLMPayload,
     LLMProviderError,
     LLMRequest,
+    LLMRequestTooLargeError,
     LLMResponseFormatError,
     LLMTransportError,
 )
@@ -297,6 +298,7 @@ _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
     # unconfigured or provider rejected request: automatic retry yields same rejection;
     # user retries manually after correcting settings
     (LLMConfigurationError, ErrorType.CONFIGURATION),
+    (LLMRequestTooLargeError, ErrorType.CONFIGURATION),
     (LLMProviderError, ErrorType.CONFIGURATION),
     # unusable book: requires a different file rather than another attempt
     (EpubImportFatalError, ErrorType.PERMANENT),
