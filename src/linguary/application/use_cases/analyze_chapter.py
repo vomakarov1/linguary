@@ -606,7 +606,7 @@ class AnalyzeChapter:
                                                             for s in suggestions),
                                     input_context=narrative_input_ctx)
         else:
-            if saved.attempt_id is not None:
+            if saved.attempt_id is not None and saved.conditions_id == expected_conditions_id:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
             enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
             cached_name_policy = self._name_translation_policy if enforce_v7 else None
@@ -709,7 +709,10 @@ class AnalyzeChapter:
         else:
             saved_pedagogical, pedagogical = cached_pedagogical
             assert isinstance(pedagogical, PedagogicalAnalysisResponse)
-            if saved_pedagogical.attempt_id is not None:
+            if (
+                saved_pedagogical.attempt_id is not None
+                and saved_pedagogical.conditions_id == expected_conditions_id
+            ):
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_pedagogical.attempt_id))
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
                                              accumulated, user_decisions,
@@ -1072,7 +1075,10 @@ class AnalyzeChapter:
             )
             if cached_frag is not None:
                 saved_frag, payload = cached_frag
-                if saved_frag.attempt_id is not None:
+                if (
+                    saved_frag.attempt_id is not None
+                    and saved_frag.conditions_id == expected_conditions_id
+                ):
                     self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_frag.attempt_id))
                 if not is_narrative:
                     payload = self._normalize_a2_dialogue(
@@ -2370,8 +2376,12 @@ class ChapterAnalysisSequence:
                             )
                             transaction.books.save(book)
             if not should_start_processing and work_repo is not None:
+                from linguary.application.illustrations import has_unfinished_illustration_work
+
                 set_book_paused = getattr(work_repo, "set_book_paused", None)
-                if callable(set_book_paused):
+                if callable(set_book_paused) and not has_unfinished_illustration_work(
+                    transaction, book_id
+                ):
                     set_book_paused(book_id, None, False)
         return should_start_processing
 

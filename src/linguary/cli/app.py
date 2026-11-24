@@ -615,8 +615,10 @@ def _export(args: argparse.Namespace) -> int:
             )
         )
         with application.unit_of_work.transaction() as tx:
+            from linguary.application.illustrations import has_unfinished_illustration_work
+
             set_book_paused = getattr(tx.work, "set_book_paused", None)
-            if callable(set_book_paused):
+            if callable(set_book_paused) and not has_unfinished_illustration_work(tx, args.book_id):
                 set_book_paused(args.book_id, None, False)
         overview = book_overview(application.unit_of_work, args.book_id)
         if overview.pending_corrections > 0:

@@ -607,6 +607,7 @@ def build_application(
     runner = TaskRunner(
         queue=task_queue,
         recover_work=recover_work,
+        after_recovery=illustration_coordinator.recover_interrupted,
         maintenance=maintain_work,
         handlers=_handlers(
             unit_of_work=unit_of_work,
@@ -636,6 +637,10 @@ def build_application(
             return bool(is_paused(book_id)) if callable(is_paused) else False
         except Exception:
             return False
+
+    def _on_book_resumed(book_id: str) -> None:
+        illustration_coordinator.reconcile(book_id)
+        task_queue.notify_work_available()
 
     illustrations = IllustrationService(
         unit_of_work=unit_of_work,
@@ -693,7 +698,10 @@ def build_application(
             validator_factory=lambda conditions: _validator(replace(runtime_settings.current.settings,
                 checks=check_settings_from_mapping(thaw(conditions.payload['checks']))))),
         pause_book=PauseBook(unit_of_work=unit_of_work),
-        resume_book=ResumeBook(unit_of_work=unit_of_work),
+        resume_book=ResumeBook(
+            unit_of_work=unit_of_work,
+            on_resumed=_on_book_resumed,
+        ),
         quality_review=quality_review,
         illustrations=illustrations,
         illustration_coordinator=illustration_coordinator,
@@ -988,6 +996,8 @@ async def run_worker(application: Application) -> None:
         if alone:
             await application.runner.recover_interrupted()
             lock.share()
+        else:
+            application.illustration_coordinator.reconcile_active()
         if not application.worker_pool.stop_requested:
             await application.worker_pool.run_forever()
     finally:
@@ -1006,6 +1016,8 @@ async def drain_tasks(application: Application) -> tuple[ProcessingTask, ...]:
     try:
         if alone:
             await application.runner.recover_interrupted()
+        else:
+            application.illustration_coordinator.reconcile_active()
         lock.share()
         return await application.worker_pool.drain()
     finally:

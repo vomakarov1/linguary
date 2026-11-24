@@ -226,6 +226,27 @@ class IllustrationCoordinator:
                         IllustrationScopeState.SPLIT,
                     }:
                         tx.tasks.save(task.supersede())
+                refreshed_scopes = illustrations_repo.list_scopes(gen.id)
+                active_scopes = [
+                    s for s in refreshed_scopes if s.state is not IllustrationScopeState.SPLIT
+                ]
+                has_active_work = any(
+                    s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
+                    for s in active_scopes
+                )
+                failed_scope = next(
+                    (s for s in active_scopes if s.state is IllustrationScopeState.FAILED),
+                    None,
+                )
+                if not has_active_work and failed_scope is not None:
+                    illustrations_repo.update_generation_state(
+                        gen.book_id,
+                        gen.id,
+                        state=IllustrationGenerationState.FAILED,
+                        reason_code=failed_scope.reason_code
+                        or IllustrationReasonCode.INTERRUPTED.value,
+                    )
+                    continue
                 if self.reconcile_in_transaction(tx, gen.book_id):
                     enqueued_any = True
         if enqueued_any and self._notify_work_available is not None:

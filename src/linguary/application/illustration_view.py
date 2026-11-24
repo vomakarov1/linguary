@@ -605,8 +605,11 @@ def _decode_moments(
 
 
 def _is_book_paused(tx: UnitOfWork, book_id: str) -> bool:
-    """Check whether the book is currently paused via work conditions/queue."""
+    """Check whether the book is currently paused via work bindings."""
     try:
+        is_paused = getattr(tx.work, "is_book_paused", None)
+        if callable(is_paused):
+            return bool(is_paused(book_id))
         conditions = tx.work.latest_conditions(book_id)
         if conditions is not None and bool(conditions.payload.get("paused")):
             return True

@@ -20,8 +20,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from linguary.application.errors import ApplicationError
+from linguary.application.illustrations import (
+    has_unfinished_illustration_work,
+    revoke_active_in_transaction,
+)
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import BookEvent, TaskType, apply_book_event
+from linguary.domain.illustrations import IllustrationReasonCode
 
 #: Tasks removed by reset: they belong to the cancelled run and should not
 #: execute after reset (PRD § 21.5).
@@ -86,7 +91,9 @@ class ResetProcessing:
                 transaction.work.delete_correction_checks(run.id)
                 transaction.runs.delete(run.id)
             set_book_paused = getattr(transaction.work, "set_book_paused", None)
-            if set_book_paused is not None:
+            if set_book_paused is not None and not has_unfinished_illustration_work(
+                transaction, book.id
+            ):
                 set_book_paused(book.id, None, False)
             transaction.books.save(replace(book, status=status, export_validation_status=None))
         return ResetProcessingResult(
@@ -176,6 +183,11 @@ class ChooseBookConditions:
                     transaction.work.delete_correction_checks(run.id)
                     transaction.runs.delete(run.id)
                 transaction.analyses.delete_for_book(book_id)
+                revoke_active_in_transaction(
+                    transaction,
+                    book_id,
+                    reason_code=IllustrationReasonCode.SOURCE_CHANGED.value,
+                )
                 for task in transaction.tasks.list_for_book(book_id):
                     if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK, TaskType.CHAPTER_CORRECTION, TaskType.EXPORT_BOOK}:
                         transaction.tasks.delete(task.id)

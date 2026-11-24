@@ -126,6 +126,30 @@ def dispatch_scope_task(
     return new_task
 
 
+def has_unfinished_illustration_work(tx: UnitOfWork, book_id: str) -> bool:
+    """Return True if the book has pending/running illustration tasks or an active generation."""
+    for task in tx.tasks.list_for_book(book_id):
+        if task.task_type in ILLUSTRATION_TASK_TYPES and task.status in {
+            TaskStatus.PENDING,
+            TaskStatus.RUNNING,
+        }:
+            return True
+    illustrations_repo = getattr(tx, "illustrations", None)
+    if illustrations_repo is None:
+        return False
+    head = illustrations_repo.get_head(book_id)
+    if head.active_generation_id is None:
+        return False
+    gen = illustrations_repo.get_generation(book_id, head.active_generation_id)
+    if gen is None:
+        return False
+    return gen.state in {
+        IllustrationGenerationState.WAITING_SOURCE,
+        IllustrationGenerationState.QUEUED,
+        IllustrationGenerationState.RUNNING,
+    }
+
+
 def revoke_active_in_transaction(
     tx: UnitOfWork,
     book_id: str,
@@ -613,5 +637,6 @@ __all__ = [
     "ILLUSTRATION_TASK_TYPES",
     "IllustrationService",
     "dispatch_scope_task",
+    "has_unfinished_illustration_work",
     "revoke_active_in_transaction",
 ]

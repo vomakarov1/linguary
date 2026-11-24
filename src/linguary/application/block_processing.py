@@ -934,7 +934,10 @@ def complete_processing_in_transaction(transaction, *, book_id, finished_task_id
     work_repo = getattr(transaction, "work", None)
     set_book_paused = getattr(work_repo, "set_book_paused", None)
     if callable(set_book_paused):
-        set_book_paused(book_id, None, False)
+        from linguary.application.illustrations import has_unfinished_illustration_work
+
+        if not has_unfinished_illustration_work(transaction, book_id):
+            set_book_paused(book_id, None, False)
     transaction.books.save(
         replace(
             book,

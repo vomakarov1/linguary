@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from linguary.application.book_overview import BookNotFoundError
 from linguary.application.errors import ApplicationError
+from linguary.application.illustrations import has_unfinished_illustration_work
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.domain import BookStatus, TaskStatus
 from linguary.domain.book_conditions import WorkStateError
+
+_ILLUSTRATION_PAUSABLE_STATUSES = frozenset(
+    {
+        BookStatus.GLOSSARY_REVIEW,
+        BookStatus.READY_TO_PROCESS,
+        BookStatus.READY_TO_EXPORT,
+        BookStatus.COMPLETED,
+    }
+)
 
 
 class PauseBookError(ApplicationError):
@@ -53,7 +64,11 @@ class PauseBook:
             if book is None:
                 raise BookNotFoundError(f"книги {book_id} нет в хранилище")
             if book.status not in {BookStatus.ANALYZING, BookStatus.PROCESSING}:
-                raise PauseBookError("книгу в текущем статусе нельзя поставить на паузу")
+                if not (
+                    book.status in _ILLUSTRATION_PAUSABLE_STATUSES
+                    and has_unfinished_illustration_work(transaction, book.id)
+                ):
+                    raise PauseBookError("книгу в текущем статусе нельзя поставить на паузу")
             conditions = transaction.work.latest_conditions(book.id)
             if conditions is None:
                 raise PauseBookError("условия обработки книги ещё не зафиксированы")
@@ -76,8 +91,14 @@ class PauseBook:
 class ResumeBook:
     """Clears the book queue pause binding so workers can claim preserved `PENDING` tasks."""
 
-    def __init__(self, *, unit_of_work: UnitOfWork) -> None:
+    def __init__(
+        self,
+        *,
+        unit_of_work: UnitOfWork,
+        on_resumed: Callable[[str], None] | None = None,
+    ) -> None:
         self._unit_of_work = unit_of_work
+        self._on_resumed = on_resumed
 
     def __call__(self, command: ResumeBookCommand | str) -> PauseBookResult:
         book_id = command if isinstance(command, str) else command.book_id
@@ -95,6 +116,8 @@ class ResumeBook:
             except WorkStateError as error:
                 raise PauseBookError(str(error)) from error
             tasks = transaction.tasks.list_for_book(book.id)
+        if self._on_resumed is not None:
+            self._on_resumed(book_id)
         running_tasks = sum(1 for task in tasks if task.status is TaskStatus.RUNNING)
         pending_tasks = sum(1 for task in tasks if task.status is TaskStatus.PENDING)
         return PauseBookResult(
