@@ -876,7 +876,10 @@ class AnalyzeChapter:
         with self._unit_of_work.transaction() as tx:
             list_passes = getattr(tx.analyses, 'list_passes_for_section', None)
             if callable(list_passes):
-                saved_passes = list_passes(command.book_id, section.id)
+                try:
+                    saved_passes = list_passes(command.book_id, section.id, pass_kind=pass_kind)
+                except TypeError:
+                    saved_passes = list_passes(command.book_id, section.id)
                 saved_fragment_passes = tuple(
                     saved_pass
                     for saved_pass in saved_passes
@@ -1203,6 +1206,8 @@ class AnalyzeChapter:
         kind = saved.pass_kind
         try:
             decoded = decode_pass(saved.payload, pass_kind=kind)
+            if not isinstance(decoded, (NarrativeAnalysisResponse, PedagogicalAnalysisResponse)):
+                raise ValueError('недопустимый вид прохода для кеша анализа главы')
             normalized = encode_pass(decoded)
             if kind is AnalysisPassKind.NARRATIVE:
                 keys = saved.payload['input_suggestions']

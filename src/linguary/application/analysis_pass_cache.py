@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any, Literal, overload
 
+from linguary.application.illustration_validation import ChapterIllustrationPlan
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     GlossaryCandidateResponse,
@@ -160,23 +161,38 @@ def decode_pass(
 @overload
 def decode_pass(
     payload: Mapping, *, pass_kind: Literal[AnalysisPassKind.ILLUSTRATION_PREP]
-) -> Any: ...
+) -> ChapterIllustrationPlan: ...
 
 
 @overload
 def decode_pass(
     payload: Mapping, *, pass_kind: AnalysisPassKind
-) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse | Any: ...
+) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse | ChapterIllustrationPlan: ...
+
+
+def encode_illustration_pass(plan: ChapterIllustrationPlan) -> dict[str, Any]:
+    """Encode a `ChapterIllustrationPlan` into the versioned `AnalysisPassResult` mirror format."""
+    return {"schema_version": 1, "response": plan.to_dict()}
+
+
+def decode_illustration_pass(payload: Mapping[str, Any]) -> ChapterIllustrationPlan:
+    """Decode a persisted `ILLUSTRATION_PREP` analysis pass payload."""
+    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1:
+        raise ValueError("неизвестная версия сохранённого прохода иллюстраций")
+    raw_response = payload.get("response")
+    if not isinstance(raw_response, Mapping):
+        raise ValueError("отсутствует тело прохода иллюстраций")
+    return ChapterIllustrationPlan.from_dict(thaw(raw_response))
 
 
 def decode_pass(
     payload: Mapping,
     *,
     pass_kind: AnalysisPassKind,
-) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse | Any:
+) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse | ChapterIllustrationPlan:
     kind = AnalysisPassKind(pass_kind)
     if kind is AnalysisPassKind.ILLUSTRATION_PREP:
-        raise ValueError("декодирование прохода illustration_prep пока не подключено")
+        return decode_illustration_pass(payload)
     if type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1:
         raise ValueError("неизвестная версия сохранённого прохода анализа")
     body = thaw(payload["response"])

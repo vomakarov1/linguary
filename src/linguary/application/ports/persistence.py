@@ -165,8 +165,10 @@ class ChapterAnalysisRepository(Protocol):
                  *, scope_key: str = "") -> AnalysisPassResult | None:
         """Accepted pass for the exact scope, or None."""
 
-    def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
-        """Accepted chapter passes ordered by kind and scope."""
+    def list_passes_for_section(
+        self, book_id: str, section_id: str, *, pass_kind: AnalysisPassKind | None = None
+    ) -> tuple[AnalysisPassResult, ...]:
+        """Accepted chapter passes ordered by kind and scope, optionally filtered by kind."""
 
     def list_passes_for_book(
         self, book_id: str, *, pass_kind: AnalysisPassKind | None = None, scope_key: str | None = ""
