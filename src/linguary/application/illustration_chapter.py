@@ -1459,6 +1459,10 @@ class IllustrationChapter:
             call_error: Exception | None = None
             try:
                 response = await client.generate(request)
+                if response.truncated:
+                    raise LLMResponseFormatError(
+                        "ответ модели усечён по лимиту токенов", truncated=True
+                    )
                 validation = self._validate_render_response(scope, response.payload, revision)
             except Exception as err:
                 call_error = err
