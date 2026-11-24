@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -664,3 +665,419 @@ def test_illustrations_no_meta_refresh_or_polling_selectors(tmp_path: Path) -> N
             assert "data-active-task" not in resp.text
     finally:
         asyncio.run(app.aclose())
+
+
+def test_illustrations_settings_no_hidden_prepare(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        _seed_v3_book(app, tmp_path, "book-set", chapter_count=1)
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            r = client.post(
+                "/books/book-set/illustrations/settings",
+                data={
+                    "expected_revision": "0",
+                    "enabled": "true",
+                    "max_per_chapter": "2",
+                    "style": "monochrome_ink",
+                    "model_reference": "gpt-5-mini",
+                    "model_prompts": "gpt-5-mini",
+                    "return_offset": "0",
+                    "return_limit": "10",
+                },
+                headers=HTML_HEADERS,
+                follow_redirects=False,
+            )
+            assert r.status_code == 303
+            view = app.illustrations.get("book-set")
+            assert view.enabled is True
+            assert view.active_generation_id is None
+            assert view.state == "not_started"
+            with app.unit_of_work.read_transaction() as tx:
+                assert tx.tasks.list_for_book("book-set") == ()
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_settings_unchecked_enabled_round_trip(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        _seed_v3_book(app, tmp_path, "book-chk", chapter_count=1)
+        app.illustrations.save_settings(
+            "book-chk",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            # HTML page renders checked checkbox without duplicate hidden input
+            page = client.get("/books/book-chk/illustrations", headers=HTML_HEADERS)
+            tree = html.fromstring(page.text)
+            enabled_inputs = tree.xpath('//form[contains(@action, "/illustrations/settings")]//input[@name="enabled"]')
+            assert len(enabled_inputs) == 1
+            assert enabled_inputs[0].get("type") == "checkbox"
+            assert enabled_inputs[0].get("checked") is not None
+
+            # Submitting form with unchecked checkbox (no `enabled` key) cleanly disables channel!
+            resp = client.post(
+                "/books/book-chk/illustrations/settings",
+                data={
+                    "expected_revision": "1",
+                    "max_per_chapter": "2",
+                    "style": "monochrome_ink",
+                    "model_reference": "gpt-5-mini",
+                    "model_prompts": "gpt-5-mini",
+                },
+                headers=HTML_HEADERS,
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert app.illustrations.get("book-chk").enabled is False
+    finally:
+        asyncio.run(app.aclose())
+
+
+def _epub_sha(tmp_path: Path, book_id: str) -> str:
+    return hashlib.sha256((tmp_path / f"{book_id}.epub").read_bytes()).hexdigest()
+
+
+def test_illustrations_settings_change_and_force_new_do_not_redirect_to_revoked_history(
+    tmp_path: Path,
+) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(app, tmp_path, "book-redir", chapter_count=1)
+        rev = app.illustrations.save_settings(
+            "book-redir",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        with app.unit_of_work.transaction() as tx:
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-redir",
+                settings_id=rev.id,
+                request_key="req-rd",
+                source_sha256=_epub_sha(tmp_path, "book-redir"),
+                source_authority={},
+                requested_sections=tuple(sec_ids),
+            )
+            tx.illustrations.update_generation_state(
+                "book-redir",
+                gen.id,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value,
+            )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            # View current generation explicitly via ?generation_id=gen.id
+            page = client.get(
+                f"/books/book-redir/illustrations?generation_id={gen.id}",
+                headers=HTML_HEADERS,
+            )
+            assert page.status_code == 200
+            tree = html.fromstring(page.text)
+            # Settings form MUST NOT carry return_generation_id
+            settings_ret_gen = tree.xpath(
+                '//form[contains(@action, "/illustrations/settings")]//input[@name="return_generation_id"]'
+            )
+            assert settings_ret_gen == []
+            # force_new_generation form MUST NOT carry return_generation_id
+            force_new_forms = tree.xpath(
+                '//form[.//input[@name="force_new_generation" and @value="true"]]'
+            )
+            assert len(force_new_forms) == 1
+            assert force_new_forms[0].xpath('.//input[@name="return_generation_id"]') == []
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_actions_current_generation_only(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(app, tmp_path, "book-act", chapter_count=1)
+        rev = app.illustrations.save_settings(
+            "book-act",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        with app.unit_of_work.transaction() as tx:
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-act",
+                settings_id=rev.id,
+                request_key="req-act",
+                source_sha256="a" * 64,
+                source_authority={},
+                requested_sections=tuple(sec_ids),
+            )
+            tx.illustrations.revoke_generation(
+                "book-act", gen.id, reason_code=IllustrationReasonCode.SETTINGS_CHANGED.value
+            )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            # Historical view: NO settings/prepare/retry forms!
+            r_hist = client.get(
+                f"/books/book-act/illustrations?generation_id={gen.id}",
+                headers=HTML_HEADERS,
+            )
+            tree_hist = html.fromstring(r_hist.text)
+            assert tree_hist.xpath('//form[contains(@action, "/illustrations/prepare")]') == []
+            assert tree_hist.xpath('//form[contains(@action, "/illustrations/retry")]') == []
+            assert tree_hist.xpath('//form[contains(@action, "/illustrations/settings")]') == []
+
+            # Current view: prepare form IS present!
+            r_curr = client.get("/books/book-act/illustrations", headers=HTML_HEADERS)
+            tree_curr = html.fromstring(r_curr.text)
+            assert len(tree_curr.xpath('//form[contains(@action, "/illustrations/prepare")]')) == 1
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_prepare_whole_book_from_chapter_preserves_view_params(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(app, tmp_path, "book-wb", chapter_count=4)
+        app.illustrations.save_settings(
+            "book-wb",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            # Viewing chapter 3 with offset=2, limit=2
+            page = client.get(
+                f"/books/book-wb/illustrations?offset=2&limit=2&section_id={sec_ids[2]}",
+                headers=HTML_HEADERS,
+            )
+            tree = html.fromstring(page.text)
+            form = tree.xpath('//form[contains(@action, "/illustrations/prepare")]')[0]
+            assert form.xpath('.//input[@name="return_offset"]/@value') == ["2"]
+            assert form.xpath('.//input[@name="return_limit"]/@value') == ["2"]
+            assert form.xpath('.//input[@name="return_section_id"]/@value') == [sec_ids[2]]
+
+            # Submit "whole book" (section_id="") -> 303 redirect preserves offset=2&limit=2&section_id=ch3!
+            resp = client.post(
+                "/books/book-wb/illustrations/prepare",
+                data={
+                    "expected_revision": "1",
+                    "section_id": "",
+                    "return_offset": "2",
+                    "return_limit": "2",
+                    "return_section_id": sec_ids[2],
+                },
+                headers=HTML_HEADERS,
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            loc = resp.headers["location"]
+            assert "offset=2" in loc
+            assert "limit=2" in loc
+            assert f"section_id={sec_ids[2]}" in loc
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_retry_form_303_preserves_return_params(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(app, tmp_path, "book-ret", chapter_count=2)
+        rev = app.illustrations.save_settings(
+            "book-ret",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        with app.unit_of_work.transaction() as tx:
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-ret",
+                settings_id=rev.id,
+                request_key="req-ret",
+                source_sha256=_epub_sha(tmp_path, "book-ret"),
+                source_authority={},
+                requested_sections=tuple(sec_ids),
+            )
+            sc = tx.illustrations.upsert_scopes(
+                gen.id,
+                [
+                    IllustrationScopeSpec(
+                        stage=IllustrationScopeStage.EXTRACT,
+                        scope_key="extract:p0",
+                        input_sha256="b" * 64,
+                        summary={},
+                    )
+                ],
+            )[0]
+            tx.illustrations.fail_scope(
+                sc.id, reason_code=IllustrationReasonCode.PROVIDER_ERROR.value
+            )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            resp = client.post(
+                "/books/book-ret/illustrations/retry",
+                data={
+                    "expected_revision": "1",
+                    "expected_generation_id": gen.id,
+                    "section_id": "",
+                    "return_offset": "1",
+                    "return_limit": "5",
+                    "return_section_id": sec_ids[1],
+                },
+                headers=HTML_HEADERS,
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            loc = resp.headers["location"]
+            assert "offset=1" in loc
+            assert "limit=5" in loc
+            assert f"section_id={sec_ids[1]}" in loc
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_stale_form_conflict_409_and_invalid_form_422_safe_html(tmp_path: Path) -> None:
+    app = _make_v3_app(tmp_path)
+    try:
+        _seed_v3_book(app, tmp_path, "book-err", chapter_count=1)
+        app.illustrations.save_settings(
+            "book-err",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        web = create_app(application=app, run_background_worker=False)
+        with TestClient(web, base_url="http://127.0.0.1:8000") as client:
+            # Stale expected_revision=0 when current is 1 -> 409 HTML with Russian label
+            r409 = client.post(
+                "/books/book-err/illustrations/settings",
+                data={
+                    "expected_revision": "0",
+                    "enabled": "true",
+                    "max_per_chapter": "3",
+                    "model_reference": "gpt-5-mini",
+                    "model_prompts": "gpt-5-mini",
+                },
+                headers=HTML_HEADERS,
+            )
+            assert r409.status_code == 409
+            assert ILLUSTRATION_REASON_LABELS["revision_conflict"] in r409.text
+            assert "Traceback" not in r409.text
+
+            # Invalid max_per_chapter=99 -> 422 safe HTML
+            r422 = client.post(
+                "/books/book-err/illustrations/settings",
+                data={
+                    "expected_revision": "1",
+                    "enabled": "true",
+                    "max_per_chapter": "99",
+                    "model_reference": "gpt-5-mini",
+                    "model_prompts": "gpt-5-mini",
+                },
+                headers=HTML_HEADERS,
+            )
+            assert r422.status_code == 422
+            assert ILLUSTRATION_REASON_LABELS["invalid_request"] in r422.text
+            assert "Traceback" not in r422.text
+    finally:
+        asyncio.run(app.aclose())
+
+
+def test_illustrations_missing_analysis_and_call_limit_new_generation(tmp_path: Path) -> None:
+    # 1) Legacy book -> needs_analysis notice & no prepare button
+    legacy_app = build_application(
+        settings=AppSettings(
+            storage=StorageSettings(data_root=str(tmp_path / "legacy_data")),
+            llm=LLMSettings(api_key="test-key", model="gpt-5-mini", staged_analysis=True),
+        ),
+        llm_client=_StagedDummyLLM(),
+        content_plan_profile="legacy-v1",
+    )
+    try:
+        _seed_v3_book(legacy_app, tmp_path, "book-leg", chapter_count=1)
+        legacy_app.illustrations.save_settings(
+            "book-leg",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        web_leg = create_app(application=legacy_app, run_background_worker=False)
+        with TestClient(web_leg, base_url="http://127.0.0.1:8000") as client:
+            r = client.get("/books/book-leg/illustrations", headers=HTML_HEADERS)
+            assert r.status_code == 200
+            assert ILLUSTRATION_STATE_LABELS["needs_analysis"] in r.text
+            assert "Автоматический платный переанализ книги не запускается." in r.text
+            tree = html.fromstring(r.text)
+            assert tree.xpath('//form[contains(@action, "/illustrations/prepare")]') == []
+    finally:
+        asyncio.run(legacy_app.aclose())
+
+    # 2) call_limit_exhausted -> explicit force_new_generation=true button rendered!
+    v3_app = _make_v3_app(tmp_path)
+    try:
+        sec_ids, _ = _seed_v3_book(v3_app, tmp_path, "book-lim", chapter_count=1)
+        rev = v3_app.illustrations.save_settings(
+            "book-lim",
+            expected_revision=0,
+            settings=IllustrationSettings(
+                enabled=True,
+                max_per_chapter=2,
+                model_reference="gpt-5-mini",
+                model_prompts="gpt-5-mini",
+            ),
+        )
+        with v3_app.unit_of_work.transaction() as tx:
+            gen, _ = tx.illustrations.create_or_get_generation(
+                "book-lim",
+                settings_id=rev.id,
+                request_key="req-lim",
+                source_sha256=_epub_sha(tmp_path, "book-lim"),
+                source_authority={},
+                requested_sections=tuple(sec_ids),
+            )
+            tx.illustrations.update_generation_state(
+                "book-lim",
+                gen.id,
+                state=IllustrationGenerationState.FAILED,
+                reason_code=IllustrationReasonCode.CALL_LIMIT_EXHAUSTED.value,
+            )
+        web_v3 = create_app(application=v3_app, run_background_worker=False)
+        with TestClient(web_v3, base_url="http://127.0.0.1:8000") as client:
+            r = client.get("/books/book-lim/illustrations", headers=HTML_HEADERS)
+            assert r.status_code == 200
+            assert ILLUSTRATION_REASON_LABELS["call_limit_exhausted"] in r.text
+            tree = html.fromstring(r.text)
+            assert len(
+                tree.xpath('//form[.//input[@name="force_new_generation" and @value="true"]]')
+            ) == 1
+    finally:
+        asyncio.run(v3_app.aclose())
