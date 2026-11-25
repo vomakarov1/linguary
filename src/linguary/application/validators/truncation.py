@@ -122,6 +122,40 @@ def _slice_truncation_issue(
     return None
 
 
+def _has_quote_mark(text: str) -> bool:
+    """Whether `text` contains any quotation mark (excluding apostrophes in contractions)."""
+    if any(ch in text for ch in '"«»„“”'):
+        return True
+    brit_open, brit_close = british_quote_counts(text)
+    return brit_open > 0 or brit_close > 0
+
+
+def _translate_runs(
+    block: BlockResultResponse, item: TranslationUnitItem
+) -> list[list[tuple[int | None, str, str]]]:
+    """Contiguous runs of `TRANSLATE` slices split by quote-bearing non-`TRANSLATE` segments."""
+    modes = planned_segment_modes(item)
+    by_index = {segment.index: segment.translated_text for segment in block.segments}
+    runs: list[list[tuple[int | None, str, str]]] = []
+    current: list[tuple[int | None, str, str]] = []
+    for index, (span, mode) in enumerate(
+        zip(item.block.segment_spans, modes, strict=True), start=1
+    ):
+        seg_source = item.block.text[span.start:span.end]
+        if mode is not BlockTreatment.TRANSLATE:
+            if current and _has_quote_mark(seg_source):
+                runs.append(current)
+                current = []
+            continue
+        text = by_index.get(index)
+        if text is None:
+            continue
+        current.append((index, seg_source, text))
+    if current:
+        runs.append(current)
+    return runs
+
+
 def _block_truncation_issue(
     block: BlockResultResponse, item: TranslationUnitItem
 ) -> tuple[str, str, str] | None:
@@ -148,34 +182,36 @@ def _block_truncation_issue(
         )
         if issue is not None:
             return issue
-    bad_indices: list[int | None] = []
-    nonzero_indices: list[int | None] = []
-    for segment_index, source, text in slices:
-        tr_bal = _balances(text)["кавычки"]
-        src_bal = _balances(source, allow_midline_british_open=True)["кавычки"]
-        if tr_bal != 0:
-            nonzero_indices.append(segment_index)
-        if not _quote_balance_matches(tr_bal, source=source, source_balance=src_bal):
-            bad_indices.append(segment_index)
-    joined_tr = " ".join(tr for _, _, tr in slices)
-    joined_src = " ".join(src for _, src, _ in slices)
-    total_tr = _balances(joined_tr)["кавычки"]
-    total_src = _balances(joined_src, allow_midline_british_open=True)["кавычки"]
-    if total_tr == 0 or _quote_balance_matches(
-        total_tr, source=joined_src, source_balance=total_src
-    ):
-        return None
-    report_index = (
-        bad_indices[0]
-        if bad_indices
-        else (nonzero_indices[0] if nonzero_indices else slices[0][0])
-    )
-    subject = _subject(block.source_block_id, report_index)
-    return (
-        f"в переводе {subject} не закрыты кавычки",
-        "quote_balance",
-        "Нарушена парность кавычек",
-    )
+    for run in _translate_runs(block, item):
+        bad_indices: list[int | None] = []
+        nonzero_indices: list[int | None] = []
+        for segment_index, source, text in run:
+            tr_bal = _balances(text, allow_midline_british_open=True)["кавычки"]
+            src_bal = _balances(source, allow_midline_british_open=True)["кавычки"]
+            if tr_bal != 0:
+                nonzero_indices.append(segment_index)
+            if not _quote_balance_matches(tr_bal, source=source, source_balance=src_bal):
+                bad_indices.append(segment_index)
+        joined_tr = " ".join(tr for _, _, tr in run)
+        joined_src = " ".join(src for _, src, _ in run)
+        total_tr = _balances(joined_tr, allow_midline_british_open=True)["кавычки"]
+        total_src = _balances(joined_src, allow_midline_british_open=True)["кавычки"]
+        if total_tr == 0 or _quote_balance_matches(
+            total_tr, source=joined_src, source_balance=total_src
+        ):
+            continue
+        report_index = (
+            bad_indices[0]
+            if bad_indices
+            else (nonzero_indices[0] if nonzero_indices else run[0][0])
+        )
+        subject = _subject(block.source_block_id, report_index)
+        return (
+            f"в переводе {subject} не закрыты кавычки",
+            "quote_balance",
+            "Нарушена парность кавычек",
+        )
+    return None
 
 
 def _ends_with_punctuation(text: str) -> bool:
@@ -198,7 +234,7 @@ def _quote_balance_matches(
 def _unbalanced(text: str, *, source: str, check_quotes: bool = True) -> str | None:
     """Type of paired punctuation whose imbalance was introduced in the translation."""
     original = _balances(source)
-    for name, balance in _balances(text).items():
+    for name, balance in _balances(text, allow_midline_british_open=True).items():
         if name == "кавычки":
             if not check_quotes:
                 continue

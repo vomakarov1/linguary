@@ -4,13 +4,13 @@ A unit is a compute boundary rather than a storage unit: the model receives it w
 but returns an individual result for each input block, and block results are persisted (ADR § 3).
 The responsibility of this module is to determine unit boundaries.
 
-Unit size is measured in characters of source text rather than block count. Processing exhibits
-a different cost profile than chapter analysis: analysis returns a treatment mode and concise rationale,
-meaning roughly constant token consumption per block regardless of length, whereas processing
-returns full translations proportional to original length. Forty dialogue lines and forty full-page
-paragraphs represent requests of vastly different cost; hence `analysis_merge.DEFAULT_MAX_FRAGMENT_BLOCKS`
-does not apply here. Processing defines its own limit `DEFAULT_MAX_UNIT_SOURCE_CHARS`, configured
-via `LLMSettings.max_unit_source_chars`.
+Unit size is bounded primarily by source character count (`DEFAULT_MAX_UNIT_SOURCE_CHARS`,
+configured via `LLMSettings.max_unit_source_chars`) and capped by block count
+(`DEFAULT_MAX_UNIT_BLOCKS = 16`) so dialogue-heavy chapters do not collapse dozens of short turns
+into a single fragile request. Processing exhibits a different cost profile than chapter analysis:
+analysis returns a treatment mode and concise rationale, meaning roughly constant token consumption
+per block regardless of length, whereas processing returns full translations proportional to
+original length; hence `analysis_merge.DEFAULT_MAX_FRAGMENT_BLOCKS` does not apply here.
 
 `PRESERVE_ONLY` and `DROP_WITH_WARNING` blocks do not enter units and do not fragment adjacent context:
 they remain the concern of importer and exporter (PRD § 10.1).

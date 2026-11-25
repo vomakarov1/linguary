@@ -3585,7 +3585,52 @@ def test_validate_note_sources_translated_excerpt_error_gives_repair_guidance() 
     assert "..." in msg
 
 
+def test_truncation_rejects_midline_unclosed_british_quote_in_translation_and_allows_quoted_read_as_is() -> None:
+    """Review B3 & B4: reject unclosed mid-line ‘ in translation; allow [T, R(quote), T] runs."""
+    from linguary.application.validators.truncation import _unbalanced, truncation_violation
+
+    # B3: mid-line unclosed British opening quote introduced in translation MUST be rejected.
+    assert _unbalanced("Он сказал: ‘Привет.", source="He said, ‘Hello.’") == "кавычки"
+
+    # B4: two TRANSLATE slices each opening `"` separated by a quote-bearing READ_AS_IS slice.
+    unit, block = _segmented(
+        ('He said: "First.', ' Yes!"', ' She added: "Second.'),
+        (
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+        ),
+    )
+    payload = _segmented_response(
+        block,
+        (
+            (1, "Он сказал: «Первое."),
+            (3, "Она добавила: «Второе."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert truncation_violation(payload, unit=unit, truncated=False) is None
 
 
+def test_note_language_leak_apostrophe_boundary_prevents_partial_contraction_match() -> None:
+    """Review L3: `s very` must not match inside `he's very` across an apostrophe."""
+    from linguary.application.validators.mixed_script import note_language_leak_violation
 
+    block = make_block(order=0, text="He's very bold indeed.")
+    payload = make_response(
+        (make_block_result(block),),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="He's very bold",
+                note="Здесь фрагмент s very не является целой фразой.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            payload, target_language="ru", source_texts={block.id: block.text}
+        )
+        is not None
+    )
 

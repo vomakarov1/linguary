@@ -981,6 +981,31 @@ def test_format_error_schema_hints_for_segment_index_bounds_and_static_value_err
         suffix = msg.split("подсказки схемы:", 1)[1]
         assert "(" not in suffix and ")" not in suffix
 
+    # 3b. Blank segment translation hint under contract_version=4 (index=0 keeps segment unstripped).
+    with pytest.raises(LLMResponseFormatError) as blank_seg_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(
+                {
+                    "blocks": [
+                        {
+                            "source_block_id": "secret-block-6",
+                            "treatment": "TRANSLATE",
+                            "translated_text": None,
+                            "glossary_hints": [],
+                            "segments": [{"index": 0, "translated_text": "   "}],
+                        }
+                    ],
+                    "language_notes": [],
+                    "fragment_assistances": [],
+                }
+            ),
+            contract_version=4,
+        )
+    blank_seg_msg = str(blank_seg_err.value)
+    assert "blocks[0].segments[0].translated_text: перевод сегмента не может быть пустым" in blank_seg_msg
+    assert "secret-block-6" not in blank_seg_msg
+
     # 4. Unknown value_error (not in static allowlist) is omitted from hints and never leaks raw text.
     unknown_ve = narrative_payload()
     unknown_ve["context_facts"][0]["certainty"] = "unknown"

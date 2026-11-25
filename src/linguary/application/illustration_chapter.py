@@ -1089,6 +1089,10 @@ class IllustrationChapter:
                         running_en = str(fs_pay.get("compact_description_en", ""))
                         for ex_id in fs_pay.get("excluded_fact_ids", ()):
                             accumulated_excluded.add(str(ex_id))
+                        if accumulated_excluded:
+                            accumulated_app_ids = [
+                                aid for aid in accumulated_app_ids if aid not in accumulated_excluded
+                            ]
                         for app_id in fs_pay.get("applicable_fact_ids", ()):
                             aid_str = str(app_id)
                             if aid_str not in accumulated_excluded and aid_str not in accumulated_app_ids:
@@ -1240,9 +1244,13 @@ class IllustrationChapter:
                             c_pay = existing_consol.payload or {}
                             for ex_id in c_pay.get("excluded_fact_ids", ()):
                                 accumulated_excluded.add(str(ex_id))
+                            if accumulated_excluded:
+                                round_app_ids = [
+                                    aid for aid in round_app_ids if aid not in accumulated_excluded
+                                ]
                             for fid in c_pay.get("applicable_fact_ids", ()):
                                 fid_s = str(fid)
-                                if fid_s not in round_app_ids:
+                                if fid_s not in accumulated_excluded and fid_s not in round_app_ids:
                                     round_app_ids.append(fid_s)
                             round_ru = str(c_pay.get("compact_description_ru", round_ru))
                             round_en = str(c_pay.get("compact_description_en", round_en))
@@ -1446,13 +1454,25 @@ class IllustrationChapter:
                 if isinstance(raw_fallback_eids, (list, tuple))
                 else ()
             )
-            final_chars, final_locs = _materialize_appearances_for_prompt(
-                char_apps,
-                loc_apps,
-                design_traits_by_key,
-                used_design_keys,
-                base_fallback_entity_ids=summary_fallback_eids,
-            )
+            if design_traits_by_key is None and (
+                "characters" in existing_p.summary or "locations" in existing_p.summary
+            ):
+                final_chars = tuple(
+                    IllustrationAppearance.from_dict(c)
+                    for c in existing_p.summary.get("characters", ())
+                )
+                final_locs = tuple(
+                    IllustrationAppearance.from_dict(loc)
+                    for loc in existing_p.summary.get("locations", ())
+                )
+            else:
+                final_chars, final_locs = _materialize_appearances_for_prompt(
+                    char_apps,
+                    loc_apps,
+                    design_traits_by_key,
+                    used_design_keys,
+                    base_fallback_entity_ids=summary_fallback_eids,
+                )
 
             prompt_en = str(p_pay["prompt_en"])
             assumptions = filter_non_assumption_placeholders(

@@ -240,6 +240,7 @@ class TranslationCall:
         )
         attempts = 0
         capacity_retries = 0
+        implicit_token_escalated = False
         last_error: Exception | None = None
         while True:
             attempts += 1
@@ -520,11 +521,29 @@ class TranslationCall:
                                 request.max_completion_tokens or IMPLICIT_REASONING_MIN_TOKENS,
                             )
                         )
+                escalated_limit: int | None = None
+                used_implicit_escalation = False
+                if is_truncated and request.max_completion_tokens is not None:
+                    if configured_max_output_tokens is not None:
+                        escalated_limit = configured_max_output_tokens
+                    elif (
+                        not implicit_token_escalated
+                        and unit is not None
+                        and configured_reasoning_effort is None
+                        and configured_reasoning_max_tokens is None
+                    ):
+                        escalated_limit = recommended_unit_max_completion_tokens(
+                            sum(len(item.block.text) for item in unit.items),
+                            max_output_tokens=None,
+                            reasoning_effort=None,
+                            reasoning_max_tokens=None,
+                            implicit_reasoning_tokens=self._get_implicit_reasoning_floor(),
+                        )
+                        used_implicit_escalation = True
                 can_escalate_tokens = (
-                    is_truncated
-                    and configured_max_output_tokens is not None
+                    escalated_limit is not None
                     and request.max_completion_tokens is not None
-                    and request.max_completion_tokens < configured_max_output_tokens
+                    and request.max_completion_tokens < escalated_limit
                 )
                 outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
@@ -570,7 +589,8 @@ class TranslationCall:
                         if was_stale_gen and existing_reason != 'unknown_outcome':
                             raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
-                    if can_escalate_tokens:
+                    can_escalate_recovery = can_escalate_tokens and not used_implicit_escalation
+                    if can_escalate_recovery:
                         stale_reason = None
                         within_budget = False
                         with self._unit_of_work.transaction() as transaction:
@@ -615,9 +635,11 @@ class TranslationCall:
                                 stale_reason, recovery[0], original_error=error
                             ) from error
                         if within_budget:
+                            if used_implicit_escalation:
+                                implicit_token_escalated = True
                             request = replace(
                                 request,
-                                max_completion_tokens=configured_max_output_tokens,
+                                max_completion_tokens=escalated_limit,
                                 attempt=request.attempt + 1,
                             )
                             last_error = error
@@ -636,9 +658,11 @@ class TranslationCall:
                     and can_escalate_tokens
                     and attempts < self._retry_policy.max_attempts
                 ):
+                    if used_implicit_escalation:
+                        implicit_token_escalated = True
                     request = replace(
                         request,
-                        max_completion_tokens=configured_max_output_tokens,
+                        max_completion_tokens=escalated_limit,
                         attempt=request.attempt + 1,
                     )
                     last_error = error

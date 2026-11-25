@@ -192,7 +192,7 @@ def _cited_source_spans(
                         continue
                     if pattern is None:
                         pattern = re.compile(
-                            rf"(?<![A-Za-zÀ-ɏ]){re.escape(phrase)}(?![A-Za-zÀ-ɏ])"
+                            rf"(?<![A-Za-zÀ-ɏ'’]){re.escape(phrase)}(?![A-Za-zÀ-ɏ'’])"
                         )
                     if pattern.search(src) is not None:
                         matched = True

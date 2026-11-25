@@ -1219,6 +1219,16 @@ def test_find_monochrome_color_word_profiles_and_case_sensitive_name_masking() -
     assert find_monochrome_color_word(
         "The Woman in Green wore a green dress", allowed_names=("The Woman in Green",)
     ) == "green"
+    # Single-word proper color names/aliases mask only capitalized tokens, never lowercase adjectives.
+    assert find_monochrome_color_word(
+        "Violet wore a violet cloak", allowed_names=("Violet",), strict_palette=False
+    ) == "violet"
+    assert find_monochrome_color_word(
+        "Mr Brown in a brown coat", allowed_names=("Mr Brown", "Brown"), strict_palette=False
+    ) == "brown"
+    assert find_monochrome_color_word(
+        "Violet wore a dark wool cloak", allowed_names=("Violet",), strict_palette=False
+    ) is None
 
     # Achromatic words & physical object idioms pass when strict_palette=False
     assert find_monochrome_color_word(
@@ -1233,6 +1243,9 @@ def test_find_monochrome_color_word_profiles_and_case_sensitive_name_masking() -
     # strict_palette=True (used for DESIGN.palette_value) rejects bronze/copper/cream/olive
     assert find_monochrome_color_word("warm bronze and copper tones", strict_palette=True) == "bronze"
 
+    # Singular nominative Russian assumption placeholder is also stripped.
+    assert filter_non_assumption_placeholders(["Допущение не требуется.", "Допущение отсутствует."]) == ()
+
 
 def test_validate_design_rejects_colors_on_all_traits_and_respects_entity_names() -> None:
     ref = IllustrationReference.__new__(IllustrationReference)
@@ -1246,21 +1259,37 @@ def test_validate_design_rejects_colors_on_all_traits_and_respects_entity_names(
             "style": ILLUSTRATION_STYLE_MONOCHROME_INK,
         },
     )
-    # Chromatic color in non-palette trait (`hair` / `attire_default`) MUST be rejected!
-    bad_attire = IllustrationDesignResponse(
+    # Chromatic color in English non-palette trait MUST be rejected even with achromatic Russian!
+    bad_attire_en = IllustrationDesignResponse(
         entity_id="ent-brown",
         traits=(
             IllustrationDesignTraitDTO(
                 trait="attire_default",
-                description_ru="Коричневое пальто",
+                description_ru="Тёмное пальто",
                 description_en="Mr Brown in a brown coat",
                 assumption_ru="Повседневное пальто",
             ),
         ),
     )
-    res_bad = ref._validate_design(design_scope, bad_attire)
-    assert res_bad.ok is False
-    assert "monochrome_ink" in res_bad.repair_reason
+    res_bad_en = ref._validate_design(design_scope, bad_attire_en)
+    assert res_bad_en.ok is False
+    assert "monochrome_ink" in res_bad_en.repair_reason
+
+    # Chromatic color in Russian non-palette trait MUST also be rejected independently!
+    bad_attire_ru = IllustrationDesignResponse(
+        entity_id="ent-brown",
+        traits=(
+            IllustrationDesignTraitDTO(
+                trait="attire_default",
+                description_ru="Коричневое пальто",
+                description_en="Mr Brown in a dark coat",
+                assumption_ru="",
+            ),
+        ),
+    )
+    res_bad_ru = ref._validate_design(design_scope, bad_attire_ru)
+    assert res_bad_ru.ok is False
+    assert "monochrome_ink" in res_bad_ru.repair_reason
 
     # Proper name "Mr Brown" with achromatic description MUST pass!
     ok_name = IllustrationDesignResponse(

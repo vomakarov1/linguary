@@ -1666,7 +1666,7 @@ def test_compose_monochrome_prompt_deduplicates_clauses_and_validate_moment_hand
         event_position_key=format_position_key(0, 0, 0),
     )
 
-    # 3. Prefix non-match guard: "scarf" must NOT suppress a clause requiring "scar"!
+    # 3. Prefix non-match guard: "scarf" must NOT suppress a clause requiring "scar" (multi-word or single-word)!
     scar_app = IllustrationAppearance(
         entity_id="ent-harry",
         name_ru="Гарри",
@@ -1679,6 +1679,81 @@ def test_compose_monochrome_prompt_deduplicates_clauses_and_validate_moment_hand
         [scar_app],
     )
     assert "Visual details: Harry: jagged scar on forehead." in scarf_prompt
+
+    single_word_scar_app = IllustrationAppearance(
+        entity_id="ent-harry",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Шрам; тёмный плащ",
+        description_en="scar; dark cloak",
+    )
+    single_word_scar_prompt = compose_monochrome_prompt(
+        "A boy wearing a scarf and a dark cloak.",
+        [single_word_scar_app],
+    )
+    assert "Visual details: Harry: scar." in single_word_scar_prompt
+
+    # 4. Symmetric 4-letter singular/plural matching ("coat" <-> "coats").
+    coat_app = IllustrationAppearance(
+        entity_id="ent-harry",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Тёмное пальто",
+        description_en="dark wool coat",
+    )
+    coats_prompt = compose_monochrome_prompt(
+        "Figures wearing dark wool coats stand by the gate.",
+        [coat_app],
+    )
+    assert "Visual details:" not in coats_prompt
+
+    # 5. Semicolon-only description_en is rejected consistently by compose_monochrome_prompt.
+    semicolon_only = IllustrationAppearance(
+        entity_id="ent-harry",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Пусто",
+        description_en="; ;",
+    )
+    with pytest.raises(IllustrationValidationError):
+        compose_monochrome_prompt("Harry stands in the hallway.", [semicolon_only])
+
+
+def test_materialize_appearances_handles_legacy_none_and_empty_used_keys_fallback() -> None:
+    from linguary.application.illustration_chapter import _materialize_appearances_for_prompt
+
+    base_char = IllustrationAppearance(
+        entity_id="ent-1",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Гарри",
+        description_en="Harry",
+    )
+    # 1. Legacy summary with design_traits_by_key=None returns base appearances untouched.
+    legacy_chars, legacy_locs = _materialize_appearances_for_prompt(
+        [base_char], [], None, ["ent-1:hair"], base_fallback_entity_ids=("ent-1",)
+    )
+    assert legacy_chars == (base_char,)
+    assert legacy_locs == ()
+
+    # 2. Modern summary with used_design_keys=() keeps fallback_en instead of emptying description_en.
+    no_traits_chars, _ = _materialize_appearances_for_prompt(
+        [base_char],
+        [],
+        {
+            "ent-1:hair": {
+                "entity_id": "ent-1",
+                "trait": "hair",
+                "description_ru": "Тёмные волосы",
+                "description_en": "dark hair",
+                "assumption_ru": "Волосы",
+            }
+        },
+        [],
+        base_fallback_entity_ids=("ent-1",),
+    )
+    assert no_traits_chars[0].description_en == "Harry"
+    assert no_traits_chars[0].assumptions_ru == ()
 
 
 def test_compute_chapter_fingerprint_uses_v2_kind() -> None:

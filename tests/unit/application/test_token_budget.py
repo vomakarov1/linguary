@@ -998,3 +998,103 @@ def test_translation_call_implicit_reasoning_floor_is_thread_safe() -> None:
         t.join()
 
     assert call._get_implicit_reasoning_floor() == 8199
+
+
+async def test_translation_call_same_call_escalates_on_truncation_with_none_max_output() -> None:
+    """Review M1: max_output_tokens=None escalates within the same call on truncation; reasoning_effort='none' does not."""
+    block, unit = _sample_unit("Hello world.")
+    cond_id = str(uuid4())
+
+    def _make_call(
+        *,
+        reasoning_effort: str | None,
+        retry_attempts: int,
+    ) -> tuple[TranslationCall, list[int | None], LLMRequest[TranslationResultResponse]]:
+        conditions = SimpleNamespace(
+            id=cond_id,
+            payload={
+                "models": {"processing": "implicit-thinker"},
+                "versions": {"validators": 1},
+                "llm_parameters": {
+                    "max_output_tokens": None,
+                    "reasoning_effort": reasoning_effort,
+                    "reasoning_max_tokens": None,
+                },
+            },
+        )
+        fake_tx = SimpleNamespace(
+            runs=SimpleNamespace(active_for_book=lambda book_id: None),
+            work=SimpleNamespace(
+                get_binding=lambda kind, key: None,
+                get_conditions=lambda cid: conditions if cid == cond_id else None,
+            ),
+        )
+        fake_uow = SimpleNamespace(transaction=lambda: nullcontext(fake_tx))
+        seen: list[int | None] = []
+        fail_first = {"flag": True}
+
+        async def gen(req: LLMRequest[TranslationResultResponse]) -> LLMResponse[TranslationResultResponse]:
+            seen.append(req.max_completion_tokens)
+            if fail_first["flag"]:
+                fail_first["flag"] = False
+                raise LLMResponseFormatError(
+                    "truncated",
+                    truncated=True,
+                    violation=Violation(
+                        rule_code="provider_truncated",
+                        stage=LLMCallStage.TRANSLATION_UNIT.value,
+                        scope="global",
+                        safe_message="truncated",
+                    ),
+                )
+            return LLMResponse(
+                payload=TranslationResultResponse(blocks=()),
+                provider="fake",
+                model="implicit-thinker",
+                call_context=req.call_context,
+            )
+
+        call = TranslationCall(
+            unit_of_work=fake_uow,  # type: ignore[arg-type]
+            llm_client=SimpleNamespace(generate=gen),  # type: ignore[arg-type]
+            retry_policy=RetryPolicy(max_attempts=retry_attempts),
+            validator=SimpleNamespace(
+                validate=lambda payload, **kwargs: (
+                    BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, "Привет."),
+                )
+            ),  # type: ignore[arg-type]
+            sleep=lambda _: None,  # type: ignore[arg-type]
+        )
+        ctx = CallContext(
+            conditions_id=cond_id,
+            stage=LLMCallStage.TRANSLATION_UNIT.value,
+            scope_id=unit.id,
+            ordered_block_ids=(block.id,),
+            attempt_id=str(uuid4()),
+            generation=0,
+            assigned_model="implicit-thinker",
+            prompt_hash="a" * 64,
+        )
+        req = replace(
+            LLMRequest.for_translation(instructions="Translate.", input_text="b1: Hello world."),
+            call_context=ctx,
+        )
+        return call, seen, req
+
+    # 1. reasoning_effort=None, max_output_tokens=None -> same-call retry escalates to 2048 + 8192 and succeeds!
+    call_auto, seen_auto, req_auto = _make_call(reasoning_effort=None, retry_attempts=2)
+    results = await call_auto.request(
+        _translation_context(req_auto), unit=unit, target_language="ru", note_ids=lambda: "n1"
+    )  # type: ignore[arg-type]
+    assert len(results.results) == 1
+    assert seen_auto == [2048, 2048 + IMPLICIT_REASONING_MIN_TOKENS]
+
+    # 2. reasoning_effort="none", max_output_tokens=None -> does NOT escalate or raise implicit reasoning floor.
+    call_none, seen_none, req_none = _make_call(reasoning_effort="none", retry_attempts=2)
+    with pytest.raises(LLMResponseFormatError):
+        await call_none.request(
+            _translation_context(req_none), unit=unit, target_language="ru", note_ids=lambda: "n2"
+        )  # type: ignore[arg-type]
+    assert seen_none == [2048]
+    assert call_none._get_implicit_reasoning_floor() == 0
+

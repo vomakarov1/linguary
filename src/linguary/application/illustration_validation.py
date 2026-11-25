@@ -63,7 +63,7 @@ _MONOCHROME_OBJECT_PHRASES_RE = re.compile(
 _ASSUMPTION_PLACEHOLDER_RE = re.compile(
     r"^(?:"
     r"[-–—]+|"
-    r"допущени[йя]\s+(?:нет|отсутствуют|не\s+требу[ею]тся|не\s+нужны)\b.*|"
+    r"допущени[ейя]\s+(?:нет|отсутству(?:ет|ют)|не\s+требу[ею]тся|не\s+нужн[оы])\b.*|"
     r"нет\s+(?:визуальных\s+|дополнительных\s+)?допущений\b.*|"
     r"без\s+(?:визуальных\s+|дополнительных\s+)?допущений\b.*|"
     r"нет(?:[\s.,;:!?–—-]*$|[\s]*[:–—,-]\s*.*)|"
@@ -157,7 +157,7 @@ def find_monochrome_color_word(
     )
     for name in cleaned_names:
         parts = name.split()
-        if not parts:
+        if len(parts) < 2:
             continue
         pattern = r"(?<!\w)" + r"\s+".join(re.escape(p) for p in parts) + r"(?!\w)"
         masked = re.sub(pattern, " ", masked, flags=re.IGNORECASE)
@@ -195,12 +195,12 @@ def _clause_tokens(text: str) -> list[str]:
 def _token_matches_ref(tok: str, ref_tokens: set[str]) -> bool:
     if tok in ref_tokens:
         return True
+    if len(tok) >= 4 and (f"{tok}s" in ref_tokens or f"{tok}es" in ref_tokens):
+        return True
     if len(tok) >= 5:
         if tok.endswith("s") and tok[:-1] in ref_tokens:
             return True
         if tok.endswith("es") and tok[:-2] in ref_tokens:
-            return True
-        if f"{tok}s" in ref_tokens or f"{tok}es" in ref_tokens:
             return True
     return False
 
@@ -210,7 +210,9 @@ def _clause_covered_in_text(clause: str, reference_text: str) -> bool:
     if not norm_clause:
         return True
     norm_ref = " ".join(reference_text.split()).strip().casefold()
-    if norm_clause in norm_ref:
+    left_b = r"(?<!\w)" if norm_clause[0].isalnum() else ""
+    right_b = r"(?!\w)" if norm_clause[-1].isalnum() else ""
+    if re.search(f"{left_b}{re.escape(norm_clause)}{right_b}", norm_ref) is not None:
         return True
     tokens = _clause_tokens(norm_clause)
     if len(tokens) < 2:
@@ -409,6 +411,11 @@ def compose_monochrome_prompt(
             )
         clauses = [" ".join(piece.split()).strip() for piece in desc_clean.split(";")]
         clauses = [c for c in clauses if c]
+        if not clauses:
+            raise IllustrationValidationError(
+                IllustrationReasonCode.MODEL_OUTPUT_INVALID,
+                "применимый образ обязан содержать непустое description_en",
+            )
         remaining_clauses = [c for c in clauses if not _clause_covered_in_text(c, comp)]
         if remaining_clauses:
             rem_text = "; ".join(remaining_clauses)

@@ -4107,7 +4107,3 @@ def test_translation_prompts_specify_segment_index_and_a2_glossary_hint_rules() 
     ) in a2_instructions
     assert "отдельные трудные слова и устойчивые словосочетания" in a2_instructions
 
-
-
-
-
