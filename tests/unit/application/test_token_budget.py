@@ -542,7 +542,7 @@ async def test_block_processing_escalates_tokens_on_provider_truncated_in_recove
     assert seen_limits == [6144, 32768]
 
     # 2. Multi-block recovery: escalates to 32768 first WITHOUT split, then splits if still truncated.
-    blocks2, unit2 = _multi_block_unit(2)
+    _blocks2, unit2 = _multi_block_unit(2)
     unit = unit2
     seen_limits2: list[int | None] = []
     calls_used["n"] = 0
