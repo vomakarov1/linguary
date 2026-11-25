@@ -1126,3 +1126,100 @@ def test_design_closed_traits_do_not_override_explicit_fact() -> None:
     assert kept_explicit[0]["description_en"] == "Bright green eyes"
     # Design trait for "eyes" is suppressed because explicit fact covers eyes; "hair" is retained.
     assert [t["trait"] for t in kept_design] == ["hair"]
+
+
+def test_build_bounded_design_input_isolates_permanent_facts_and_flags_non_permanent_only() -> None:
+    policy = IllustrationPolicy()
+    sizer = _real_sizer()
+    entity = {"entity_id": "ent-hero", "canonical_name": "Hero", "entity_kind": "person"}
+    perm_fact = {
+        "fact_id": "f-perm",
+        "temporal_scope": "permanent",
+        "position_key": format_position_key(0, 0, 0),
+        "description_ru": "Шрам на лбу",
+        "description_en": "Scar on forehead",
+    }
+    state_fact = {
+        "fact_id": "f-state",
+        "temporal_scope": "state_change",
+        "position_key": format_position_key(0, 1, 0),
+        "description_ru": "Младенец в одеяле",
+        "description_en": "Infant wrapped in a blanket",
+    }
+    epi_fact = {
+        "fact_id": "f-epi",
+        "temporal_scope": "episodic",
+        "position_key": format_position_key(0, 2, 0),
+        "description_ru": "Спит на крыльце",
+        "description_en": "Sleeping on the doorstep",
+    }
+
+    # Permanent facts exist -> ONLY permanent facts sent; non_permanent_context_only is False.
+    with_perm = _build_bounded_design_input(
+        entity=entity,
+        facts=[perm_fact, state_fact, epi_fact],
+        sizer=sizer,
+        book_id="b1",
+        conditions_id=None,
+        policy=policy,
+    )
+    assert with_perm["non_permanent_context_only"] is False
+    assert [f["fact_id"] for f in with_perm["facts"]] == ["f-perm"]
+    assert with_perm["omitted_episodic_count"] == 2
+    assert with_perm["omitted_fact_count"] == 2
+
+    # No permanent facts -> non_permanent_context_only is True and non-permanent facts are passed.
+    only_temp = _build_bounded_design_input(
+        entity=entity,
+        facts=[epi_fact, state_fact],
+        sizer=sizer,
+        book_id="b1",
+        conditions_id=None,
+        policy=policy,
+    )
+    assert only_temp["non_permanent_context_only"] is True
+    assert [f["fact_id"] for f in only_temp["facts"]] == ["f-state", "f-epi"]
+    assert [f["temporal_scope"] for f in only_temp["facts"]] == ["state_change", "episodic"]
+
+    # No facts at all -> non_permanent_context_only is False.
+    empty_facts = _build_bounded_design_input(
+        entity=entity,
+        facts=(),
+        sizer=sizer,
+        book_id="b1",
+        conditions_id=None,
+        policy=policy,
+    )
+    assert empty_facts["non_permanent_context_only"] is False
+    assert empty_facts["facts"] == []
+
+
+def test_alias_blocking_singularizes_plural_surnames_and_ignores_generic_kin_place_stopwords() -> None:
+    # Plural possessive surname matches singular surname ("John Smith" <-> "the Smiths’ son").
+    family_mentions = [
+        {"mention_key": "m1", "name": "John Smith", "entity_kind": "person"},
+        {"mention_key": "m2", "name": "the Smiths’ son", "entity_kind": "person"},
+        {"mention_key": "m3", "name": "the Bakers’ son", "entity_kind": "person"},
+    ]
+    pairs = build_alias_candidate_pairs(family_mentions)
+    assert ("m1", "m2") in pairs
+    # Generic "son" MUST NOT pair unrelated families!
+    assert ("m2", "m3") not in pairs
+
+    # Generic place nouns ("house") MUST NOT pair unrelated locations.
+    place_mentions = [
+        {"mention_key": "p1", "name": "Old Stone House", "entity_kind": "location"},
+        {"mention_key": "p2", "name": "Tall Brick House", "entity_kind": "location"},
+    ]
+    assert build_alias_candidate_pairs(place_mentions) == ()
+
+    # Names ending in -ss, -us, -is MUST NOT be truncated to broken stems.
+    special_endings = [
+        {"mention_key": "s1", "name": "Ross", "entity_kind": "person"},
+        {"mention_key": "s2", "name": "Ros", "entity_kind": "person"},
+        {"mention_key": "s3", "name": "Marcus", "entity_kind": "person"},
+        {"mention_key": "s4", "name": "Marcu", "entity_kind": "person"},
+        {"mention_key": "s5", "name": "Iris", "entity_kind": "person"},
+        {"mention_key": "s6", "name": "Iri", "entity_kind": "person"},
+    ]
+    assert build_alias_candidate_pairs(special_endings) == ()

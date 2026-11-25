@@ -47,7 +47,9 @@ from linguary.application.illustration_selection import (
 )
 from linguary.application.illustration_source import (
     IllustrationSource,
+    SectionManifestEntry,
     _pass_model_dependencies,
+    compute_chapter_fingerprint,
 )
 from linguary.application.illustration_validation import (
     MONOCHROME_INK_DIRECTIVE,
@@ -1407,3 +1409,311 @@ async def test_limit_or_model_or_style_profile_change_only_rebuilds_prompt_parts
     assert LLMResponseKind.ILLUSTRATION_EXTRACT not in second_kinds
     assert LLMResponseKind.ILLUSTRATION_CANDIDATES not in second_kinds
     assert second_kinds == [LLMResponseKind.ILLUSTRATION_SELECTION]
+
+
+def _design_item(
+    entity_id: str,
+    trait: str,
+    *,
+    desc_ru: str,
+    desc_en: str,
+    assumption_ru: str,
+    entity_kind: str = "person",
+) -> RegistryItem:
+    pay = {
+        "entity_id": entity_id,
+        "entity_kind": entity_kind,
+        "trait": trait,
+        "description_ru": desc_ru,
+        "description_en": desc_en,
+        "assumption_ru": assumption_ru,
+    }
+    return RegistryItem(
+        generation_id="placeholder",
+        kind=IllustrationRegistryKind.DESIGN,
+        item_key=f"{entity_id}:{trait}",
+        entity_id=entity_id,
+        position_key=TIMELESS_POSITION_KEY,
+        is_back_applicable=False,
+        payload_sha256=canonical_sha(pay),
+        payload=pay,
+    )
+
+
+async def test_used_design_keys_controls_final_prompt_appearances_and_assumptions_both_branches(
+    tmp_path: Path,
+) -> None:
+    prompt_inputs_seen: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-1",
+                        title_ru="Встреча в коридоре",
+                        event_ru="Алиса и Боб разговаривают в коридоре.",
+                        significance_ru="Важная встреча",
+                        event_kind="meeting",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=blk["block_id"], quote="Alice met Bob"),
+                        ),
+                        participant_names=("Alice", "Bob"),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевая встреча"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            assert data["style"] == "monochrome_ink"
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=tuple(f["fact_id"] for f in data["facts"]),
+                excluded_fact_ids=(),
+                compact_description_ru="В простом шерстяном плаще",
+                compact_description_en="In a plain wool cloak",
+                assumptions_ru=("Допущений нет.",),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            prompt_inputs_seen.append(data)
+            # Deliberately select ONLY palette_value for Alice (with facts) and hair for Bob (no facts),
+            # omitting Alice's `eyes` and Bob's `attire_default`!
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Alice in a plain wool cloak speaks with Bob in the hallway.",
+                used_fact_ids=tuple(data["allowed_fact_ids"]),
+                used_design_keys=("ent-alice:palette_value", "ent-bob:hair"),
+                assumptions_ru=("Нет: указано в фактах.", "Нейтральный ракурс камеры"),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[("sec-0", "Chapter 1", 0, [("b-0", "Alice met Bob in the quiet hallway.")])],
+        registry_items_spec=[
+            _entity_item("ent-alice", "Alice"),
+            _entity_item("ent-bob", "Bob"),
+            _fact_item(
+                "f-alice-cloak",
+                "ent-alice",
+                section_order=0,
+                temporal_scope="episodic",
+                desc_ru="В шерстяном плаще",
+                desc_en="In a plain wool cloak",
+            ),
+            _design_item(
+                "ent-alice",
+                "palette_value",
+                desc_ru="Высококонтрастная штриховка тушью",
+                desc_en="High-contrast ink crosshatching",
+                assumption_ru="Контрастная монохромная подача",
+            ),
+            _design_item(
+                "ent-alice",
+                "eyes",
+                desc_ru="Закрытые спящие глаза",
+                desc_en="Closed sleeping eyes",
+                assumption_ru="Лишнее допущение про закрытые глаза",
+            ),
+            _design_item(
+                "ent-bob",
+                "hair",
+                desc_ru="Короткие аккуратные волосы",
+                desc_en="Short neat hair",
+                assumption_ru="Нейтральная стрижка Боба",
+            ),
+            _design_item(
+                "ent-bob",
+                "attire_default",
+                desc_ru="Тяжёлое зимнее пальто",
+                desc_en="Heavy winter overcoat",
+                assumption_ru="Лишнее допущение про зимнее пальто",
+            ),
+        ],
+        handler=_handler,
+    )
+    await _drain_chapter_tasks(harness)
+
+    assert len(prompt_inputs_seen) == 1
+    avail_keys = {t["key"] for t in prompt_inputs_seen[0]["available_design_traits"]}
+    assert avail_keys == {
+        "ent-alice:palette_value",
+        "ent-alice:eyes",
+        "ent-bob:hair",
+        "ent-bob:attire_default",
+    }
+    # Base characters sent to PROMPT must NOT pre-bake unused DESIGN traits.
+    alice_pre = next(c for c in prompt_inputs_seen[0]["characters"] if c["entity_id"] == "ent-alice")
+    assert "Closed sleeping eyes" not in alice_pre["description_en"]
+    bob_pre = next(c for c in prompt_inputs_seen[0]["characters"] if c["entity_id"] == "ent-bob")
+    assert "Heavy winter overcoat" not in bob_pre["description_en"]
+
+    with harness.uow.transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.state is IllustrationScopeState.ACCEPTED and ch.payload is not None
+        moment = ch.payload["moments"][0]
+        prompt_en = moment["prompt_en"]
+        chars_by_id = {c["entity_id"]: c for c in moment["character_descriptions"]}
+
+        # Selected design traits materialized; unused ones strictly excluded!
+        assert "High-contrast ink crosshatching" in chars_by_id["ent-alice"]["description_en"]
+        assert "Closed sleeping eyes" not in chars_by_id["ent-alice"]["description_en"]
+        assert "Closed sleeping eyes" not in prompt_en
+
+        # Bob had no facts -> fallback "Bob" was replaced by selected `hair` trait, without `attire_default`!
+        assert chars_by_id["ent-bob"]["description_en"] == "Short neat hair"
+        assert "Heavy winter overcoat" not in chars_by_id["ent-bob"]["description_en"]
+        assert "Heavy winter overcoat" not in prompt_en
+
+        # Assumptions contain ONLY real assumptions from PROMPT + used_design_keys, no placeholders!
+        assumps = moment["assumptions_ru"]
+        assert "Контрастная монохромная подача" in assumps
+        assert "Нейтральная стрижка Боба" in assumps
+        assert "Нейтральный ракурс камеры" in assumps
+        assert all("Допущений нет" not in a for a in assumps)
+        assert all("Нет: указано" not in a for a in assumps)
+        assert all("закрытые глаза" not in a for a in assumps)
+        assert all("зимнее пальто" not in a for a in assumps)
+
+
+def test_compose_monochrome_prompt_deduplicates_clauses_and_validate_moment_handles_partial_and_full_coverage(
+    tmp_path: Path,
+) -> None:
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[("sec-0", "Chapter 1", 0, [("b-0", "Harry stepped into the dim hallway.")])],
+        registry_items_spec=[],
+        handler=lambda _r, _n: (_ for _ in ()).throw(AssertionError("unused")),
+    )
+    with harness.uow.transaction() as tx:
+        snap = harness.source.snapshot(tx, harness.book_id)
+    sec0 = harness.document.ordered_sections[0]
+    scene_id = snap.entries[0].scenes[0].id
+
+    app = IllustrationAppearance(
+        entity_id="ent-harry",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Шрам-молния на лбу; контрастная штриховка тушью",
+        description_en="lightning-shaped scar on forehead; dark ink crosshatching",
+    )
+
+    # 1. Clause 1 covered in scene_composition_en, clause 2 missing -> only clause 2 in Visual details!
+    partial_prompt = compose_monochrome_prompt(
+        "Harry with a lightning-shaped scar on his forehead stands in the doorway.",
+        [app],
+    )
+    assert "Visual details: Harry: dark ink crosshatching." in partial_prompt
+    assert partial_prompt.lower().count("lightning-shaped scar") == 1
+    validated_partial = validate_moment(
+        ValidatedMoment(
+            id="m-partial",
+            scene_id=scene_id,
+            title_ru="В дверях",
+            reason_ru="Причина",
+            event_ru="Событие",
+            prompt_en=partial_prompt,
+            insert_after_block_id="b-0",
+            anchors=(SourceAnchor("b-0", 0, 5, "Harry"),),
+            character_descriptions=(app,),
+        ),
+        snapshot=snap,
+        section=sec0,
+        scene_start_block_id="b-0",
+        scene_end_block_id="b-0",
+        registry={},
+        event_position_key=format_position_key(0, 0, 0),
+    )
+    assert validated_partial.prompt_en == partial_prompt
+
+    # 2. All clauses covered in scene_composition_en -> no Visual details section at all, still valid!
+    full_prompt = compose_monochrome_prompt(
+        "Harry with a lightning-shaped scar on his forehead rendered in dark ink crosshatching.",
+        [app],
+    )
+    assert "Visual details:" not in full_prompt
+    validate_moment(
+        ValidatedMoment(
+            id="m-full",
+            scene_id=scene_id,
+            title_ru="В дверях",
+            reason_ru="Причина",
+            event_ru="Событие",
+            prompt_en=full_prompt,
+            insert_after_block_id="b-0",
+            anchors=(SourceAnchor("b-0", 0, 5, "Harry"),),
+            character_descriptions=(app,),
+        ),
+        snapshot=snap,
+        section=sec0,
+        scene_start_block_id="b-0",
+        scene_end_block_id="b-0",
+        registry={},
+        event_position_key=format_position_key(0, 0, 0),
+    )
+
+    # 3. Prefix non-match guard: "scarf" must NOT suppress a clause requiring "scar"!
+    scar_app = IllustrationAppearance(
+        entity_id="ent-harry",
+        name_ru="Гарри",
+        name_en="Harry",
+        description_ru="Шрам на лбу",
+        description_en="jagged scar on forehead",
+    )
+    scarf_prompt = compose_monochrome_prompt(
+        "Harry wears a jagged wool scarf across his forehead.",
+        [scar_app],
+    )
+    assert "Visual details: Harry: jagged scar on forehead." in scarf_prompt
+
+
+def test_compute_chapter_fingerprint_uses_v2_kind() -> None:
+    entry = SectionManifestEntry(
+        section_id="sec-0",
+        order=0,
+        title="Chapter 1",
+        skipped=False,
+        skip_reason=None,
+        block_digests={"b-0": "a" * 64},
+        input_sha256="b" * 64,
+        response_sha256="c" * 64,
+    )
+    fp = compute_chapter_fingerprint(
+        entry,
+        registry_sha256="d" * 64,
+        policy_payload={"policy_version": 1},
+        model_prompts="gpt-5-mini",
+        route_id="route-1",
+        style="monochrome_ink",
+        max_per_chapter=3,
+    )
+    expected_v2 = canonical_sha(
+        {
+            "kind": "illustration_chapter_v2",
+            "registry_sha256": "d" * 64,
+            "section_id": "sec-0",
+            "block_digests": {"b-0": "a" * 64},
+            "input_sha256": "b" * 64,
+            "response_sha256": "c" * 64,
+            "model_prompts": "gpt-5-mini",
+            "route_id": "route-1",
+            "style": "monochrome_ink",
+            "max_per_chapter": 3,
+            "policy": {"policy_version": 1},
+        }
+    )
+    assert fp == expected_v2

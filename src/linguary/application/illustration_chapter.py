@@ -42,6 +42,9 @@ from linguary.application.illustration_validation import (
     IllustrationAppearance,
     ValidatedMoment,
     compose_monochrome_prompt,
+    dedupe_texts,
+    filter_non_assumption_placeholders,
+    find_monochrome_color_word,
     has_cyrillic,
     resolve_insert_after_block_id,
     validate_moment,
@@ -72,6 +75,7 @@ from linguary.domain import (
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
 from linguary.domain.illustrations import (
+    ILLUSTRATION_STYLE_MONOCHROME_INK,
     IllustrationAttemptState,
     IllustrationError,
     IllustrationGeneration,
@@ -119,20 +123,22 @@ def _select_english_name(entity: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _entity_names(entity: Mapping[str, Any]) -> list[str]:
+    names: list[str] = []
+    raw_canonical = entity.get("canonical_name")
+    if raw_canonical is not None and str(raw_canonical).strip():
+        names.append(str(raw_canonical).strip())
+    raw_aliases = entity.get("aliases", ())
+    if isinstance(raw_aliases, Iterable) and not isinstance(raw_aliases, (str, bytes)):
+        for alias in raw_aliases:
+            if alias is not None and str(alias).strip():
+                names.append(str(alias).strip())
+    return list(dict.fromkeys(names))
+
+
 def _dedupe_texts(items: Iterable[str]) -> tuple[str, ...]:
     """Deduplicate strings by whitespace/punctuation-insensitive casefolded key preserving order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for raw in items:
-        cleaned = " ".join(str(raw).split()).strip()
-        if not cleaned:
-            continue
-        key = cleaned.rstrip(".;, ").casefold()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(cleaned)
-    return tuple(result)
+    return dedupe_texts(items)
 
 
 def _dedupe_semicolon_parts(items: Iterable[str]) -> list[str]:
@@ -144,6 +150,75 @@ def _dedupe_semicolon_parts(items: Iterable[str]) -> list[str]:
             if cleaned:
                 parts.append(cleaned)
     return list(_dedupe_texts(parts))
+
+
+def _materialize_appearances_for_prompt(
+    base_chars: Sequence[IllustrationAppearance],
+    base_locs: Sequence[IllustrationAppearance],
+    design_traits_by_key: Mapping[str, Mapping[str, Any]] | None,
+    used_design_keys: Sequence[str],
+    base_fallback_entity_ids: Sequence[str] = (),
+) -> tuple[tuple[IllustrationAppearance, ...], tuple[IllustrationAppearance, ...]]:
+    """Materialize final appearances strictly from `used_design_keys` (with legacy summary fallback)."""
+    if design_traits_by_key is None:
+        return tuple(base_chars), tuple(base_locs)
+
+    fallback_eids = {str(eid) for eid in base_fallback_entity_ids}
+    traits_by_entity: dict[str, list[Mapping[str, Any]]] = {}
+    for key in dict.fromkeys(str(k) for k in used_design_keys):
+        trait_info = design_traits_by_key.get(key)
+        if not isinstance(trait_info, Mapping):
+            continue
+        eid = str(trait_info.get("entity_id", ""))
+        if eid:
+            traits_by_entity.setdefault(eid, []).append(trait_info)
+
+    def _materialize_one(app: IllustrationAppearance) -> IllustrationAppearance:
+        selected = traits_by_entity.get(app.entity_id, [])
+        if not selected:
+            return IllustrationAppearance(
+                entity_id=app.entity_id,
+                name_ru=app.name_ru,
+                description_ru=app.description_ru,
+                description_en=app.description_en,
+                fact_ids=app.fact_ids,
+                assumptions_ru=filter_non_assumption_placeholders(app.assumptions_ru),
+                name_en=app.name_en,
+            )
+        is_fallback = app.entity_id in fallback_eids
+        ru_parts: list[str] = (
+            [] if is_fallback else ([app.description_ru] if app.description_ru.strip() else [])
+        )
+        en_parts: list[str] = (
+            [] if is_fallback else ([app.description_en] if app.description_en.strip() else [])
+        )
+        assumps: list[str] = list(app.assumptions_ru)
+        for t in selected:
+            d_ru = str(t.get("description_ru", "")).strip()
+            d_en = str(t.get("description_en", "")).strip()
+            a_ru = str(t.get("assumption_ru", "")).strip()
+            if d_ru:
+                ru_parts.append(d_ru)
+            if d_en:
+                en_parts.append(d_en)
+            if a_ru:
+                assumps.append(a_ru)
+        desc_ru_clean = _dedupe_semicolon_parts(ru_parts)
+        desc_en_clean = _dedupe_semicolon_parts(en_parts)
+        return IllustrationAppearance(
+            entity_id=app.entity_id,
+            name_ru=app.name_ru,
+            description_ru="; ".join(desc_ru_clean) or app.description_ru,
+            description_en="; ".join(desc_en_clean) or app.description_en,
+            fact_ids=app.fact_ids,
+            assumptions_ru=filter_non_assumption_placeholders(assumps),
+            name_en=app.name_en,
+        )
+
+    return (
+        tuple(_materialize_one(c) for c in base_chars),
+        tuple(_materialize_one(loc) for loc in base_locs),
+    )
 
 
 def _load_all_registry_items(
@@ -342,6 +417,7 @@ def _build_fact_scope_spec(
         "entity_id": str(entity["entity_id"]),
         "entity_name": str(entity["canonical_name"]),
         "entity_kind": str(entity["entity_kind"]),
+        "style": revision.settings.style,
         "page_index": page_index,
         "total_pages": total_pages,
         "is_consolidation": is_consolidation,
@@ -367,6 +443,7 @@ def _build_fact_scope_spec(
         "entity_id": str(entity["entity_id"]),
         "entity_kind": str(entity["entity_kind"]),
         "entity_name": str(entity["canonical_name"]),
+        "entity_names": _entity_names(entity),
         "page_index": page_index,
         "total_pages": total_pages,
         "is_consolidation": is_consolidation,
@@ -412,11 +489,15 @@ def _build_prompt_scope_spec(
     locations: Sequence[IllustrationAppearance],
     allowed_fact_ids: Sequence[str],
     allowed_design_keys: Sequence[str],
+    available_design_traits: Sequence[Mapping[str, Any]] = (),
+    base_fallback_entity_ids: Sequence[str] = (),
+    entity_names: Sequence[str] = (),
     revision: IllustrationSettingsRevision,
     route_id: str,
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
+    thawed_design_traits = [thaw(t) for t in available_design_traits]
     request_input = {
         "moment_id": moment_card.candidate_id,
         "scene_id": moment_card.scene_id,
@@ -428,6 +509,7 @@ def _build_prompt_scope_spec(
         "locations": [loc.to_dict() for loc in locations],
         "allowed_fact_ids": list(allowed_fact_ids),
         "allowed_design_keys": list(allowed_design_keys),
+        "available_design_traits": thawed_design_traits,
     }
     input_sha256 = canonical_sha(
         {
@@ -448,6 +530,13 @@ def _build_prompt_scope_spec(
         "locations": [loc.to_dict() for loc in locations],
         "allowed_fact_ids": list(allowed_fact_ids),
         "allowed_design_keys": list(allowed_design_keys),
+        "design_traits_by_key": {
+            str(t["key"]): t for t in thawed_design_traits if t.get("key")
+        },
+        "base_fallback_entity_ids": list(dict.fromkeys(str(eid) for eid in base_fallback_entity_ids)),
+        "entity_names": list(
+            dict.fromkeys(str(n).strip() for n in entity_names if n is not None and str(n).strip())
+        ),
         "ordered_block_ids": [a.block_id for a in moment_card.anchors],
         "request_input": request_input,
     }
@@ -792,6 +881,9 @@ class IllustrationChapter:
                 list[IllustrationAppearance],
                 list[str],
                 list[str],
+                list[dict[str, Any]],
+                list[str],
+                list[str],
             ],
         ] = {}
         all_registry_facts: dict[str, dict[str, Any]] = {}
@@ -802,10 +894,15 @@ class IllustrationChapter:
             loc_apps: list[IllustrationAppearance] = []
             allowed_fids: list[str] = []
             allowed_dkeys: list[str] = []
+            available_design_traits: list[dict[str, Any]] = []
+            seen_design_keys: set[str] = set()
+            base_fallback_eids: list[str] = []
+            entity_names_all: list[str] = []
 
             for kind_bucket, ent_list in (("person", char_entities), ("location", loc_entities)):
                 for ent in ent_list:
                     eid = str(ent["entity_id"])
+                    entity_names_all.extend(_entity_names(ent))
                     # STRICT SQL chronological + back-applicable non-spoiler filter!
                     fact_items = _load_all_registry_items(
                         tx,
@@ -836,34 +933,32 @@ class IllustrationChapter:
                     )
 
                     if not entity_facts:
-                        # No explicit facts -> use closed design traits (or safe non-Cyrillic fallback).
-                        if design_payloads:
-                            d_ru_parts = _dedupe_semicolon_parts(
-                                str(d["description_ru"]) for d in design_payloads
+                        # Keep DESIGN traits separate until PROMPT selects `used_design_keys`.
+                        base_fallback_eids.append(eid)
+                        for d in design_payloads:
+                            dkey = f"{eid}:{d['trait']}"
+                            if dkey in seen_design_keys:
+                                continue
+                            seen_design_keys.add(dkey)
+                            allowed_dkeys.append(dkey)
+                            available_design_traits.append(
+                                {
+                                    "key": dkey,
+                                    "entity_id": eid,
+                                    "entity_kind": kind_bucket,
+                                    "trait": str(d["trait"]),
+                                    "description_ru": str(d["description_ru"]),
+                                    "description_en": str(d["description_en"]),
+                                    "assumption_ru": str(d.get("assumption_ru", "")),
+                                }
                             )
-                            d_en_parts = _dedupe_semicolon_parts(
-                                str(d["description_en"]) for d in design_payloads
-                            )
-                            d_ru = "; ".join(d_ru_parts) or str(ent["canonical_name"])
-                            d_en = "; ".join(d_en_parts) or fallback_en
-                            assumps = _dedupe_texts(
-                                str(d["assumption_ru"])
-                                for d in design_payloads
-                                if str(d.get("assumption_ru", "")).strip()
-                            )
-                            dkeys = [f"{eid}:{d['trait']}" for d in design_payloads]
-                            allowed_dkeys.extend(dkeys)
-                        else:
-                            d_ru = str(ent["canonical_name"])
-                            d_en = fallback_en
-                            assumps = ()
                         app = IllustrationAppearance(
                             entity_id=eid,
                             name_ru=str(ent["canonical_name"]),
-                            description_ru=d_ru,
-                            description_en=d_en,
+                            description_ru=str(ent["canonical_name"]),
+                            description_en=fallback_en,
                             fact_ids=(),
-                            assumptions_ru=assumps,
+                            assumptions_ru=(),
                             name_en=eng_name,
                         )
                         (char_apps if kind_bucket == "person" else loc_apps).append(app)
@@ -885,6 +980,7 @@ class IllustrationChapter:
                                 "entity_id": str(_ent["entity_id"]),
                                 "entity_name": str(_ent["canonical_name"]),
                                 "entity_kind": str(_ent["entity_kind"]),
+                                "style": revision.settings.style,
                                 "page_index": 0,
                                 "total_pages": 1,
                                 "is_consolidation": False,
@@ -1031,6 +1127,7 @@ class IllustrationChapter:
                                     "entity_id": _eid,
                                     "entity_name": str(_ent["canonical_name"]),
                                     "entity_kind": str(_ent["entity_kind"]),
+                                    "style": revision.settings.style,
                                     "page_index": 0,
                                     "total_pages": 1,
                                     "is_consolidation": True,
@@ -1141,6 +1238,8 @@ class IllustrationChapter:
                                 pending_fact_scopes = True
                                 break
                             c_pay = existing_consol.payload or {}
+                            for ex_id in c_pay.get("excluded_fact_ids", ()):
+                                accumulated_excluded.add(str(ex_id))
                             for fid in c_pay.get("applicable_fact_ids", ()):
                                 fid_s = str(fid)
                                 if fid_s not in round_app_ids:
@@ -1166,27 +1265,51 @@ class IllustrationChapter:
                     if consol_pending:
                         continue
 
-                    # Combine explicit applicable facts with non-conflicting design fallbacks!
+                    # Keep non-conflicting DESIGN fallbacks separate until PROMPT selects `used_design_keys`!
                     applicable_fact_objs = [
                         all_registry_facts[fid]
                         for fid in accumulated_app_ids
                         if fid in all_registry_facts
                     ]
+                    excluded_fact_objs = [
+                        all_registry_facts[fid]
+                        for fid in accumulated_excluded
+                        if fid in all_registry_facts
+                    ]
                     _, kept_design = resolve_appearance_with_design_fallback(
-                        applicable_fact_objs, design_payloads
+                        applicable_fact_objs,
+                        design_payloads,
+                        excluded_facts=excluded_fact_objs,
+                        compact_description_en=running_en,
+                        compact_description_ru=running_ru,
                     )
-                    desc_ru_parts = [running_ru] if running_ru.strip() else []
-                    desc_en_parts = [running_en] if running_en.strip() else []
                     for d in kept_design:
-                        desc_ru_parts.append(str(d["description_ru"]))
-                        desc_en_parts.append(str(d["description_en"]))
-                        if str(d.get("assumption_ru", "")).strip():
-                            accumulated_assumps.append(str(d["assumption_ru"]).strip())
-                        allowed_dkeys.append(f"{eid}:{d['trait']}")
+                        dkey = f"{eid}:{d['trait']}"
+                        if dkey in seen_design_keys:
+                            continue
+                        seen_design_keys.add(dkey)
+                        allowed_dkeys.append(dkey)
+                        available_design_traits.append(
+                            {
+                                "key": dkey,
+                                "entity_id": eid,
+                                "entity_kind": kind_bucket,
+                                "trait": str(d["trait"]),
+                                "description_ru": str(d["description_ru"]),
+                                "description_en": str(d["description_en"]),
+                                "assumption_ru": str(d.get("assumption_ru", "")),
+                            }
+                        )
 
                     allowed_fids.extend(accumulated_app_ids)
-                    desc_ru_clean = _dedupe_semicolon_parts(desc_ru_parts)
-                    desc_en_clean = _dedupe_semicolon_parts(desc_en_parts)
+                    desc_ru_clean = _dedupe_semicolon_parts(
+                        [running_ru] if running_ru.strip() else []
+                    )
+                    desc_en_clean = _dedupe_semicolon_parts(
+                        [running_en] if running_en.strip() else []
+                    )
+                    if not desc_en_clean:
+                        base_fallback_eids.append(eid)
                     app = IllustrationAppearance(
                         entity_id=eid,
                         name_ru=str(ent["canonical_name"]),
@@ -1194,7 +1317,7 @@ class IllustrationChapter:
                         or str(ent["canonical_name"]),
                         description_en="; ".join(desc_en_clean) or fallback_en,
                         fact_ids=tuple(accumulated_app_ids),
-                        assumptions_ru=_dedupe_texts(accumulated_assumps),
+                        assumptions_ru=filter_non_assumption_placeholders(accumulated_assumps),
                         name_en=eng_name,
                     )
                     (char_apps if kind_bucket == "person" else loc_apps).append(app)
@@ -1204,6 +1327,9 @@ class IllustrationChapter:
                 loc_apps,
                 list(dict.fromkeys(allowed_fids)),
                 list(dict.fromkeys(allowed_dkeys)),
+                available_design_traits,
+                list(dict.fromkeys(base_fallback_eids)),
+                list(dict.fromkeys(entity_names_all)),
             )
 
         if pending_fact_scopes:
@@ -1218,9 +1344,15 @@ class IllustrationChapter:
         validated_moments: list[ValidatedMoment] = []
 
         for card, _chars, _locs in bound_moments:
-            char_apps, loc_apps, allowed_fids, allowed_dkeys = scoped_appearances_by_moment[
-                card.candidate_id
-            ]
+            (
+                char_apps,
+                loc_apps,
+                allowed_fids,
+                allowed_dkeys,
+                avail_design_traits,
+                base_fallback_eids,
+                moment_entity_names,
+            ) = scoped_appearances_by_moment[card.candidate_id]
             pkey = f"prompt:{section_id}:{card.candidate_id}"
             existing_p = prompt_by_key.get(pkey)
             if existing_p is None:
@@ -1234,6 +1366,9 @@ class IllustrationChapter:
                     locations=loc_apps,
                     allowed_fact_ids=allowed_fids,
                     allowed_design_keys=allowed_dkeys,
+                    available_design_traits=avail_design_traits,
+                    base_fallback_entity_ids=base_fallback_eids,
+                    entity_names=moment_entity_names,
                     revision=revision,
                     route_id=route_id,
                 )
@@ -1253,6 +1388,9 @@ class IllustrationChapter:
                         locations=loc_apps,
                         allowed_fact_ids=allowed_fids,
                         allowed_design_keys=allowed_dkeys,
+                        available_design_traits=avail_design_traits,
+                        base_fallback_entity_ids=base_fallback_eids,
+                        entity_names=moment_entity_names,
                         revision=revision,
                         route_id=route_id,
                         reusable=reusable,
@@ -1297,11 +1435,30 @@ class IllustrationChapter:
                     section=section,
                 )
 
+            used_design_keys = [str(k) for k in p_pay.get("used_design_keys", ())]
+            raw_traits_by_key = existing_p.summary.get("design_traits_by_key")
+            design_traits_by_key = (
+                raw_traits_by_key if isinstance(raw_traits_by_key, Mapping) else None
+            )
+            raw_fallback_eids = existing_p.summary.get("base_fallback_entity_ids", ())
+            summary_fallback_eids = (
+                tuple(str(eid) for eid in raw_fallback_eids)
+                if isinstance(raw_fallback_eids, (list, tuple))
+                else ()
+            )
+            final_chars, final_locs = _materialize_appearances_for_prompt(
+                char_apps,
+                loc_apps,
+                design_traits_by_key,
+                used_design_keys,
+                base_fallback_entity_ids=summary_fallback_eids,
+            )
+
             prompt_en = str(p_pay["prompt_en"])
-            assumptions = _dedupe_texts(
+            assumptions = filter_non_assumption_placeholders(
                 [
                     *(str(x) for x in p_pay.get("assumptions_ru", ())),
-                    *(a for app in (*char_apps, *loc_apps) for a in app.assumptions_ru),
+                    *(a for app in (*final_chars, *final_locs) for a in app.assumptions_ru),
                 ]
             )
             moment = validate_moment(
@@ -1314,8 +1471,8 @@ class IllustrationChapter:
                     prompt_en=prompt_en,
                     insert_after_block_id=insert_after,
                     anchors=anchors,
-                    character_descriptions=tuple(char_apps),
-                    location_descriptions=tuple(loc_apps),
+                    character_descriptions=final_chars,
+                    location_descriptions=final_locs,
                     assumptions_ru=assumptions,
                 ),
                 snapshot=snapshot,
@@ -1852,6 +2009,33 @@ class IllustrationChapter:
                     ok=False,
                     repair_reason="compact_description_en должен быть написан строго на английском языке без кириллицы",
                 )
+            if revision.settings.style == ILLUSTRATION_STYLE_MONOCHROME_INK:
+                raw_names = scope.summary.get("entity_names")
+                if isinstance(raw_names, (list, tuple)):
+                    entity_names = [
+                        str(n).strip()
+                        for n in raw_names
+                        if n is not None and str(n).strip()
+                    ]
+                else:
+                    entity_names = []
+                if not entity_names:
+                    fallback_name = scope.summary.get("entity_name")
+                    if fallback_name is not None and str(fallback_name).strip():
+                        entity_names = [str(fallback_name).strip()]
+                color_word = find_monochrome_color_word(
+                    payload.compact_description_en,
+                    allowed_names=entity_names,
+                    strict_palette=False,
+                )
+                if color_word is not None:
+                    return _ValidationOutcome(
+                        ok=False,
+                        repair_reason=(
+                            f"для стиля monochrome_ink в compact_description_en нельзя использовать "
+                            f"название цвета ({color_word}); передай признак через светлоту, контраст и фактуру"
+                        ),
+                    )
             return _ValidationOutcome(
                 ok=True,
                 payload={
@@ -1861,7 +2045,9 @@ class IllustrationChapter:
                     "excluded_fact_ids": list(dict.fromkeys(payload.excluded_fact_ids)),
                     "compact_description_ru": payload.compact_description_ru.strip(),
                     "compact_description_en": payload.compact_description_en.strip(),
-                    "assumptions_ru": [a.strip() for a in payload.assumptions_ru if a.strip()],
+                    "assumptions_ru": list(
+                        filter_non_assumption_placeholders(payload.assumptions_ru)
+                    ),
                 },
             )
 
@@ -1888,12 +2074,52 @@ class IllustrationChapter:
                     ok=False,
                     repair_reason="scene_composition_en должен быть написан строго на английском языке без кириллицы",
                 )
-            characters = [
+            if revision.settings.style == ILLUSTRATION_STYLE_MONOCHROME_INK:
+                raw_names = scope.summary.get("entity_names")
+                if isinstance(raw_names, (list, tuple)):
+                    entity_names = [
+                        str(n).strip()
+                        for n in raw_names
+                        if n is not None and str(n).strip()
+                    ]
+                else:
+                    entity_names = []
+                color_word = find_monochrome_color_word(
+                    payload.scene_composition_en,
+                    allowed_names=entity_names,
+                    strict_palette=False,
+                )
+                if color_word is not None:
+                    return _ValidationOutcome(
+                        ok=False,
+                        repair_reason=(
+                            f"для стиля monochrome_ink в scene_composition_en нельзя использовать "
+                            f"название цвета ({color_word}); передай различия через светлоту, контраст и фактуру"
+                        ),
+                    )
+            base_characters = [
                 IllustrationAppearance.from_dict(c) for c in scope.summary.get("characters", ())
             ]
-            locations = [
+            base_locations = [
                 IllustrationAppearance.from_dict(loc) for loc in scope.summary.get("locations", ())
             ]
+            raw_traits_by_key = scope.summary.get("design_traits_by_key")
+            design_traits_by_key = (
+                raw_traits_by_key if isinstance(raw_traits_by_key, Mapping) else None
+            )
+            raw_fallback_eids = scope.summary.get("base_fallback_entity_ids", ())
+            fallback_eids = (
+                tuple(str(eid) for eid in raw_fallback_eids)
+                if isinstance(raw_fallback_eids, (list, tuple))
+                else ()
+            )
+            characters, locations = _materialize_appearances_for_prompt(
+                base_characters,
+                base_locations,
+                design_traits_by_key,
+                payload.used_design_keys,
+                base_fallback_entity_ids=fallback_eids,
+            )
             try:
                 prompt_en = compose_monochrome_prompt(
                     payload.scene_composition_en,
@@ -1911,7 +2137,9 @@ class IllustrationChapter:
                     "prompt_en": prompt_en,
                     "used_fact_ids": list(dict.fromkeys(payload.used_fact_ids)),
                     "used_design_keys": list(dict.fromkeys(payload.used_design_keys)),
-                    "assumptions_ru": [a.strip() for a in payload.assumptions_ru if a.strip()],
+                    "assumptions_ru": list(
+                        filter_non_assumption_placeholders(payload.assumptions_ru)
+                    ),
                 },
             )
 

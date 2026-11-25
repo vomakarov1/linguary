@@ -33,7 +33,10 @@ from linguary.application.illustration_source import (
     IllustrationSourceSnapshot,
     SectionManifestEntry,
 )
-from linguary.application.illustration_validation import has_cyrillic
+from linguary.application.illustration_validation import (
+    find_monochrome_color_word,
+    has_cyrillic,
+)
 from linguary.application.illustrations import (
     dispatch_scope_task,
     finalize_generation_state_in_tx,
@@ -128,21 +131,68 @@ _HONORIFICS = frozenset(
         "тетя",
     }
 )
-_BLOCKING_STOPWORDS = frozenset({"the", "of", "and", "in", "at", "on", "to", "a", "an", "de", "la", "le"})
+_BLOCKING_STOPWORDS = frozenset(
+    {
+        "the",
+        "of",
+        "and",
+        "in",
+        "at",
+        "on",
+        "to",
+        "a",
+        "an",
+        "de",
+        "la",
+        "le",
+        "son",
+        "daughter",
+        "mother",
+        "father",
+        "brother",
+        "sister",
+        "wife",
+        "husband",
+        "man",
+        "woman",
+        "boy",
+        "girl",
+        "child",
+        "baby",
+        "person",
+        "people",
+        "house",
+        "room",
+        "street",
+        "road",
+        "door",
+        "building",
+        "place",
+        "сын",
+        "дочь",
+        "мать",
+        "отец",
+        "брат",
+        "сестра",
+        "жена",
+        "муж",
+        "мужчина",
+        "женщина",
+        "мальчик",
+        "девочка",
+        "ребёнок",
+        "ребенок",
+        "человек",
+        "дом",
+        "комната",
+        "улица",
+        "дорога",
+        "дверь",
+        "здание",
+        "место",
+    }
+)
 _MAX_EXTRACT_UNITS_PER_PAGE = 64
-_MONOCHROME_COLOR_EN_RE = re.compile(
-    r"\b(red|crimson|scarlet|green|emerald|blue|azure|cobalt|yellow|amber|gold|golden|"
-    r"orange|purple|violet|pink|magenta|teal|turquoise|beige|brown|chestnut|auburn|"
-    r"maroon|olive|khaki|indigo|cyan|lavender|burgundy|sepia|bronze|copper|cream|ochre)\b",
-    re.IGNORECASE,
-)
-_MONOCHROME_COLOR_RU_RE = re.compile(
-    r"\b(красн\w*|зелён\w*|зелен\w*|син\w*|голуб\w*|жёлт\w*|желт\w*|оранжев\w*|"
-    r"фиолетов\w*|розов\w*|бежев\w*|коричнев\w*|рыж\w*|изумруд\w*|багров\w*|"
-    r"бирюзов\w*|золот\w*|пурпур\w*|бордов\w*|лилов\w*|бронзов\w*|медн\w*|"
-    r"кремов\w*|охр(?:а|ы|е|у|ой|ист\w*|ов\w*))\b",
-    re.IGNORECASE,
-)
 
 
 def _default_id() -> str:
@@ -152,6 +202,16 @@ def _default_id() -> str:
 def _strip_honorifics(normalized: str) -> str:
     tokens = [tok for tok in normalized.split() if tok not in _HONORIFICS]
     return " ".join(tokens)
+
+
+def _add_token_blocking_keys(keys: set[str], kind: str, stripped: str) -> None:
+    for tok in stripped.split():
+        if len(tok) >= 3 and tok not in _BLOCKING_STOPWORDS:
+            keys.add(f"{kind}:tok:{tok}")
+            if len(tok) >= 4 and tok.endswith("s") and not tok.endswith(("ss", "us", "is")):
+                singular = tok[:-1]
+                if len(singular) >= 3 and singular not in _BLOCKING_STOPWORDS:
+                    keys.add(f"{kind}:tok:{singular}")
 
 
 def _blocking_keys_for_mention(
@@ -168,9 +228,7 @@ def _blocking_keys_for_mention(
         stripped = _strip_honorifics(norm)
         if stripped:
             keys.add(f"{kind}:stripped:{stripped}")
-        for tok in stripped.split():
-            if len(tok) >= 3 and tok not in _BLOCKING_STOPWORDS:
-                keys.add(f"{kind}:tok:{tok}")
+        _add_token_blocking_keys(keys, kind, stripped)
         gkey = glossary_links.get(glossary_key(str(mention["name"])))
         if gkey:
             keys.add(f"{kind}:gloss:{gkey}")
@@ -182,9 +240,7 @@ def _blocking_keys_for_mention(
             hint_stripped = _strip_honorifics(hint_norm)
             if hint_stripped:
                 keys.add(f"{kind}:stripped:{hint_stripped}")
-            for tok in hint_stripped.split():
-                if len(tok) >= 3 and tok not in _BLOCKING_STOPWORDS:
-                    keys.add(f"{kind}:tok:{tok}")
+            _add_token_blocking_keys(keys, kind, hint_stripped)
             gkey_hint = glossary_links.get(glossary_key(hint))
             if gkey_hint:
                 keys.add(f"{kind}:gloss:{gkey_hint}")
@@ -526,8 +582,10 @@ def _build_bounded_design_input(
 ) -> dict[str, Any]:
     """Deterministically bound entity facts for DESIGN to `policy.initial_target_bytes`.
 
-    Prioritizes deduplicated `permanent` facts sorted by `(position_key, fact_id)`, then
-    `state_change`, then `episodic`, recording `omitted_episodic_count` and `omitted_fact_count`.
+    Sends ONLY deduplicated `permanent` facts sorted by `(position_key, fact_id)` whenever
+    any exist (counting omitted non-permanent facts in `omitted_episodic_count` /
+    `omitted_fact_count`). Only when an entity has no permanent facts at all does it pass
+    bounded non-permanent context with `"non_permanent_context_only": True`.
     """
     entity_kind = str(entity["entity_kind"])
     allowed_traits = list(closed_traits_for_kind(entity_kind))
@@ -546,15 +604,26 @@ def _build_bounded_design_input(
         seen_desc.add(sig)
         deduped.append(f)
 
+    permanent_facts = [f for f in deduped if str(f["temporal_scope"]) == "permanent"]
+    non_permanent_facts = [f for f in deduped if str(f["temporal_scope"]) != "permanent"]
+    non_permanent_context_only = bool(not permanent_facts and non_permanent_facts)
+
     priority = {"permanent": 0, "state_change": 1, "episodic": 2}
-    ordered = sorted(
-        deduped,
-        key=lambda x: (
-            priority.get(str(x["temporal_scope"]), 3),
-            str(x["position_key"]),
-            str(x["fact_id"]),
-        ),
-    )
+    if permanent_facts:
+        ordered = permanent_facts
+        omitted_episodic = len(non_permanent_facts)
+        omitted_total = len(non_permanent_facts)
+    else:
+        ordered = sorted(
+            non_permanent_facts,
+            key=lambda x: (
+                priority.get(str(x["temporal_scope"]), 3),
+                str(x["position_key"]),
+                str(x["fact_id"]),
+            ),
+        )
+        omitted_episodic = 0
+        omitted_total = 0
 
     def _compact_fact(f: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -566,8 +635,6 @@ def _build_bounded_design_input(
         }
 
     included: list[dict[str, Any]] = []
-    omitted_episodic = 0
-    omitted_total = 0
 
     def _make_payload(
         cur_facts: Sequence[Mapping[str, Any]],
@@ -580,6 +647,7 @@ def _build_bounded_design_input(
             "entity_kind": entity_kind,
             "style": style,
             "allowed_traits": allowed_traits,
+            "non_permanent_context_only": non_permanent_context_only,
             "facts": list(cur_facts),
             "omitted_episodic_count": omit_ep,
             "omitted_fact_count": omit_all,
@@ -619,6 +687,19 @@ def _build_design_scope_spec(
 ) -> IllustrationScopeSpec:
     entity_id = str(entity["entity_id"])
     entity_kind = str(entity["entity_kind"])
+    raw_aliases = entity.get("aliases", ())
+    alias_items = (
+        list(raw_aliases)
+        if isinstance(raw_aliases, (list, tuple, set))
+        else []
+    )
+    entity_names = list(
+        dict.fromkeys(
+            str(n).strip()
+            for n in [entity.get("canonical_name"), *alias_items]
+            if n is not None and str(n).strip()
+        )
+    )
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.DESIGN.value,
@@ -634,6 +715,7 @@ def _build_design_scope_spec(
         "is_composite": False,
         "entity_id": entity_id,
         "entity_kind": entity_kind,
+        "entity_names": entity_names,
         "style": revision.settings.style,
         "allowed_traits": list(closed_traits_for_kind(entity_kind)),
         "request_input": thaw(request_input),
@@ -1577,6 +1659,19 @@ class IllustrationReference:
         seen_traits: set[str] = set()
         traits: list[dict[str, Any]] = []
         style = str(scope.summary.get("style", ILLUSTRATION_STYLE_MONOCHROME_INK))
+        raw_entity_names = scope.summary.get("entity_names")
+        if isinstance(raw_entity_names, (list, tuple)):
+            entity_names = [
+                str(n).strip() for n in raw_entity_names if n is not None and str(n).strip()
+            ]
+        else:
+            entity_names = []
+        if not entity_names:
+            fallback_name = scope.summary.get("canonical_name")
+            if not fallback_name and isinstance(scope.summary.get("request_input"), Mapping):
+                fallback_name = scope.summary["request_input"].get("canonical_name")
+            if fallback_name is not None and str(fallback_name).strip():
+                entity_names = [str(fallback_name).strip()]
         for item in dto.traits:
             if item.trait not in allowed_traits:
                 return _ValidationResult(
@@ -1596,23 +1691,28 @@ class IllustrationReference:
                         "на английском языке без кириллицы"
                     ),
                 )
-            if (
-                style == ILLUSTRATION_STYLE_MONOCHROME_INK
-                and item.trait == "palette_value"
-                and (
-                    _MONOCHROME_COLOR_EN_RE.search(item.description_en)
-                    or _MONOCHROME_COLOR_EN_RE.search(item.description_ru)
-                    or _MONOCHROME_COLOR_RU_RE.search(item.description_ru)
-                    or _MONOCHROME_COLOR_RU_RE.search(item.description_en)
+            if style == ILLUSTRATION_STYLE_MONOCHROME_INK:
+                strict_palette = item.trait == "palette_value"
+                color_word = (
+                    find_monochrome_color_word(
+                        item.description_en,
+                        allowed_names=entity_names,
+                        strict_palette=strict_palette,
+                    )
+                    or find_monochrome_color_word(
+                        item.description_ru,
+                        allowed_names=entity_names,
+                        strict_palette=strict_palette,
+                    )
                 )
-            ):
-                return _ValidationResult(
-                    ok=False,
-                    repair_reason=(
-                        "для стиля monochrome_ink черта palette_value должна описывать "
-                        "только тональность, контраст и штриховку без названий цветов"
-                    ),
-                )
+                if color_word is not None:
+                    return _ValidationResult(
+                        ok=False,
+                        repair_reason=(
+                            f"для стиля monochrome_ink черта {item.trait} должна описывать "
+                            "только тональность, контраст, фактуру и штриховку без названий цветов"
+                        ),
+                    )
             seen_traits.add(item.trait)
             traits.append(
                 {
@@ -2471,7 +2571,8 @@ _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "eyes": re.compile(
-        r"\b(?:eye|eyes|gaze)\b|\b(?:глаз|взгляд)",
+        r"\b(?:eye|eyes|gaze|sleep|asleep|sleeping|awake|woke|waking|closed|opened|open\s+eyes)\b"
+        r"|\b(?:глаз|взгляд|спящ|во\s+сне|закрыт\w*\s+глаз|проснул)",
         re.IGNORECASE,
     ),
     "build": re.compile(
@@ -2485,8 +2586,10 @@ _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "attire_default": re.compile(
-        r"\b(?:coat|dress|cloak|hat|robe|robes|uniform|suit|boots|trousers|jacket|shirt|tie|scarf)\b"
-        r"|\b(?:плать|плащ|пальт|шляп|костюм|куртк|галстук|шарф|рубаш|манти|сапог)",
+        r"\b(?:coat|dress|cloak|hat|robe|robes|uniform|suit|boots|trousers|jacket|shirt|tie|scarf|"
+        r"blanket|blankets|swaddl\w*|wrapped|shawl|pajamas|pyjamas|nightgown)\b"
+        r"|\b(?:плать|плащ|пальт|шляп|костюм|куртк|галстук|шарф|рубаш|манти|сапог|"
+        r"одеял|пелёнк|пеленк|свёртк|свертк|пижам)",
         re.IGNORECASE,
     ),
     "distinctive_mark": re.compile(
@@ -2503,32 +2606,111 @@ _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "atmosphere": re.compile(
-        r"\b(?:dim|mist|fog|warm|gloomy)\b|\b(?:туман|мрачн|светл|уютн)",
+        r"\b(?:dim|mist|fog|warm|gloomy|lamp|lamps|lantern|lanterns|streetlamp|streetlamps|"
+        r"lit|unlit|extinguished|darkness|night|dusk|dawn)\b"
+        r"|\b(?:туман|мрачн|светл|уютн|фонар|темнот|ночн|сумерк|освещен)",
         re.IGNORECASE,
     ),
 }
+
+_ECHO_STOPWORDS_EXACT = frozenset(
+    {
+        "short",
+        "long",
+        "dark",
+        "light",
+        "pale",
+        "tall",
+        "small",
+        "large",
+        "heavy",
+        "simple",
+        "plain",
+        "worn",
+        "thick",
+        "thin",
+        "average",
+        "neutral",
+        "figure",
+        "person",
+        "house",
+        "room",
+        "street",
+        "wearing",
+        "dressed",
+        "looking",
+    }
+)
+_ECHO_STOPWORDS_RU_PREFIXES: tuple[str, ...] = (
+    "коротк",
+    "длинн",
+    "тёмн",
+    "темн",
+    "светл",
+    "высок",
+    "прост",
+    "обычн",
+    "нейтральн",
+)
+_ECHO_TOKEN_RE = re.compile(r"[a-zа-яё]{5,}")
+
+
+def _echo_content_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for tok in _ECHO_TOKEN_RE.findall(text.casefold()):
+        if tok in _ECHO_STOPWORDS_EXACT or tok.startswith(_ECHO_STOPWORDS_RU_PREFIXES):
+            continue
+        tokens.add(tok)
+    return tokens
 
 
 def resolve_appearance_with_design_fallback(
     explicit_facts: Sequence[Mapping[str, Any]],
     design_traits: Sequence[Mapping[str, Any]],
+    *,
+    excluded_facts: Sequence[Mapping[str, Any]] = (),
+    compact_description_en: str = "",
+    compact_description_ru: str = "",
 ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
     """Combine explicit text facts with design fallback traits; explicit facts always win.
 
-    Any design trait whose visual category is already covered by an explicit fact is suppressed
-    so neutral design assumptions never override explicit book facts.
+    Any design trait whose visual category is covered by active facts/compact descriptions,
+    or whose category/lexical content echoes facts explicitly excluded by FACT_SCOPE (except
+    `palette_value`), is suppressed so stale design assumptions never override chronology.
     """
     explicit_list = [thaw(f) for f in explicit_facts]
     explicit_blob = " ".join(
         f"{f.get('description_en', '')} {f.get('description_ru', '')}"
         for f in explicit_list
     )
+    active_blob = " ".join(
+        part
+        for part in (explicit_blob, compact_description_en, compact_description_ru)
+        if part and part.strip()
+    )
+    excluded_blob = " ".join(
+        f"{f.get('description_en', '')} {f.get('description_ru', '')}"
+        for f in excluded_facts
+    )
+    has_excluded = bool(excluded_blob.strip())
+    active_echo_tokens = _echo_content_tokens(active_blob) if has_excluded else set()
+    excluded_echo_tokens = _echo_content_tokens(excluded_blob) if has_excluded else set()
+
     kept_design: list[dict[str, Any]] = []
     for trait_obj in design_traits:
         trait_name = str(trait_obj.get("trait", ""))
         pattern = _TRAIT_PATTERNS.get(trait_name)
-        if pattern is not None and pattern.search(explicit_blob):
+        if pattern is not None and pattern.search(active_blob):
             continue
+        if trait_name != "palette_value" and has_excluded:
+            if pattern is not None and pattern.search(excluded_blob):
+                continue
+            trait_tokens = _echo_content_tokens(
+                f"{trait_obj.get('description_en', '')} {trait_obj.get('description_ru', '')}"
+            )
+            echo_hits = (trait_tokens & excluded_echo_tokens) - active_echo_tokens
+            if len(echo_hits) >= 2:
+                continue
         kept_design.append(thaw(trait_obj))
     return tuple(explicit_list), tuple(kept_design)
 

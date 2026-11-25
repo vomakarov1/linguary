@@ -251,7 +251,7 @@ def compute_chapter_fingerprint(
     """Content-addressed fingerprint for one chapter's illustration prompts (`ALG-01`)."""
     return canonical_sha(
         {
-            "kind": "illustration_chapter_v1",
+            "kind": "illustration_chapter_v2",
             "registry_sha256": registry_sha256,
             "section_id": entry.section_id,
             "block_digests": dict(entry.block_digests),
