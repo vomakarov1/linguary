@@ -278,7 +278,9 @@ def validate_note_sources(
                     target_text, note.translated_excerpt
                 ):
                     raise _validation_error(
-                        f'перевод цитаты языковой заметки отсутствует в переводе блока ({result.block_id})',
+                        f'перевод цитаты языковой заметки отсутствует в переводе блока ({result.block_id}): '
+                        'копируй translated_excerpt дословно из получившегося translated_text '
+                        '(а при разрыве фраз в русском порядке слов разделяй части через ...)',
                         rule_code='note_translated_excerpt_missing',
                         block_ids=(result.block_id,),
                     )

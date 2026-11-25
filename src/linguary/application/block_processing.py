@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace, asdict
@@ -39,7 +40,10 @@ from linguary.application.retry_policy import (
 )
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
-from linguary.application.token_budget import recommended_unit_max_completion_tokens
+from linguary.application.token_budget import (
+    IMPLICIT_REASONING_MIN_TOKENS,
+    recommended_unit_max_completion_tokens,
+)
 from linguary.application.translation_policy import (
     require_policy,
     TranslationPolicyUnavailable,
@@ -126,6 +130,19 @@ class TranslationCall:
             f"expected_bindings_{id(self)}", default=None
         )
         self._accepted_call_ids: set[str] = set()
+        self._implicit_reasoning_lock = threading.Lock()
+        self._implicit_reasoning_floor: int = 0
+
+    def _get_implicit_reasoning_floor(self) -> int:
+        with self._implicit_reasoning_lock:
+            return self._implicit_reasoning_floor
+
+    def _raise_implicit_reasoning_floor(self, candidate: int) -> None:
+        if candidate <= 0:
+            return
+        with self._implicit_reasoning_lock:
+            if candidate > self._implicit_reasoning_floor:
+                self._implicit_reasoning_floor = candidate
 
     async def request(
         self,
@@ -223,6 +240,7 @@ class TranslationCall:
         )
         attempts = 0
         capacity_retries = 0
+        implicit_token_escalated = False
         last_error: Exception | None = None
         while True:
             attempts += 1
@@ -230,6 +248,8 @@ class TranslationCall:
             physical_context = None
             attempt_root_generation = None
             configured_max_output_tokens: int | None = None
+            configured_reasoning_effort: str | None = None
+            configured_reasoning_max_tokens: int | None = None
             try:
                 if recovery is not None:
                     from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
@@ -287,6 +307,12 @@ class TranslationCall:
                         raw_max = raw_params.get("max_output_tokens")
                         if type(raw_max) is int and raw_max > 0:
                             configured_max_output_tokens = raw_max
+                        raw_effort = raw_params.get("reasoning_effort")
+                        if isinstance(raw_effort, str) and raw_effort.strip():
+                            configured_reasoning_effort = raw_effort.strip().lower()
+                        raw_reasoning_max = raw_params.get("reasoning_max_tokens")
+                        if type(raw_reasoning_max) is int:
+                            configured_reasoning_max_tokens = raw_reasoning_max
                 if (
                     loaded_conditions is not None
                     and unit is not None
@@ -299,9 +325,13 @@ class TranslationCall:
                         max_output_tokens=llm_params.get("max_output_tokens"),
                         reasoning_effort=llm_params.get("reasoning_effort"),
                         reasoning_max_tokens=llm_params.get("reasoning_max_tokens"),
+                        implicit_reasoning_tokens=self._get_implicit_reasoning_floor(),
                     )
                     request = replace(request, max_completion_tokens=limit)
                 response = await self._llm_client.generate(request)
+                resp_reasoning = getattr(getattr(response, "usage", None), "reasoning_tokens", None)
+                if type(resp_reasoning) is int and resp_reasoning > 0:
+                    self._raise_implicit_reasoning_floor(resp_reasoning)
                 if physical_context is not None:
                     with self._unit_of_work.transaction() as transaction:
                         owns = transaction.work.owns_recovery_attempt(physical_context.attempt_id)
@@ -477,11 +507,43 @@ class TranslationCall:
                         and getattr(err_violation, "rule_code", None) == "provider_truncated"
                     )
                 )
+                if is_truncated:
+                    err_reasoning = getattr(getattr(error, "usage", None), "reasoning_tokens", None)
+                    observed_reasoning = (
+                        err_reasoning if type(err_reasoning) is int and err_reasoning > 0 else 0
+                    )
+                    if observed_reasoning > 0:
+                        self._raise_implicit_reasoning_floor(observed_reasoning)
+                    if configured_reasoning_effort is None and configured_reasoning_max_tokens is None:
+                        self._raise_implicit_reasoning_floor(
+                            max(
+                                observed_reasoning,
+                                request.max_completion_tokens or IMPLICIT_REASONING_MIN_TOKENS,
+                            )
+                        )
+                escalated_limit: int | None = None
+                used_implicit_escalation = False
+                if is_truncated and request.max_completion_tokens is not None:
+                    if configured_max_output_tokens is not None:
+                        escalated_limit = configured_max_output_tokens
+                    elif (
+                        not implicit_token_escalated
+                        and unit is not None
+                        and configured_reasoning_effort is None
+                        and configured_reasoning_max_tokens is None
+                    ):
+                        escalated_limit = recommended_unit_max_completion_tokens(
+                            sum(len(item.block.text) for item in unit.items),
+                            max_output_tokens=None,
+                            reasoning_effort=None,
+                            reasoning_max_tokens=None,
+                            implicit_reasoning_tokens=self._get_implicit_reasoning_floor(),
+                        )
+                        used_implicit_escalation = True
                 can_escalate_tokens = (
-                    is_truncated
-                    and configured_max_output_tokens is not None
+                    escalated_limit is not None
                     and request.max_completion_tokens is not None
-                    and request.max_completion_tokens < configured_max_output_tokens
+                    and request.max_completion_tokens < escalated_limit
                 )
                 outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
@@ -527,7 +589,8 @@ class TranslationCall:
                         if was_stale_gen and existing_reason != 'unknown_outcome':
                             raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
-                    if can_escalate_tokens:
+                    can_escalate_recovery = can_escalate_tokens and not used_implicit_escalation
+                    if can_escalate_recovery:
                         stale_reason = None
                         within_budget = False
                         with self._unit_of_work.transaction() as transaction:
@@ -572,9 +635,11 @@ class TranslationCall:
                                 stale_reason, recovery[0], original_error=error
                             ) from error
                         if within_budget:
+                            if used_implicit_escalation:
+                                implicit_token_escalated = True
                             request = replace(
                                 request,
-                                max_completion_tokens=configured_max_output_tokens,
+                                max_completion_tokens=escalated_limit,
                                 attempt=request.attempt + 1,
                             )
                             last_error = error
@@ -593,9 +658,11 @@ class TranslationCall:
                     and can_escalate_tokens
                     and attempts < self._retry_policy.max_attempts
                 ):
+                    if used_implicit_escalation:
+                        implicit_token_escalated = True
                     request = replace(
                         request,
-                        max_completion_tokens=configured_max_output_tokens,
+                        max_completion_tokens=escalated_limit,
                         attempt=request.attempt + 1,
                     )
                     last_error = error

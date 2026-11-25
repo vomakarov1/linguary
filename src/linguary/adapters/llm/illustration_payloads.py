@@ -164,7 +164,7 @@ class IllustrationDesignTraitSchema(_IllustrationStrictBase):
     ]
     description_ru: str = Field(min_length=1, max_length=_MAX_STR)
     description_en: str = Field(min_length=1, max_length=_MAX_STR)
-    assumption_ru: str = Field(min_length=1, max_length=_MAX_STR)
+    assumption_ru: str = Field(default="", max_length=_MAX_STR)
 
 
 class IllustrationDesignSchema(_VersionedIllustrationBase):

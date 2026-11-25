@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,11 +27,208 @@ MONOCHROME_INK_DIRECTIVE = (
 _BLOCK_ALIAS_RE = re.compile(r"^b\d+$")
 _SEGMENT_ID_RE = re.compile(r"#s\d+$")
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+_MONOCHROME_COLOR_EN_RE = re.compile(
+    r"\b(red|crimson|scarlet|green|emerald|blue|azure|cobalt|yellow|amber|gold|golden|"
+    r"orange|purple|violet|pink|magenta|teal|turquoise|beige|brown|chestnut|auburn|"
+    r"maroon|olive|khaki|indigo|cyan|lavender|burgundy|sepia|bronze|copper|cream|ochre)\b",
+    re.IGNORECASE,
+)
+_MONOCHROME_COLOR_RU_RE = re.compile(
+    r"\b(красн\w*|зелён\w*|зелен\w*|син\w*|голуб\w*|жёлт\w*|желт\w*|оранжев\w*|"
+    r"фиолетов\w*|розов\w*|бежев\w*|коричнев\w*|рыж\w*|изумруд\w*|багров\w*|"
+    r"бирюзов\w*|золот\w*|пурпур\w*|бордов\w*|лилов\w*|бронзов\w*|медн\w*|"
+    r"кремов\w*|охр(?:а|ы|е|у|ой|ист\w*|ов\w*))\b",
+    re.IGNORECASE,
+)
+_MONOCHROME_CHROMATIC_EN_RE = re.compile(
+    r"\b(red|crimson|scarlet|green|emerald|blue|azure|cobalt|yellow|amber|gold|golden|"
+    r"orange|purple|violet|pink|magenta|teal|turquoise|beige|brown|chestnut|auburn|"
+    r"maroon|olive|khaki|indigo|cyan|lavender|burgundy|sepia|cream|ochre)\b",
+    re.IGNORECASE,
+)
+_MONOCHROME_CHROMATIC_RU_RE = re.compile(
+    r"\b(красн\w*|зелён\w*|зелен\w*|син\w*|голуб\w*|жёлт\w*|желт\w*|оранжев\w*|"
+    r"фиолетов\w*|розов\w*|бежев\w*|коричнев\w*|рыж\w*|изумруд\w*|багров\w*|"
+    r"бирюзов\w*|золот\w*|пурпур\w*|бордов\w*|лилов\w*|"
+    r"кремов\w*|охр(?:а|ы|е|у|ой|ист\w*|ов\w*))\b",
+    re.IGNORECASE,
+)
+_MONOCHROME_OBJECT_PHRASES_RE = re.compile(
+    r"\b(?:ice\s+cream|whipped\s+cream|sour\s+cream|heavy\s+cream|"
+    r"olive\s+(?:tree|trees|branch|branches|oil|grove|groves)|"
+    r"chestnut\s+(?:tree|trees)|"
+    r"orange\s+(?:tree|trees|grove|groves|juice))\b",
+    re.IGNORECASE,
+)
+_ASSUMPTION_PLACEHOLDER_RE = re.compile(
+    r"^(?:"
+    r"[-–—]+|"
+    r"допущени[ейя]\s+(?:нет|отсутству(?:ет|ют)|не\s+требу[ею]тся|не\s+нужн[оы])\b.*|"
+    r"нет\s+(?:визуальных\s+|дополнительных\s+)?допущений\b.*|"
+    r"без\s+(?:визуальных\s+|дополнительных\s+)?допущений\b.*|"
+    r"нет(?:[\s.,;:!?–—-]*$|[\s]*[:–—,-]\s*.*)|"
+    r"не\s+требу[ею]тся(?:[\s.,;:!?–—-]*$|[\s]*[:–—,-]\s*.*)|"
+    r"отсутству(?:ет|ют)(?:[\s.,;:!?–—-]*$|[\s]*[:–—,-]\s*.*)|"
+    r"no\s+(?:visual\s+|additional\s+)?assumptions?\b.*|"
+    r"none(?:[\s.,;:!?–—-]*$|[\s]*[:–—,-]\s*.*|\s+(?:needed|required)\b.*)|"
+    r"n/?a\.?"
+    r")$",
+    re.IGNORECASE,
+)
+_CLAUSE_STOPWORDS = frozenset(
+    {
+        "with",
+        "from",
+        "that",
+        "this",
+        "have",
+        "been",
+        "into",
+        "over",
+        "near",
+        "very",
+        "wear",
+        "wearing",
+        "made",
+        "like",
+    }
+)
 
 
 def has_cyrillic(text: str) -> bool:
     """Return True if the string contains any Cyrillic character."""
     return bool(_CYRILLIC_RE.search(text))
+
+
+def dedupe_texts(items: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate strings by whitespace/punctuation-insensitive casefolded key preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in items:
+        cleaned = " ".join(str(raw).split()).strip()
+        if not cleaned:
+            continue
+        key = cleaned.rstrip(".;, ").casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return tuple(result)
+
+
+def filter_non_assumption_placeholders(items: Sequence[str]) -> tuple[str, ...]:
+    """Drop empty strings and meta-placeholders like 'Допущений нет.', then deduplicate."""
+    kept: list[str] = []
+    for raw in items:
+        cleaned = " ".join(str(raw).split()).strip()
+        if not cleaned:
+            continue
+        if _ASSUMPTION_PLACEHOLDER_RE.match(cleaned):
+            continue
+        kept.append(cleaned)
+    return dedupe_texts(kept)
+
+
+def find_monochrome_color_word(
+    text: str,
+    *,
+    allowed_names: Sequence[str] = (),
+    strict_palette: bool = False,
+) -> str | None:
+    """Find the first disallowed chromatic color word in `text` for `monochrome_ink`.
+
+    Masks full proper names from `allowed_names` case-insensitively on word boundaries and
+    individual capitalized >=3-char name tokens case-sensitively so names like *Mr Brown* or
+    *The Woman in Green* pass without ever permitting lowercase *brown coat* or *green dress*.
+    When `strict_palette=False`, excludes metallic materials (`bronze`/`copper`) and masks
+    common physical object idioms (`ice cream`, `olive tree`, `chestnut tree`, `orange tree`).
+    """
+    if not text or not text.strip():
+        return None
+    masked = text
+    cleaned_names = sorted(
+        {
+            " ".join(str(n).split()).strip()
+            for n in allowed_names
+            if n is not None and str(n).strip()
+        },
+        key=len,
+        reverse=True,
+    )
+    for name in cleaned_names:
+        parts = name.split()
+        if len(parts) < 2:
+            continue
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(p) for p in parts) + r"(?!\w)"
+        masked = re.sub(pattern, " ", masked, flags=re.IGNORECASE)
+
+    cap_tokens: set[str] = set()
+    for name in cleaned_names:
+        for tok in re.findall(r"[^\W\d_]+", name):
+            if len(tok) >= 3 and tok[0].isupper():
+                cap_tokens.add(tok)
+    for tok in sorted(cap_tokens, key=len, reverse=True):
+        variants = {tok, tok.upper()}
+        pattern = r"(?<!\w)(?:" + "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True)) + r")(?!\w)"
+        masked = re.sub(pattern, " ", masked)
+
+    if not strict_palette:
+        masked = _MONOCHROME_OBJECT_PHRASES_RE.sub(" ", masked)
+        en_re = _MONOCHROME_CHROMATIC_EN_RE
+        ru_re = _MONOCHROME_CHROMATIC_RU_RE
+    else:
+        en_re = _MONOCHROME_COLOR_EN_RE
+        ru_re = _MONOCHROME_COLOR_RU_RE
+
+    match = en_re.search(masked) or ru_re.search(masked)
+    return match.group(0) if match is not None else None
+
+
+def _clause_tokens(text: str) -> list[str]:
+    return [
+        tok
+        for tok in re.findall(r"[a-z]{4,}", text.casefold())
+        if tok not in _CLAUSE_STOPWORDS
+    ]
+
+
+def _token_matches_ref(tok: str, ref_tokens: set[str]) -> bool:
+    if tok in ref_tokens:
+        return True
+    if len(tok) >= 4 and (f"{tok}s" in ref_tokens or f"{tok}es" in ref_tokens):
+        return True
+    if len(tok) >= 5:
+        if tok.endswith("s") and tok[:-1] in ref_tokens:
+            return True
+        if tok.endswith("es") and tok[:-2] in ref_tokens:
+            return True
+    return False
+
+
+def _clause_covered_in_text(clause: str, reference_text: str) -> bool:
+    norm_clause = " ".join(clause.split()).strip().casefold()
+    if not norm_clause:
+        return True
+    norm_ref = " ".join(reference_text.split()).strip().casefold()
+    left_b = r"(?<!\w)" if norm_clause[0].isalnum() else ""
+    right_b = r"(?!\w)" if norm_clause[-1].isalnum() else ""
+    if re.search(f"{left_b}{re.escape(norm_clause)}{right_b}", norm_ref) is not None:
+        return True
+    tokens = _clause_tokens(norm_clause)
+    if len(tokens) < 2:
+        return False
+    ref_tokens = set(_clause_tokens(norm_ref))
+    return all(_token_matches_ref(tok, ref_tokens) for tok in tokens)
+
+
+def _appearance_reflected_in_prompt(desc_clean: str, prompt_lower: str) -> bool:
+    if desc_clean.casefold() in prompt_lower:
+        return True
+    clauses = [" ".join(piece.split()).strip() for piece in desc_clean.split(";")]
+    clauses = [c for c in clauses if c]
+    if not clauses:
+        return False
+    return all(_clause_covered_in_text(clause, prompt_lower) for clause in clauses)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,10 +409,20 @@ def compose_monochrome_prompt(
                 IllustrationReasonCode.MODEL_OUTPUT_INVALID,
                 "применимый образ обязан содержать непустое description_en",
             )
-        if name and not has_cyrillic(name):
-            appearance_lines.append(f"{name}: {desc_clean}")
-        else:
-            appearance_lines.append(desc_clean)
+        clauses = [" ".join(piece.split()).strip() for piece in desc_clean.split(";")]
+        clauses = [c for c in clauses if c]
+        if not clauses:
+            raise IllustrationValidationError(
+                IllustrationReasonCode.MODEL_OUTPUT_INVALID,
+                "применимый образ обязан содержать непустое description_en",
+            )
+        remaining_clauses = [c for c in clauses if not _clause_covered_in_text(c, comp)]
+        if remaining_clauses:
+            rem_text = "; ".join(remaining_clauses)
+            if name and not has_cyrillic(name):
+                appearance_lines.append(f"{name}: {rem_text}")
+            else:
+                appearance_lines.append(rem_text)
 
     parts = [comp]
     if appearance_lines:
@@ -383,7 +590,7 @@ def validate_moment(
                 IllustrationReasonCode.MODEL_OUTPUT_INVALID,
                 f"у образа {app.entity_id} отсутствует description_en",
             )
-        if desc_clean.casefold() not in prompt_lower:
+        if not _appearance_reflected_in_prompt(desc_clean, prompt_lower):
             raise IllustrationValidationError(
                 IllustrationReasonCode.MODEL_OUTPUT_INVALID,
                 f"prompt_en не содержит текстовое описание образа {app.entity_id} (одних ID недостаточно)",
@@ -424,6 +631,9 @@ __all__ = [
     "IllustrationAppearance",
     "ValidatedMoment",
     "compose_monochrome_prompt",
+    "dedupe_texts",
+    "filter_non_assumption_placeholders",
+    "find_monochrome_color_word",
     "has_cyrillic",
     "resolve_insert_after_block_id",
     "validate_moment",

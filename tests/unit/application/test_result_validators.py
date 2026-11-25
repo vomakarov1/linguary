@@ -3271,6 +3271,366 @@ def test_suggested_glossary_warnings_calque_person_restriction_and_v3_union_wiri
     assert not any("Х. Поттер" in m for m in v2_warnings)
 
 
+def test_truncation_supports_british_and_american_multi_segment_direct_speech() -> None:
+    """WP-1.1: British/American multi-segment quotes pass when balanced, reject when left unclosed."""
+    # 1. b18 pattern: mid-segment British opening after `: `, continued across segments, closed at end.
+    unit_b18, block_b18 = _segmented(
+        (
+            "He stood up.",
+            " He looked around.",
+            " He cleared his throat.",
+            " Then he said: ‘First sentence.",
+            " Middle sentence stays inside the speech.",
+            " Last sentence closes it.’",
+        ),
+        (
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+        ),
+    )
+    ok_b18 = _segmented_response(
+        block_b18,
+        (
+            (4, "Затем он сказал: «Первое предложение."),
+            (5, "Среднее предложение остаётся внутри речи."),
+            (6, "Последнее предложение её закрывает»."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert validate(ok_b18, unit=unit_b18)
+
+    # 2. b25 pattern: multiple British speech turns spanning segments.
+    from linguary.application.validators.truncation import truncation_diagnostic
+
+    unit_b25, block_b25 = _segmented(
+        (
+            "He cried: ‘Wait a minute. Do you hear that?",
+            " Something is moving outside.’",
+            " She whispered: ‘Stay back, it is close.",
+            " Do not open the door.’",
+        ),
+        (
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+        ),
+    )
+    ok_b25 = _segmented_response(
+        block_b25,
+        (
+            (1, "Он крикнул: «Подожди минутку. Ты слышишь это?"),
+            (2, "Снаружи что-то движется»."),
+            (3, "Она прошептала: «Отойди назад, оно совсем близко."),
+            (4, "Не открывай дверь»."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert truncation_diagnostic(ok_b25, unit=unit_b25, truncated=False) is None
+    assert validate(ok_b25, unit=unit_b25)
+
+    # 2b. Mixed segmented block where mid-line British `‘` opens in TRANSLATE and closes in READ_AS_IS.
+    unit_mixed_brit, block_mixed_brit = _segmented(
+        ("Then he said: ‘First sentence.", " Easy closing.’"),
+        (BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+    )
+    ok_mixed_brit = _segmented_response(
+        block_mixed_brit,
+        ((1, "Затем он сказал: «Первое предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert truncation_diagnostic(ok_mixed_brit, unit=unit_mixed_brit, truncated=False) is None
+
+    # 3. American straight quotes across two TRANSLATE segments.
+    unit_us, block_us = _segmented(
+        ('He whispered: "Listen carefully.', ' We leave at dawn."'),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    ok_us = _segmented_response(
+        block_us,
+        (
+            (1, "Он прошептал: «Слушай внимательно."),
+            (2, "Мы уходим на рассвете»."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert validate(ok_us, unit=unit_us)
+
+    # 4. Unclosed guillemet across TRANSLATE segments when source quotes are closed -> quote_balance.
+    for unit_closed, block_closed in ((unit_us, block_us),):
+        unclosed = _segmented_response(
+            block_closed,
+            (
+                (1, "Он прошептал: «Слушай внимательно."),
+                (2, "Мы уходим на рассвете."),
+            ),
+            treatment=BlockTreatment.TRANSLATE,
+        )
+        err = rejection(unclosed, unit=unit_closed)
+        assert err.violation is not None
+        assert err.violation.rule_code == "quote_balance"
+
+    unit_brit_closed, block_brit_closed = _segmented(
+        ("He said: ‘Listen carefully.", " We leave at dawn.’"),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    unclosed_brit = _segmented_response(
+        block_brit_closed,
+        (
+            (1, "Он сказал: «Слушай внимательно."),
+            (2, "Мы уходим на рассвете."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    err_brit = rejection(unclosed_brit, unit=unit_brit_closed)
+    assert err_brit.violation is not None
+    assert err_brit.violation.rule_code == "quote_balance"
 
 
+def test_note_language_leak_allows_verbatim_multiword_source_quotes_only() -> None:
+    """WP-1.2: Verbatim >=2-word source quotes pass; single leak words and foreign phrases still fail."""
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    from linguary.application.validators.mixed_script import note_language_leak_violation
+
+    block = make_block(
+        order=0,
+        text="How very wrong he was, and it was a very, very strange day; he didn’t know.",
+    )
+    unit = make_unit((block,))
+    source_texts = {block.id: block.text}
+
+    # 1. Verbatim multi-word quote from original_excerpt / block source passes.
+    clean_payload = make_response(
+        (
+            make_block_result(
+                block,
+                translated_text="Как же сильно он ошибался, и это был очень странный день; он не знал.",
+            ),
+        ),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="How very wrong he was.",
+                note="Выражение How very wrong подчёркивает, насколько сильно он ошибался.",
+            ),
+            make_note(
+                block,
+                original_excerpt="very, very strange",
+                note="Повтор very, very strange усиливает странность происходящего.",
+            ),
+            make_note(
+                block,
+                original_excerpt="he didn’t know",
+                note="Оборот he didn't know передаёт незнание персонажа.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            clean_payload, target_language="ru", source_texts=source_texts
+        )
+        is None
+    )
+    assert validate(clean_payload, unit=unit)
+
+    # 2. Fragment assistances (empty blocks branch) also receive source_texts.
+    assist_ok = TranslationResultResponse(
+        blocks=(),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                difficulty_id="diff-1",
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Фраза How very wrong здесь усиливает удивление.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            assist_ok, target_language="ru", source_texts=source_texts
+        )
+        is None
+    )
+    assist_leak = TranslationResultResponse(
+        blocks=(),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                difficulty_id="diff-1",
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Это very важное замечание.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            assist_leak, target_language="ru", source_texts=source_texts
+        )
+        is not None
+    )
+
+    # 3. Single unmarked leak word between Cyrillic words is still rejected even if present in source.
+    single_word_payload = make_response(
+        (make_block_result(block),),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="How very wrong he was.",
+                note="Это very важный оборот в данном предложении.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            single_word_payload, target_language="ru", source_texts=source_texts
+        )
+        is not None
+    )
+    err_single = rejection(single_word_payload, unit=unit)
+    assert err_single.violation is not None
+    assert err_single.violation.rule_code == "note_language_leak"
+
+    # 4. Multi-word English phrase absent from source/original_excerpt is still rejected.
+    absent_phrase_payload = make_response(
+        (make_block_result(block),),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="How very wrong he was.",
+                note="Он был very strong man в этой сцене.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            absent_phrase_payload, target_language="ru", source_texts=source_texts
+        )
+        is not None
+    )
+
+    # 5. Word boundary check: `very wrong` must not match inside `every wrongful`.
+    boundary_block = make_block(order=0, text="Every wrongful deed was remembered.")
+    boundary_payload = make_response(
+        (make_block_result(boundary_block),),
+        language_notes=(
+            make_note(
+                boundary_block,
+                original_excerpt="Every wrongful deed",
+                note="Слова very wrong здесь не относятся к тексту.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            boundary_payload,
+            target_language="ru",
+            source_texts={boundary_block.id: boundary_block.text},
+        )
+        is not None
+    )
+
+    # 6. Cyrillic inside English quotes is still strictly rejected even with source_texts.
+    cyr_in_quote_payload = make_response(
+        (make_block_result(block),),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="How very wrong he was.",
+                note="Фраза «How very wrong он был» смешивает два языка.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            cyr_in_quote_payload, target_language="ru", source_texts=source_texts
+        )
+        is not None
+    )
+
+
+def test_validate_note_sources_translated_excerpt_error_gives_repair_guidance() -> None:
+    """WP-2: Missing translated_excerpt error keeps strict check and guides verbatim copy / ellipsis."""
+    from linguary.application.validators.content_plan import validate_note_sources
+    from linguary.domain import BlockProcessingResult, LanguageNote
+
+    result = BlockProcessingResult(
+        block_id="b1",
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Он долго смотрел на дорогу и наконец повернул домой.",
+        language_notes=(
+            LanguageNote(
+                id="ln-1",
+                block_id="b1",
+                original_excerpt="looked at the road",
+                note="Здесь описывается внимательный взгляд.",
+                translated_excerpt="поглядел на тропу",
+            ),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as exc_info:
+        validate_note_sources(
+            (result,),
+            {"b1": "He looked at the road and finally turned home."},
+            check_translated_excerpt=True,
+        )
+    assert exc_info.value.violation is not None
+    assert exc_info.value.violation.rule_code == "note_translated_excerpt_missing"
+    msg = str(exc_info.value)
+    assert "translated_excerpt" in msg
+    assert "translated_text" in msg
+    assert "..." in msg
+
+
+def test_truncation_rejects_midline_unclosed_british_quote_in_translation_and_allows_quoted_read_as_is() -> None:
+    """Review B3 & B4: reject unclosed mid-line ‘ in translation; allow [T, R(quote), T] runs."""
+    from linguary.application.validators.truncation import _unbalanced, truncation_violation
+
+    # B3: mid-line unclosed British opening quote introduced in translation MUST be rejected.
+    assert _unbalanced("Он сказал: ‘Привет.", source="He said, ‘Hello.’") == "кавычки"
+
+    # B4: two TRANSLATE slices each opening `"` separated by a quote-bearing READ_AS_IS slice.
+    unit, block = _segmented(
+        ('He said: "First.', ' Yes!"', ' She added: "Second.'),
+        (
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+        ),
+    )
+    payload = _segmented_response(
+        block,
+        (
+            (1, "Он сказал: «Первое."),
+            (3, "Она добавила: «Второе."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert truncation_violation(payload, unit=unit, truncated=False) is None
+
+
+def test_note_language_leak_apostrophe_boundary_prevents_partial_contraction_match() -> None:
+    """Review L3: `s very` must not match inside `he's very` across an apostrophe."""
+    from linguary.application.validators.mixed_script import note_language_leak_violation
+
+    block = make_block(order=0, text="He's very bold indeed.")
+    payload = make_response(
+        (make_block_result(block),),
+        language_notes=(
+            make_note(
+                block,
+                original_excerpt="He's very bold",
+                note="Здесь фрагмент s very не является целой фразой.",
+            ),
+        ),
+    )
+    assert (
+        note_language_leak_violation(
+            payload, target_language="ru", source_texts={block.id: block.text}
+        )
+        is not None
+    )
 

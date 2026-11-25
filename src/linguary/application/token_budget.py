@@ -24,6 +24,9 @@ REASONING_EFFORT_MIN_TOKENS: dict[str, int] = {
     "high": 12288,
 }
 
+#: Minimum reasoning token reserve added when hidden reasoning is detected without explicit config.
+IMPLICIT_REASONING_MIN_TOKENS = 8192
+
 _DEFAULT_MAX_FRAGMENT_BLOCKS = 160
 _TOKENS_PER_ANALYSED_BLOCK = 200
 _DEFAULT_ANALYSIS_OUTPUT_BUDGET = 32_768
@@ -106,10 +109,15 @@ def recommended_unit_max_completion_tokens(
     max_output_tokens: int | None,
     reasoning_effort: str | None,
     reasoning_max_tokens: int | None,
+    implicit_reasoning_tokens: int = 0,
 ) -> int:
     """Compute a safe `max_completion_tokens` ceiling for one translation unit."""
     visible = max(2048, int(source_chars * 1.35) + 1024)
-    effort = reasoning_effort.strip().lower() if isinstance(reasoning_effort, str) else None
+    effort = (
+        reasoning_effort.strip().lower()
+        if isinstance(reasoning_effort, str) and reasoning_effort.strip()
+        else None
+    )
     if effort is not None:
         reserve = REASONING_EFFORT_RESERVE_PCT.get(effort, 0)
         min_reasoning = REASONING_EFFORT_MIN_TOKENS.get(effort, 0)
@@ -117,6 +125,8 @@ def recommended_unit_max_completion_tokens(
         total = max(pct_total, visible + min_reasoning)
     elif reasoning_max_tokens is not None:
         total = visible + reasoning_max_tokens
+    elif implicit_reasoning_tokens > 0:
+        total = visible + max(IMPLICIT_REASONING_MIN_TOKENS, implicit_reasoning_tokens * 2)
     else:
         total = visible
     if max_output_tokens is not None:
@@ -127,6 +137,7 @@ def recommended_unit_max_completion_tokens(
 
 
 __all__ = [
+    "IMPLICIT_REASONING_MIN_TOKENS",
     "REASONING_EFFORT_MIN_TOKENS",
     "REASONING_EFFORT_RESERVE_PCT",
     "effective_output_token_budget_for",

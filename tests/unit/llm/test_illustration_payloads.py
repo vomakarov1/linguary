@@ -596,3 +596,14 @@ def test_illustration_candidates_schema_accepts_up_to_256_covered_ids_and_reject
     too_many = {**base, "covered_source_unit_ids": [f"b-{i}" for i in range(257)]}
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.ILLUSTRATION_CANDIDATES, json.dumps(too_many))
+
+
+def test_illustration_design_trait_allows_empty_assumption_ru_and_keeps_required_in_strict_schema() -> None:
+    payload = _valid_json_for(LLMResponseKind.ILLUSTRATION_DESIGN)
+    payload["traits"][0]["assumption_ru"] = ""
+    dto = parse_payload(LLMResponseKind.ILLUSTRATION_DESIGN, json.dumps(payload))
+    assert dto.traits[0].assumption_ru == ""
+
+    strict = strict_json_schema(schema_for(LLMResponseKind.ILLUSTRATION_DESIGN, contract_version=1))
+    trait_def = strict["$defs"]["IllustrationDesignTraitSchema"]
+    assert "assumption_ru" in trait_def["required"]

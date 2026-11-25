@@ -32,6 +32,7 @@ from linguary.application.illustration_chapter import (
     _select_english_name,
 )
 from linguary.application.illustration_context import (
+    _STAGE_INSTRUCTIONS,
     compact_safe_detail,
     is_context_limit_error,
     is_incompatible_route_error,
@@ -64,6 +65,8 @@ from linguary.application.illustration_source import (
 from linguary.application.illustration_validation import (
     IllustrationAppearance,
     compose_monochrome_prompt,
+    filter_non_assumption_placeholders,
+    find_monochrome_color_word,
     has_cyrillic,
 )
 from linguary.application.llm_dto import NarrativeAnalysisResponse, QuotedSceneResponse
@@ -1183,3 +1186,289 @@ async def test_composite_candidates_scope_splits_after_format_error_exhausts_rep
         )
     assert sum(s.state is IllustrationScopeState.SPLIT for s in cand_scopes) == 1
     assert sum(s.state is IllustrationScopeState.ACCEPTED and bool(s.parent_scope_id) for s in cand_scopes) == 2
+
+
+# ── WP-4 & WP-5: Monochrome color guard, excluded_facts fallback, placeholders ──
+
+
+def test_find_monochrome_color_word_profiles_and_case_sensitive_name_masking() -> None:
+    # Catches chromatic colors EN & RU
+    assert find_monochrome_color_word("bright blue eyes") == "blue"
+    assert find_monochrome_color_word("wearing a purple cloak") == "purple"
+    assert find_monochrome_color_word("lamps glow orange in fog") == "orange"
+    assert find_monochrome_color_word("длинный изумрудный плащ") == "изумрудный"
+
+    # Allows proper names (full name case-insensitive; capitalized >=3-char token case-sensitive)
+    assert find_monochrome_color_word(
+        "Mr Brown stood by the door", allowed_names=("Mr Brown",)
+    ) is None
+    assert find_monochrome_color_word(
+        "Brown stepped into the corridor", allowed_names=("Mr Brown",)
+    ) is None
+    assert find_monochrome_color_word(
+        "Violet looked up from the table", allowed_names=("Violet",)
+    ) is None
+    assert find_monochrome_color_word(
+        "Green Gables farmhouse at dusk", allowed_names=("Green Gables",)
+    ) is None
+
+    # NEVER allows lowercase color adjectives even when proper name shares the word!
+    assert find_monochrome_color_word(
+        "Mr Brown wore a brown coat", allowed_names=("Mr Brown",)
+    ) == "brown"
+    assert find_monochrome_color_word(
+        "The Woman in Green wore a green dress", allowed_names=("The Woman in Green",)
+    ) == "green"
+    # Single-word proper color names/aliases mask only capitalized tokens, never lowercase adjectives.
+    assert find_monochrome_color_word(
+        "Violet wore a violet cloak", allowed_names=("Violet",), strict_palette=False
+    ) == "violet"
+    assert find_monochrome_color_word(
+        "Mr Brown in a brown coat", allowed_names=("Mr Brown", "Brown"), strict_palette=False
+    ) == "brown"
+    assert find_monochrome_color_word(
+        "Violet wore a dark wool cloak", allowed_names=("Violet",), strict_palette=False
+    ) is None
+
+    # Achromatic words & physical object idioms pass when strict_palette=False
+    assert find_monochrome_color_word(
+        "black ink, white snow, grey mist, silver rim, pale face, dark shadow",
+        strict_palette=False,
+    ) is None
+    assert find_monochrome_color_word(
+        "a copper kettle, bronze statue, ice cream cone, olive tree, chestnut tree, orange tree",
+        strict_palette=False,
+    ) is None
+
+    # strict_palette=True (used for DESIGN.palette_value) rejects bronze/copper/cream/olive
+    assert find_monochrome_color_word("warm bronze and copper tones", strict_palette=True) == "bronze"
+
+    # Singular nominative Russian assumption placeholder is also stripped.
+    assert filter_non_assumption_placeholders(["Допущение не требуется.", "Допущение отсутствует."]) == ()
+
+
+def test_validate_design_rejects_colors_on_all_traits_and_respects_entity_names() -> None:
+    ref = IllustrationReference.__new__(IllustrationReference)
+    design_scope = _dummy_scope(
+        stage=IllustrationScopeStage.DESIGN,
+        state=IllustrationScopeState.RUNNING,
+        summary={
+            "entity_id": "ent-brown",
+            "entity_kind": "person",
+            "entity_names": ["Mr Brown", "Brown"],
+            "style": ILLUSTRATION_STYLE_MONOCHROME_INK,
+        },
+    )
+    # Chromatic color in English non-palette trait MUST be rejected even with achromatic Russian!
+    bad_attire_en = IllustrationDesignResponse(
+        entity_id="ent-brown",
+        traits=(
+            IllustrationDesignTraitDTO(
+                trait="attire_default",
+                description_ru="Тёмное пальто",
+                description_en="Mr Brown in a brown coat",
+                assumption_ru="Повседневное пальто",
+            ),
+        ),
+    )
+    res_bad_en = ref._validate_design(design_scope, bad_attire_en)
+    assert res_bad_en.ok is False
+    assert "monochrome_ink" in res_bad_en.repair_reason
+
+    # Chromatic color in Russian non-palette trait MUST also be rejected independently!
+    bad_attire_ru = IllustrationDesignResponse(
+        entity_id="ent-brown",
+        traits=(
+            IllustrationDesignTraitDTO(
+                trait="attire_default",
+                description_ru="Коричневое пальто",
+                description_en="Mr Brown in a dark coat",
+                assumption_ru="",
+            ),
+        ),
+    )
+    res_bad_ru = ref._validate_design(design_scope, bad_attire_ru)
+    assert res_bad_ru.ok is False
+    assert "monochrome_ink" in res_bad_ru.repair_reason
+
+    # Proper name "Mr Brown" with achromatic description MUST pass!
+    ok_name = IllustrationDesignResponse(
+        entity_id="ent-brown",
+        traits=(
+            IllustrationDesignTraitDTO(
+                trait="attire_default",
+                description_ru="Тёмное шерстяное пальто мистера Брауна",
+                description_en="Mr Brown in a dark wool coat",
+                assumption_ru="",
+            ),
+        ),
+    )
+    res_ok = ref._validate_design(design_scope, ok_name)
+    assert res_ok.ok is True
+
+
+def test_resolve_appearance_with_design_fallback_suppresses_excluded_facts_and_strict_lexical_echo() -> None:
+    # 1. Excluded infant/sleeping/blankets facts suppress stale DESIGN traits while preserving palette_value
+    excluded_infant = [
+        {
+            "description_en": "Infant baby sleeping wrapped in heavy blankets",
+            "description_ru": "Младенец спит, завёрнутый в тяжёлые одеяла",
+        }
+    ]
+    design_boy = [
+        {"trait": "age_appearance", "description_en": "Tiny infant", "description_ru": "Маленький младенец"},
+        {"trait": "attire_default", "description_en": "Swaddled in blankets", "description_ru": "Завёрнут в одеяла"},
+        {"trait": "eyes", "description_en": "Closed sleeping eyes", "description_ru": "Закрытые во сне глаза"},
+        {"trait": "palette_value", "description_en": "Crisp monochrome ink", "description_ru": "Чёткая тушь"},
+    ]
+    _, kept_boy = resolve_appearance_with_design_fallback(
+        [],
+        design_boy,
+        excluded_facts=excluded_infant,
+        compact_description_en="Thin ten-year-old boy with messy hair",
+        compact_description_ru="Худой десятилетний мальчик с растрёпанными волосами",
+    )
+    assert [t["trait"] for t in kept_boy] == ["palette_value"]
+
+    # 2. Excluded extinguished streetlamps + tabby cat suppress atmosphere & strict 2-token lexical echo
+    excluded_night = [
+        {
+            "description_en": "Extinguished streetlamps in darkness with a tabby cat on a garden hedge",
+            "description_ru": "Потушенные фонари в темноте и полосатая кошка на садовой изгороди",
+        }
+    ]
+    design_street = [
+        {"trait": "atmosphere", "description_en": "Extinguished streetlamps at night", "description_ru": "Потушенные фонари ночью"},
+        {"trait": "distinctive_mark", "description_en": "Tabby cat perched on garden hedge", "description_ru": "Кошка на садовой изгороди"},
+        {"trait": "architecture", "description_en": "Tidy suburban terraces", "description_ru": "Аккуратные пригородные дома"},
+    ]
+    _, kept_street = resolve_appearance_with_design_fallback(
+        [],
+        design_street,
+        excluded_facts=excluded_night,
+        compact_description_en="Quiet daytime suburban street",
+    )
+    assert [t["trait"] for t in kept_street] == ["architecture"]
+
+    # 3. Stopword guard: "Short dark hair" MUST NOT be suppressed by "short dark cloak" in excluded_facts!
+    _, kept_guard = resolve_appearance_with_design_fallback(
+        [],
+        [{"trait": "hair", "description_en": "Short dark hair", "description_ru": "Короткие тёмные волосы"}],
+        excluded_facts=[{"description_en": "Short dark cloak", "description_ru": "Короткий тёмный плащ"}],
+    )
+    assert [t["trait"] for t in kept_guard] == ["hair"]
+
+
+def test_validate_render_response_fact_scope_and_prompt_enforce_monochrome_colors() -> None:
+    chapter = IllustrationChapter.__new__(IllustrationChapter)
+    rev = IllustrationSettingsRevision(
+        id="rev-1",
+        book_id="book-1",
+        revision=1,
+        settings_sha256="a" * 64,
+        settings=IllustrationSettings(enabled=True, model_reference="m", model_prompts="m"),
+        created_at=datetime(2026, 11, 25, tzinfo=UTC),
+    )
+
+    fs_scope = _dummy_scope(
+        stage=IllustrationScopeStage.FACT_SCOPE,
+        state=IllustrationScopeState.RUNNING,
+        summary={
+            "moment_id": "m1",
+            "entity_name": "Mr Brown",
+            "entity_names": ["Mr Brown"],
+            "valid_fact_ids": ["f1"],
+            "running_applicable_ids": [],
+            "max_applicable_fact_ids": 32,
+        },
+    )
+    bad_fs = IllustrationFactScopeResponse(
+        event_id="m1",
+        applicable_fact_ids=("f1",),
+        excluded_fact_ids=(),
+        compact_description_ru="В фиолетовом плаще",
+        compact_description_en="Mr Brown wearing a purple cloak",
+        assumptions_ru=(),
+        complete=True,
+    )
+    res_bad_fs = chapter._validate_render_response(fs_scope, bad_fs, rev)
+    assert res_bad_fs.ok is False
+    assert "monochrome_ink" in res_bad_fs.repair_reason
+
+    ok_fs = IllustrationFactScopeResponse(
+        event_id="m1",
+        applicable_fact_ids=("f1",),
+        excluded_fact_ids=(),
+        compact_description_ru="В фиолетовом плаще (описание на русском не блокируется)",
+        compact_description_en="Mr Brown wearing a deep-toned cloak",
+        assumptions_ru=("Допущений нет.",),
+        complete=True,
+    )
+    res_ok_fs = chapter._validate_render_response(fs_scope, ok_fs, rev)
+    assert res_ok_fs.ok is True
+    assert res_ok_fs.payload is not None
+    assert res_ok_fs.payload["assumptions_ru"] == []
+
+    prompt_scope = _dummy_scope(
+        stage=IllustrationScopeStage.PROMPT,
+        state=IllustrationScopeState.RUNNING,
+        summary={
+            "moment_id": "m1",
+            "allowed_fact_ids": [],
+            "allowed_design_keys": [],
+            "characters": [],
+            "locations": [],
+            "design_traits_by_key": {},
+            "base_fallback_entity_ids": [],
+            "entity_names": ["Green Gables"],
+        },
+    )
+    bad_prompt = IllustrationPromptResponse(
+        moment_id="m1",
+        scene_composition_en="Green Gables lanterns glow orange in the fog.",
+        used_fact_ids=(),
+        used_design_keys=(),
+        assumptions_ru=(),
+    )
+    res_bad_p = chapter._validate_render_response(prompt_scope, bad_prompt, rev)
+    assert res_bad_p.ok is False
+    assert "monochrome_ink" in res_bad_p.repair_reason
+
+    ok_prompt = IllustrationPromptResponse(
+        moment_id="m1",
+        scene_composition_en="Green Gables lanterns cast bright pools of light through the fog.",
+        used_fact_ids=(),
+        used_design_keys=(),
+        assumptions_ru=("No assumptions.",),
+    )
+    res_ok_p = chapter._validate_render_response(prompt_scope, ok_prompt, rev)
+    assert res_ok_p.ok is True
+    assert res_ok_p.payload is not None
+    assert res_ok_p.payload["assumptions_ru"] == []
+
+
+def test_filter_non_assumption_placeholders_and_stage_instructions_contracts() -> None:
+    filtered = filter_non_assumption_placeholders(
+        [
+            "",
+            "Допущений нет.",
+            "Нет допущений",
+            "Нет: указано в фактах.",
+            "Без допущений.",
+            "Не требуется",
+            "No assumptions needed.",
+            "None",
+            "Нет упоминаний о цвете волос, выбран тёмный тон",
+            "Нейтральная поза персонажа.",
+            "  нейтральная поза персонажа ",
+        ]
+    )
+    assert filtered == (
+        "Нет упоминаний о цвете волос, выбран тёмный тон",
+        "Нейтральная поза персонажа.",
+    )
+
+    assert "alias_of_hint" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
+    assert "monochrome_ink" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.FACT_SCOPE]
+    assert "monochrome_ink" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.PROMPT]
+    assert "non_permanent_context_only" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.DESIGN]
