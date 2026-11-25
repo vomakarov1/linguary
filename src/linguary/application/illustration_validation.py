@@ -26,6 +26,12 @@ MONOCHROME_INK_DIRECTIVE = (
 )
 _BLOCK_ALIAS_RE = re.compile(r"^b\d+$")
 _SEGMENT_ID_RE = re.compile(r"#s\d+$")
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+
+
+def has_cyrillic(text: str) -> bool:
+    """Return True if the string contains any Cyrillic character."""
+    return bool(_CYRILLIC_RE.search(text))
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,9 +44,10 @@ class IllustrationAppearance:
     description_en: str
     fact_ids: tuple[str, ...] = ()
     assumptions_ru: tuple[str, ...] = ()
+    name_en: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "entity_id": self.entity_id,
             "name_ru": self.name_ru,
             "description_ru": self.description_ru,
@@ -48,9 +55,14 @@ class IllustrationAppearance:
             "fact_ids": list(self.fact_ids),
             "assumptions_ru": list(self.assumptions_ru),
         }
+        if self.name_en is not None:
+            payload["name_en"] = self.name_en
+        return payload
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> IllustrationAppearance:
+        raw_name_en = raw.get("name_en")
+        name_en = str(raw_name_en).strip() or None if raw_name_en is not None else None
         return cls(
             entity_id=str(raw["entity_id"]),
             name_ru=str(raw["name_ru"]),
@@ -58,6 +70,7 @@ class IllustrationAppearance:
             description_en=str(raw["description_en"]),
             fact_ids=tuple(str(fid) for fid in raw.get("fact_ids", ())),
             assumptions_ru=tuple(str(a) for a in raw.get("assumptions_ru", ())),
+            name_en=name_en,
         )
 
 
@@ -187,18 +200,19 @@ def compose_monochrome_prompt(
     appearance_lines: list[str] = []
     for item in appearances:
         if isinstance(item, IllustrationAppearance):
-            name = item.name_ru
+            raw_name = item.name_en if item.name_en is not None else item.name_ru
             desc_en = item.description_en
         else:
-            name = str(item.get("name_ru", "")).strip()
+            raw_name = item.get("name_en") or item.get("name_ru", "")
             desc_en = str(item.get("description_en", "")).strip()
+        name = str(raw_name).strip()
         desc_clean = " ".join(desc_en.split()).strip()
         if not desc_clean:
             raise IllustrationValidationError(
                 IllustrationReasonCode.MODEL_OUTPUT_INVALID,
                 "применимый образ обязан содержать непустое description_en",
             )
-        if name:
+        if name and not has_cyrillic(name):
             appearance_lines.append(f"{name}: {desc_clean}")
         else:
             appearance_lines.append(desc_clean)
@@ -410,6 +424,7 @@ __all__ = [
     "IllustrationAppearance",
     "ValidatedMoment",
     "compose_monochrome_prompt",
+    "has_cyrillic",
     "resolve_insert_after_block_id",
     "validate_moment",
 ]

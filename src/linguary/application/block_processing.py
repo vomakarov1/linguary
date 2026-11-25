@@ -229,6 +229,7 @@ class TranslationCall:
             response = None
             physical_context = None
             attempt_root_generation = None
+            configured_max_output_tokens: int | None = None
             try:
                 if recovery is not None:
                     from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
@@ -280,6 +281,12 @@ class TranslationCall:
                         )
                     request = replace(request, call_context=physical_context,
                                       scope_id=physical_context.scope_id)
+                if loaded_conditions is not None and isinstance(loaded_conditions.payload, Mapping):
+                    raw_params = loaded_conditions.payload.get("llm_parameters")
+                    if isinstance(raw_params, Mapping):
+                        raw_max = raw_params.get("max_output_tokens")
+                        if type(raw_max) is int and raw_max > 0:
+                            configured_max_output_tokens = raw_max
                 if (
                     loaded_conditions is not None
                     and unit is not None
@@ -462,6 +469,20 @@ class TranslationCall:
                     raise
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
+                err_violation = getattr(error, "violation", None)
+                is_truncated = (
+                    (isinstance(error, LLMResponseFormatError) and error.truncated)
+                    or (
+                        err_violation is not None
+                        and getattr(err_violation, "rule_code", None) == "provider_truncated"
+                    )
+                )
+                can_escalate_tokens = (
+                    is_truncated
+                    and configured_max_output_tokens is not None
+                    and request.max_completion_tokens is not None
+                    and request.max_completion_tokens < configured_max_output_tokens
+                )
                 outcome = _failure_outcome(error, state=None, saw_response=response is not None)
                 if recovery is not None and physical_context is not None:
                     violation = violation_of(error, context=physical_context)
@@ -506,6 +527,58 @@ class TranslationCall:
                         if was_stale_gen and existing_reason != 'unknown_outcome':
                             raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
+                    if can_escalate_tokens:
+                        stale_reason = None
+                        within_budget = False
+                        with self._unit_of_work.transaction() as transaction:
+                            root = transaction.work.get_root(recovery[0])
+                            if root is not None:
+                                if getattr(root, "superseded_by", None) is not None:
+                                    stale_reason = "superseded"
+                                elif (
+                                    attempt_root_generation is not None
+                                    and getattr(root, "generation", None) != attempt_root_generation
+                                ):
+                                    stale_reason = "interrupted"
+                                elif (
+                                    getattr(root, "status", None) == "stopped"
+                                    and getattr(root, "reason", None)
+                                    in {"unknown_outcome", "interrupted"}
+                                ):
+                                    stale_reason = getattr(root, "reason", None)
+                                else:
+                                    policy_map = (
+                                        (root.manifest or {}).get("policy")
+                                        if isinstance(getattr(root, "manifest", None), Mapping)
+                                        else None
+                                    )
+                                    if isinstance(policy_map, Mapping):
+                                        max_calls = policy_map.get("max_calls")
+                                        max_scope_calls = policy_map.get("max_scope_calls")
+                                        count_fn = getattr(
+                                            transaction.work, "scope_attempt_count", None
+                                        )
+                                        within_budget = (
+                                            type(max_calls) is int
+                                            and type(max_scope_calls) is int
+                                            and root.calls_used < max_calls + root.extra_calls
+                                            and (
+                                                not callable(count_fn)
+                                                or count_fn(recovery[1]) < max_scope_calls
+                                            )
+                                        )
+                        if stale_reason is not None:
+                            raise RecoveryError(
+                                stale_reason, recovery[0], original_error=error
+                            ) from error
+                        if within_budget:
+                            request = replace(
+                                request,
+                                max_completion_tokens=configured_max_output_tokens,
+                                attempt=request.attempt + 1,
+                            )
+                            last_error = error
+                            continue
                     if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
                         failing_ids = (
                             tuple(violation.block_ids)
@@ -515,6 +588,18 @@ class TranslationCall:
                         raise RecoverySplit(*recovery, failing_block_ids=failing_ids) from None
                 elif outcome == 'unknown' and recovery is not None:
                     raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
+                elif (
+                    recovery is None
+                    and can_escalate_tokens
+                    and attempts < self._retry_policy.max_attempts
+                ):
+                    request = replace(
+                        request,
+                        max_completion_tokens=configured_max_output_tokens,
+                        attempt=request.attempt + 1,
+                    )
+                    last_error = error
+                    continue
                 if isinstance(error, LLMContextCapacityError):
                     can_retry = (policy is not None and context.has_optional_neighbours
                         and capacity_retries < policy.capacity_retries_without_neighbours)

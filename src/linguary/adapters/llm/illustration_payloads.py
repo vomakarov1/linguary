@@ -251,7 +251,7 @@ class IllustrationCandidatesSchema(_VersionedIllustrationBase):
     scene_id: str = Field(min_length=1, max_length=200)
     events: list[IllustrationCandidateEventSchema] = Field(max_length=_MAX_LIST)
     zero_reason_ru: str | None = Field(default=None, max_length=_MAX_STR)
-    covered_source_unit_ids: list[str] = Field(max_length=_MAX_LIST)
+    covered_source_unit_ids: list[str] = Field(max_length=_MAX_COVERED_IDS)
     complete: bool
 
     @field_validator("covered_source_unit_ids")

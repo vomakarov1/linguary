@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -12,6 +11,11 @@ from uuid import uuid4
 from linguary.application.analysis_pass_cache import encode_illustration_pass
 from linguary.application.illustration_context import (
     IllustrationContext,
+    compact_safe_detail,
+    is_context_limit_error,
+    is_incompatible_route_error,
+    is_transient_error,
+    is_truncated_error,
     normalize_name_token,
     pack_items_by_wire_budget,
 )
@@ -38,6 +42,7 @@ from linguary.application.illustration_validation import (
     IllustrationAppearance,
     ValidatedMoment,
     compose_monochrome_prompt,
+    has_cyrillic,
     resolve_insert_after_block_id,
     validate_moment,
 )
@@ -46,19 +51,16 @@ from linguary.application.illustrations import (
     finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
+from linguary.application.llm_rejections import finalize_response, record_rejection
 from linguary.application.ports.illustrations import IllustrationRuntimePort
 from linguary.application.ports.llm import (
-    LLMConfigurationError,
-    LLMContextCapacityError,
-    LLMProviderError,
     LLMRequest,
-    LLMRequestTooLargeError,
+    LLMResponse,
     LLMResponseFormatError,
     LLMResponseKind,
-    LLMTransportError,
 )
 from linguary.application.ports.persistence import UnitOfWork
-from linguary.application.retry_policy import RetryPolicy
+from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.domain import (
     AnalysisPassKind,
     AnalysisPassResult,
@@ -93,44 +95,55 @@ _MAX_APPLICABLE_FACTS = 32
 _DEFAULT_ZERO_UNRESOLVED_RU = (
     "Не удалось однозначно определить образы ключевых участников для выбранных моментов главы."
 )
-_CONTEXT_LIMIT_RE = re.compile(
-    r"context[_ ]length|maximum context|too many tokens|prompt is too long|request too large|413",
-    re.IGNORECASE,
-)
 
 
 def _default_id() -> str:
     return str(uuid4())
 
 
-def _is_context_limit_error(error: Exception) -> bool:
-    if isinstance(error, (LLMRequestTooLargeError, LLMContextCapacityError)):
-        return True
-    if isinstance(error, LLMProviderError):
-        status = getattr(error, "status_code", None)
-        if status == 413:
-            return True
-        if status in (400, 422) and _CONTEXT_LIMIT_RE.search(str(error)):
-            return True
-    return False
+def _select_english_name(entity: Mapping[str, Any]) -> str | None:
+    """Select the first non-Cyrillic name from `canonical_name` or sorted `aliases`."""
+    candidates: list[str] = []
+    raw_canonical = entity.get("canonical_name")
+    canonical = str(raw_canonical).strip() if raw_canonical is not None else ""
+    if canonical:
+        candidates.append(canonical)
+    raw_aliases = entity.get("aliases", ())
+    if isinstance(raw_aliases, Iterable) and not isinstance(raw_aliases, (str, bytes)):
+        candidates.extend(
+            sorted(str(a).strip() for a in raw_aliases if a is not None and str(a).strip())
+        )
+    for name in candidates:
+        if not has_cyrillic(name):
+            return name
+    return None
 
 
-def _is_truncated_error(error: Exception) -> bool:
-    if not isinstance(error, LLMResponseFormatError):
-        return False
-    if getattr(error, "truncated", False):
-        return True
-    violation = getattr(error, "violation", None)
-    return violation is not None and getattr(violation, "rule_code", None) == "provider_truncated"
+def _dedupe_texts(items: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate strings by whitespace/punctuation-insensitive casefolded key preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in items:
+        cleaned = " ".join(str(raw).split()).strip()
+        if not cleaned:
+            continue
+        key = cleaned.rstrip(".;, ").casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return tuple(result)
 
 
-def _is_transient_error(error: Exception) -> bool:
-    if isinstance(error, LLMTransportError):
-        return True
-    if isinstance(error, LLMProviderError) and not isinstance(error, LLMRequestTooLargeError):
-        status = getattr(error, "status_code", None)
-        return status in (408, 429) or (isinstance(status, int) and status >= 500)
-    return False
+def _dedupe_semicolon_parts(items: Iterable[str]) -> list[str]:
+    """Split semicolon-delimited fragments and deduplicate by normalized key preserving order."""
+    parts: list[str] = []
+    for item in items:
+        for piece in str(item).split(";"):
+            cleaned = " ".join(piece.split()).strip()
+            if cleaned:
+                parts.append(cleaned)
+    return list(_dedupe_texts(parts))
 
 
 def _load_all_registry_items(
@@ -674,6 +687,7 @@ class IllustrationChapter:
                 dispatched = True
 
         self._maybe_mark_generation_ready(tx, generation)
+        finalize_generation_state_in_tx(tx, generation.book_id, generation.id)
         return dispatched
 
     async def run_task(self, task: ProcessingTask) -> None:
@@ -816,12 +830,23 @@ class IllustrationChapter:
                     )
                     design_payloads = [di.raw_payload() for di in design_items]
 
+                    eng_name = _select_english_name(ent)
+                    fallback_en = eng_name or (
+                        "character" if kind_bucket == "person" else "location"
+                    )
+
                     if not entity_facts:
-                        # No explicit facts -> use closed design traits (or entity canonical name fallback).
+                        # No explicit facts -> use closed design traits (or safe non-Cyrillic fallback).
                         if design_payloads:
-                            d_ru = "; ".join(str(d["description_ru"]) for d in design_payloads)
-                            d_en = "; ".join(str(d["description_en"]) for d in design_payloads)
-                            assumps = tuple(
+                            d_ru_parts = _dedupe_semicolon_parts(
+                                str(d["description_ru"]) for d in design_payloads
+                            )
+                            d_en_parts = _dedupe_semicolon_parts(
+                                str(d["description_en"]) for d in design_payloads
+                            )
+                            d_ru = "; ".join(d_ru_parts) or str(ent["canonical_name"])
+                            d_en = "; ".join(d_en_parts) or fallback_en
+                            assumps = _dedupe_texts(
                                 str(d["assumption_ru"])
                                 for d in design_payloads
                                 if str(d.get("assumption_ru", "")).strip()
@@ -830,7 +855,7 @@ class IllustrationChapter:
                             allowed_dkeys.extend(dkeys)
                         else:
                             d_ru = str(ent["canonical_name"])
-                            d_en = str(ent["canonical_name"])
+                            d_en = fallback_en
                             assumps = ()
                         app = IllustrationAppearance(
                             entity_id=eid,
@@ -839,6 +864,7 @@ class IllustrationChapter:
                             description_en=d_en,
                             fact_ids=(),
                             assumptions_ru=assumps,
+                            name_en=eng_name,
                         )
                         (char_apps if kind_bucket == "person" else loc_apps).append(app)
                         continue
@@ -1159,15 +1185,17 @@ class IllustrationChapter:
                         allowed_dkeys.append(f"{eid}:{d['trait']}")
 
                     allowed_fids.extend(accumulated_app_ids)
+                    desc_ru_clean = _dedupe_semicolon_parts(desc_ru_parts)
+                    desc_en_clean = _dedupe_semicolon_parts(desc_en_parts)
                     app = IllustrationAppearance(
                         entity_id=eid,
                         name_ru=str(ent["canonical_name"]),
-                        description_ru="; ".join(p for p in desc_ru_parts if p.strip())
+                        description_ru="; ".join(desc_ru_clean)
                         or str(ent["canonical_name"]),
-                        description_en="; ".join(p for p in desc_en_parts if p.strip())
-                        or str(ent["canonical_name"]),
+                        description_en="; ".join(desc_en_clean) or fallback_en,
                         fact_ids=tuple(accumulated_app_ids),
-                        assumptions_ru=tuple(dict.fromkeys(accumulated_assumps)),
+                        assumptions_ru=_dedupe_texts(accumulated_assumps),
+                        name_en=eng_name,
                     )
                     (char_apps if kind_bucket == "person" else loc_apps).append(app)
 
@@ -1270,13 +1298,11 @@ class IllustrationChapter:
                 )
 
             prompt_en = str(p_pay["prompt_en"])
-            assumptions = tuple(
-                dict.fromkeys(
-                    [
-                        *(str(x) for x in p_pay.get("assumptions_ru", ())),
-                        *(a for app in (*char_apps, *loc_apps) for a in app.assumptions_ru),
-                    ]
-                )
+            assumptions = _dedupe_texts(
+                [
+                    *(str(x) for x in p_pay.get("assumptions_ru", ())),
+                    *(a for app in (*char_apps, *loc_apps) for a in app.assumptions_ru),
+                ]
             )
             moment = validate_moment(
                 ValidatedMoment(
@@ -1571,6 +1597,7 @@ class IllustrationChapter:
                 except IllustrationOwnershipError:
                     return
 
+            response: LLMResponse[Any] | None = None
             validation: _ValidationOutcome | None = None
             call_error: Exception | None = None
             try:
@@ -1584,7 +1611,9 @@ class IllustrationChapter:
                 call_error = err
 
             if call_error is not None:
-                if _is_context_limit_error(call_error):
+                if response is not None:
+                    record_rejection(self._uow, response, call_error)
+                if is_context_limit_error(call_error):
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1594,7 +1623,7 @@ class IllustrationChapter:
                         reason_code=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
                     )
                     return
-                if _is_truncated_error(call_error):
+                if is_truncated_error(call_error):
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1604,7 +1633,7 @@ class IllustrationChapter:
                         reason_code=IllustrationReasonCode.PROVIDER_TRUNCATED.value,
                     )
                     return
-                if _is_transient_error(call_error):
+                if is_transient_error(call_error):
                     if self._can_continue_activation(activation_calls_used, scope.id, book_id, policy):
                         with self._uow.transaction() as tx:
                             tx.illustrations.record_attempt_outcome(
@@ -1627,6 +1656,7 @@ class IllustrationChapter:
                     )
                     return
                 if isinstance(call_error, LLMResponseFormatError):
+                    err_detail = str(call_error)
                     if (
                         repairs_used < policy.max_repair_turns
                         and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1636,11 +1666,12 @@ class IllustrationChapter:
                                 attempt.id,
                                 state=IllustrationAttemptState.REJECTED,
                                 outcome={
-                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value
+                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                                    "detail": compact_safe_detail(err_detail, max_bytes=256),
                                 },
                             )
                         repairs_used += 1
-                        repair_summary = str(call_error)
+                        repair_summary = err_detail
                         continue
                     self._finalize_failure(
                         book_id=book_id,
@@ -1649,11 +1680,12 @@ class IllustrationChapter:
                         scope_id=scope.id,
                         attempt_id=attempt.id,
                         reason_code=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                        detail=err_detail,
                     )
                     return
                 fallback_reason = (
                     IllustrationReasonCode.ROUTE_UNAVAILABLE.value
-                    if isinstance(call_error, LLMConfigurationError)
+                    if is_incompatible_route_error(call_error)
                     else IllustrationReasonCode.PROVIDER_ERROR.value
                 )
                 self._finalize_failure(
@@ -1668,6 +1700,9 @@ class IllustrationChapter:
 
             assert validation is not None
             if not validation.ok:
+                detail_text = validation.repair_reason
+                if response is not None:
+                    record_rejection(self._uow, response, ResultValidationError(detail_text))
                 if (
                     repairs_used < policy.max_repair_turns
                     and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1676,10 +1711,13 @@ class IllustrationChapter:
                         tx.illustrations.record_attempt_outcome(
                             attempt.id,
                             state=IllustrationAttemptState.REJECTED,
-                            outcome={"reason_code": validation.reason_code},
+                            outcome={
+                                "reason_code": validation.reason_code,
+                                "detail": compact_safe_detail(detail_text, max_bytes=256),
+                            },
                         )
                     repairs_used += 1
-                    repair_summary = validation.repair_reason
+                    repair_summary = detail_text
                     continue
                 self._finalize_failure(
                     book_id=book_id,
@@ -1688,6 +1726,7 @@ class IllustrationChapter:
                     scope_id=scope.id,
                     attempt_id=attempt.id,
                     reason_code=validation.reason_code,
+                    detail=detail_text,
                 )
                 return
 
@@ -1722,6 +1761,7 @@ class IllustrationChapter:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": stale_reason},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     if stale_reason == IllustrationReasonCode.SOURCE_CHANGED.value:
                         revoke_active_in_transaction(
                             tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
@@ -1754,7 +1794,10 @@ class IllustrationChapter:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     return
+
+                finalize_response(self._uow, response, "accepted", transaction=tx)
 
                 assert gen is not None
                 if self._advance_chapter_rendering(
@@ -1804,6 +1847,11 @@ class IllustrationChapter:
                     ok=False,
                     repair_reason="один и тот же fact_id не может быть одновременно в applicable и excluded",
                 )
+            if has_cyrillic(payload.compact_description_en):
+                return _ValidationOutcome(
+                    ok=False,
+                    repair_reason="compact_description_en должен быть написан строго на английском языке без кириллицы",
+                )
             return _ValidationOutcome(
                 ok=True,
                 payload={
@@ -1834,6 +1882,11 @@ class IllustrationChapter:
             if any(dk not in allowed_dkeys for dk in payload.used_design_keys):
                 return _ValidationOutcome(
                     ok=False, repair_reason="used_design_keys содержит неизвестный ключ дизайна"
+                )
+            if has_cyrillic(payload.scene_composition_en):
+                return _ValidationOutcome(
+                    ok=False,
+                    repair_reason="scene_composition_en должен быть написан строго на английском языке без кириллицы",
                 )
             characters = [
                 IllustrationAppearance.from_dict(c) for c in scope.summary.get("characters", ())
@@ -1873,11 +1926,23 @@ class IllustrationChapter:
         scope_id: str,
         attempt_id: str,
         reason_code: str,
+        detail: str | None = None,
     ) -> None:
+        outcome = (
+            {
+                "reason_code": reason_code,
+                "detail": compact_safe_detail(detail, max_bytes=256),
+            }
+            if detail and detail.strip()
+            else None
+        )
         with self._uow.transaction() as tx:
             try:
                 tx.illustrations.fail_scope(
-                    scope_id, attempt_id=attempt_id, reason_code=reason_code
+                    scope_id,
+                    attempt_id=attempt_id,
+                    reason_code=reason_code,
+                    outcome=outcome,
                 )
             except IllustrationOwnershipError:
                 tx.illustrations.record_attempt_outcome(

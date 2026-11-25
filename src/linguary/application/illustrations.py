@@ -29,6 +29,7 @@ from linguary.domain.illustrations import (
     IllustrationSettings,
     IllustrationSettingsRevision,
     IllustrationValidationError,
+    executable_scopes,
 )
 
 ILLUSTRATION_TASK_TYPES = frozenset(
@@ -156,11 +157,10 @@ def finalize_generation_state_in_tx(
     generation_id: str,
     *,
     fallback_reason: str | None = None,
-) -> None:
-    """Transition a non-revoked generation out of `RUNNING`/`QUEUED` when no active scopes remain.
+) -> bool:
+    """Transition a non-revoked generation out of `RUNNING`/`QUEUED` when no executable scopes remain.
 
-    Called on both failure and acceptance paths so a generation with an earlier failed scope
-    does not stay stuck in `RUNNING` after remaining parallel scopes finish.
+    Returns `True` if the generation transitioned to `FAILED` or was already in `FAILED`.
     """
     gen = tx.illustrations.get_generation(book_id, generation_id)
     if gen is None or gen.state in {
@@ -168,17 +168,20 @@ def finalize_generation_state_in_tx(
         IllustrationGenerationState.READY,
         IllustrationGenerationState.SKIPPED,
     }:
-        return
+        return False
     scopes = tx.illustrations.list_scopes(generation_id)
-    active_scopes = [s for s in scopes if s.state is not IllustrationScopeState.SPLIT]
+    exec_scopes = executable_scopes(scopes)
     has_active = any(
         s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
-        for s in active_scopes
+        for s in exec_scopes
     )
     if has_active:
-        return
+        return False
     failed_scope = next(
-        (s for s in active_scopes if s.state is IllustrationScopeState.FAILED),
+        (s for s in exec_scopes if s.state is IllustrationScopeState.FAILED),
+        None,
+    ) or next(
+        (s for s in scopes if s.state is IllustrationScopeState.FAILED),
         None,
     )
     if failed_scope is not None:
@@ -188,6 +191,8 @@ def finalize_generation_state_in_tx(
             state=IllustrationGenerationState.FAILED,
             reason_code=failed_scope.reason_code or fallback_reason,
         )
+        return True
+    return gen.state is IllustrationGenerationState.FAILED
 
 
 def revoke_active_in_transaction(

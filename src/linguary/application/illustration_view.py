@@ -28,6 +28,8 @@ from linguary.domain.illustrations import (
     IllustrationScopeState,
     IllustrationSettings,
     RegistryItem,
+    derive_chapter_state,
+    executable_scopes,
 )
 
 _REFERENCE_STAGES = frozenset(
@@ -790,6 +792,8 @@ def build_illustration_view(
             for row in header_rows
         )
 
+        exec_scopes = executable_scopes(scopes)
+
         # Selected chapter validation & projection (load payload only for this one section).
         selected_chapter: IllustrationSelectedChapterView | None = None
         if section_id is not None:
@@ -806,20 +810,21 @@ def build_illustration_view(
                     else matched_scope
                 ) or matched_scope
                 zero_reason_ru, moments = _decode_moments(full_scope.payload, blocks_by_id)
-                sec_state = (
-                    "ready"
-                    if full_scope.state is IllustrationScopeState.ACCEPTED
-                    else "queued"
-                    if full_scope.state is IllustrationScopeState.PENDING
-                    else "running"
-                    if full_scope.state is IllustrationScopeState.SPLIT
-                    else full_scope.state.value
+                child_states = [
+                    (s.state, s.reason_code)
+                    for s in exec_scopes
+                    if s.section_id == section_id
+                ]
+                sec_state, sec_reason = derive_chapter_state(
+                    full_scope.state,
+                    full_scope.reason_code,
+                    child_states,
                 )
                 selected_chapter = IllustrationSelectedChapterView(
                     section_id=section_id,
                     title=full_scope.section_title or "",
                     state=sec_state,
-                    reason_code=full_scope.reason_code,
+                    reason_code=sec_reason,
                     zero_reason_ru=zero_reason_ru,
                     moments=moments,
                 )
@@ -915,10 +920,15 @@ def build_illustration_view(
         )
 
         # Compute top-level state and reason_code per DTO-01 priority rules.
-        active_scopes = [s for s in scopes if s.state is not IllustrationScopeState.SPLIT]
-        failed_scope = next((s for s in active_scopes if s.state is IllustrationScopeState.FAILED), None)
-        has_running = any(s.state is IllustrationScopeState.RUNNING for s in active_scopes)
-        has_pending = any(s.state is IllustrationScopeState.PENDING for s in active_scopes)
+        failed_scope = next(
+            (s for s in exec_scopes if s.state is IllustrationScopeState.FAILED),
+            None,
+        ) or next(
+            (s for s in scopes if s.state is IllustrationScopeState.FAILED),
+            None,
+        )
+        has_running = any(s.state is IllustrationScopeState.RUNNING for s in exec_scopes)
+        has_pending = any(s.state is IllustrationScopeState.PENDING for s in exec_scopes)
         has_unfinished_work = has_running or has_pending or (
             viewed_generation is not None
             and failed_scope is None
@@ -997,7 +1007,7 @@ def build_illustration_view(
                         actions.append("prepare")
             if viewed_generation is not None and is_current:
                 max_calls = effective_settings.policy.max_calls_per_generation
-                has_retryable = any(s.is_retryable_failure for s in active_scopes)
+                has_retryable = any(s.is_retryable_failure for s in exec_scopes)
                 if has_retryable and (viewed_generation.calls_reserved + viewed_generation.calls_sent) < max_calls:
                     actions.append("retry")
                 if reason_code in {

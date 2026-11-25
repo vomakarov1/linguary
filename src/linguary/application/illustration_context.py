@@ -11,7 +11,16 @@ from typing import Any, Literal, TypeVar
 from linguary.application.context_builder import _analysis_visible_origins
 from linguary.application.illustration_source import IllustrationSourceSnapshot
 from linguary.application.ports.illustrations import RequestWireSizer
-from linguary.application.ports.llm import LLMRequest, LLMResponseKind
+from linguary.application.ports.llm import (
+    LLMConfigurationError,
+    LLMContextCapacityError,
+    LLMProviderError,
+    LLMRequest,
+    LLMRequestTooLargeError,
+    LLMResponseFormatError,
+    LLMResponseKind,
+    LLMTransportError,
+)
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
 from linguary.domain.document import DocumentBlock
@@ -57,6 +66,68 @@ _REFERENCE_STAGES = frozenset(
 
 _T = TypeVar("_T")
 
+_CONTEXT_LIMIT_RE = re.compile(
+    r"context[_ ]length|maximum context|too many tokens|prompt is too long|request too large"
+    r"|(?::\s*413\b|\bhttp\s+413\b|\bstatus\s+413\b)",
+    re.IGNORECASE,
+)
+_INCOMPATIBLE_ROUTE_RE = re.compile(
+    r"(?::\s*404\b|\bhttp\s+404\b|\bstatus\s+404\b"
+    r"|no endpoints found|unsupported parameter|unknown parameter"
+    r"|unrecognized request argument|does not support"
+    r"|model not found|not a valid model)",
+    re.IGNORECASE,
+)
+
+
+def is_context_limit_error(error: Exception) -> bool:
+    """Return True if the error indicates prompt/context length overflow."""
+    if isinstance(error, (LLMRequestTooLargeError, LLMContextCapacityError)):
+        return True
+    if isinstance(error, LLMProviderError):
+        status = getattr(error, "status_code", None)
+        if status == 413:
+            return True
+        if (status in (400, 422) or status is None) and _CONTEXT_LIMIT_RE.search(str(error)):
+            return True
+    return False
+
+
+def is_truncated_error(error: Exception) -> bool:
+    """Return True if the error represents a provider-truncated completion."""
+    if not isinstance(error, LLMResponseFormatError):
+        return False
+    if getattr(error, "truncated", False):
+        return True
+    violation = getattr(error, "violation", None)
+    return violation is not None and getattr(violation, "rule_code", None) == "provider_truncated"
+
+
+def is_transient_error(error: Exception) -> bool:
+    """Return True if the error is a transient transport or provider error."""
+    if isinstance(error, LLMTransportError):
+        return True
+    if isinstance(error, LLMProviderError) and not isinstance(error, LLMRequestTooLargeError):
+        status = getattr(error, "status_code", None)
+        return status in (408, 429) or (isinstance(status, int) and status >= 500)
+    return False
+
+
+def is_incompatible_route_error(error: Exception) -> bool:
+    """Return True if the provider rejected the route/model/parameter permanently."""
+    if isinstance(error, LLMConfigurationError):
+        return True
+    if (
+        isinstance(error, LLMProviderError)
+        and not is_context_limit_error(error)
+        and not is_transient_error(error)
+    ):
+        if getattr(error, "status_code", None) == 404:
+            return True
+        if _INCOMPATIBLE_ROUTE_RE.search(str(error)):
+            return True
+    return False
+
 
 def closed_traits_for_kind(entity_kind: str) -> tuple[str, ...]:
     """Return the closed set of neutral visual traits allowed for an entity kind."""
@@ -65,6 +136,27 @@ def closed_traits_for_kind(entity_kind: str) -> tuple[str, ...]:
     if entity_kind == "location":
         return LOCATION_CLOSED_TRAITS
     return ()
+
+
+def compact_safe_detail(text: str, *, max_bytes: int = 256) -> str:
+    """Trim a safe validator detail message strictly in UTF-8 bytes without any repair prefix."""
+    cleaned = " ".join(text.split()).strip()
+    if not cleaned:
+        return ""
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return cleaned
+    if max_bytes <= 3:
+        cut = encoded[: max(0, max_bytes)]
+        while cut and (cut[-1] & 0xC0) == 0x80:
+            cut = cut[:-1]
+        return cut.decode("utf-8", errors="ignore")
+    limit = max(1, max_bytes - 3)
+    cut = encoded[:limit]
+    while cut and (cut[-1] & 0xC0) == 0x80:
+        cut = cut[:-1]
+    trimmed = cut.decode("utf-8", errors="ignore").rstrip()
+    return f"{trimmed}..."
 
 
 def compact_repair_summary(
@@ -187,17 +279,24 @@ def pack_items_by_wire_budget(
     build_request: Callable[[Sequence[_T]], LLMRequest[Any]],
     sizer: RequestWireSizer,
     target_bytes: int,
+    max_items: int | None = None,
 ) -> tuple[tuple[_T, ...], ...]:
     """Deterministically pack ordered items into pages whose exact wire size fits `target_bytes`.
 
+    If `max_items` is provided, each page contains at most `max_items` items.
     If a single item exceeds `target_bytes` on its own, it is emitted as a singleton page so the
     caller can fail cleanly with `atomic_input_too_large` before any HTTP call.
     """
+    if max_items is not None and (type(max_items) is not int or max_items <= 0):
+        raise ValueError("max_items должен быть положительным целым")
     if not items:
         return ()
     pages: list[tuple[_T, ...]] = []
     current: list[_T] = []
     for item in items:
+        if max_items is not None and len(current) >= max_items:
+            pages.append(tuple(current))
+            current = []
         candidate = [*current, item]
         size = sizer.measure(build_request(candidate)).size_bytes
         if size <= target_bytes:
@@ -236,11 +335,22 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
     IllustrationScopeStage.ALIAS: (
         "Ты проверяешь пары упоминаний одного типа (person или location) из справочника иллюстраций книги. "
         "Одинаковое имя само по себе НЕ доказывает тождество. "
-        "Для каждой пары верни exact pair_id и вердикт same_entity, different или unknown с опорой на переданные факты."
+        "Для каждой пары верни exact pair_id и вердикт same_entity, different или unknown с опорой на переданные факты. "
+        "Учитывай совпадение glossary_concept_id, подсказки alias_of_hint, цитаты и контекст сцены. "
+        "Если два упоминания явно обозначают одного и того же человека (например, имя и обращение с фамилией/титулом, "
+        "такие как Petunia и Mrs Dursley, при подтверждении текстом/цитатой/глоссарием), ставь same_entity. "
+        "При этом общая фамилия с разными титулами или полом (Mr Dursley и Mrs Dursley) — different. "
+        "unknown ставь только когда доказательств действительно недостаточно."
     ),
     IllustrationScopeStage.DESIGN: (
         "Ты дополняешь недостающие нейтральные визуальные черты образа из закрытого списка допустимых черт для типа сущности. "
-        "Не противоречь явным фактам из текста и не повторяй одинаковую черту дважды. "
+        "Опирайся СТРОГО на переданные facts и canonical_name. "
+        "ЗАПРЕЩЕНО использовать любые внешние знания о книге, серии, фильмах, экранизациях или событиях будущих глав "
+        "(не подставляй канонический возраст, школьную форму, предметы, цвет глаз/волос или детали из других частей произведения, если их нет в facts). "
+        "Не противоречь ни одному переданному факту из facts (возраст, волосы, одежда, телосложение) и не повторяй одинаковую черту дважды. "
+        "Если style == \"monochrome_ink\", описывай palette_value ТОЛЬКО тональными характеристиками чёрно-белой туши "
+        "(контраст, светлые/средние/тёмные тона, плотность штриховки, чёткие силуэты) и НЕ используй названия цветов/оттенков "
+        "(зелёный, красный, синий, бежевый, коричневый, жёлтый и т. п.) ни в palette_value, ни в придуманных чертах дизайна. "
         "Каждый домысел фиксируй в assumption_ru; описания давай на русском (description_ru) и английском (description_en)."
     ),
     IllustrationScopeStage.FACT_SCOPE: (
@@ -262,7 +372,11 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
     ),
     IllustrationScopeStage.PROMPT: (
         "Ты составляешь англоязычную композицию одного кадра (scene_composition_en) для монохромной книжной иллюстрации тушью. "
-        "Опирайся строго на переданные применимые факты и черты образов, не вводи несогласованные детали и перечисли использованные used_fact_ids и used_design_keys."
+        "Опирайся строго на переданные применимые факты и черты образов, не вводи несогласованные детали и перечисли использованные used_fact_ids и used_design_keys. "
+        "Пиши scene_composition_en строго на английском языке (без кириллицы). "
+        "Точно соблюдай позу, действие и физически возможную точку зрения камеры из event_ru: "
+        "не показывай снаружи фасад здания в том же кадре, если действие происходит внутри комнаты без выхода наружу, "
+        "и не меняй положение тела персонажа вопреки описанию события."
     ),
 }
 
@@ -397,7 +511,12 @@ __all__ = [
     "closed_traits_for_kind",
     "compact_json",
     "compact_repair_summary",
+    "compact_safe_detail",
     "format_position_key",
+    "is_context_limit_error",
+    "is_incompatible_route_error",
+    "is_transient_error",
+    "is_truncated_error",
     "normalize_name_token",
     "pack_items_by_wire_budget",
     "resolve_quote_anchor",

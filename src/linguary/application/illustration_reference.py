@@ -14,6 +14,11 @@ from linguary.application.context_builder import source_text_for_model, textual_
 from linguary.application.illustration_context import (
     IllustrationContext,
     closed_traits_for_kind,
+    compact_safe_detail,
+    is_context_limit_error,
+    is_incompatible_route_error,
+    is_transient_error,
+    is_truncated_error,
     normalize_name_token,
     pack_items_by_wire_budget,
     resolve_quote_anchor,
@@ -28,24 +33,22 @@ from linguary.application.illustration_source import (
     IllustrationSourceSnapshot,
     SectionManifestEntry,
 )
+from linguary.application.illustration_validation import has_cyrillic
 from linguary.application.illustrations import (
     dispatch_scope_task,
     finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
+from linguary.application.llm_rejections import finalize_response, record_rejection
 from linguary.application.ports.illustrations import IllustrationRuntimePort, RequestWireSizer
 from linguary.application.ports.llm import (
-    LLMConfigurationError,
-    LLMContextCapacityError,
-    LLMProviderError,
     LLMRequest,
-    LLMRequestTooLargeError,
+    LLMResponse,
     LLMResponseFormatError,
     LLMResponseKind,
-    LLMTransportError,
 )
 from linguary.application.ports.persistence import UnitOfWork
-from linguary.application.retry_policy import RetryPolicy
+from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.domain import (
     DocumentBlock,
     DocumentSection,
@@ -58,6 +61,7 @@ from linguary.domain import (
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import canonical_sha
 from linguary.domain.illustrations import (
+    ILLUSTRATION_STYLE_MONOCHROME_INK,
     TIMELESS_POSITION_KEY,
     IllustrationAttemptState,
     IllustrationError,
@@ -125,44 +129,24 @@ _HONORIFICS = frozenset(
     }
 )
 _BLOCKING_STOPWORDS = frozenset({"the", "of", "and", "in", "at", "on", "to", "a", "an", "de", "la", "le"})
-_CONTEXT_LIMIT_RE = re.compile(
-    r"context[_ ]length|maximum context|too many tokens|prompt is too long|request too large|413",
+_MAX_EXTRACT_UNITS_PER_PAGE = 64
+_MONOCHROME_COLOR_EN_RE = re.compile(
+    r"\b(red|crimson|scarlet|green|emerald|blue|azure|cobalt|yellow|amber|gold|golden|"
+    r"orange|purple|violet|pink|magenta|teal|turquoise|beige|brown|chestnut|auburn|"
+    r"maroon|olive|khaki|indigo|cyan|lavender|burgundy|sepia|bronze|copper|cream|ochre)\b",
+    re.IGNORECASE,
+)
+_MONOCHROME_COLOR_RU_RE = re.compile(
+    r"\b(красн\w*|зелён\w*|зелен\w*|син\w*|голуб\w*|жёлт\w*|желт\w*|оранжев\w*|"
+    r"фиолетов\w*|розов\w*|бежев\w*|коричнев\w*|рыж\w*|изумруд\w*|багров\w*|"
+    r"бирюзов\w*|золот\w*|пурпур\w*|бордов\w*|лилов\w*|бронзов\w*|медн\w*|"
+    r"кремов\w*|охр(?:а|ы|е|у|ой|ист\w*|ов\w*))\b",
     re.IGNORECASE,
 )
 
 
 def _default_id() -> str:
     return str(uuid4())
-
-
-def _is_context_limit_error(error: Exception) -> bool:
-    if isinstance(error, (LLMRequestTooLargeError, LLMContextCapacityError)):
-        return True
-    if isinstance(error, LLMProviderError):
-        status = getattr(error, "status_code", None)
-        if status == 413:
-            return True
-        if status in (400, 422) and _CONTEXT_LIMIT_RE.search(str(error)):
-            return True
-    return False
-
-
-def _is_truncated_error(error: Exception) -> bool:
-    if not isinstance(error, LLMResponseFormatError):
-        return False
-    if getattr(error, "truncated", False):
-        return True
-    violation = getattr(error, "violation", None)
-    return violation is not None and getattr(violation, "rule_code", None) == "provider_truncated"
-
-
-def _is_transient_error(error: Exception) -> bool:
-    if isinstance(error, LLMTransportError):
-        return True
-    if isinstance(error, LLMProviderError) and not isinstance(error, LLMRequestTooLargeError):
-        status = getattr(error, "status_code", None)
-        return status in (408, 429) or (isinstance(status, int) and status >= 500)
-    return False
 
 
 def _strip_honorifics(normalized: str) -> str:
@@ -538,6 +522,7 @@ def _build_bounded_design_input(
     book_id: str,
     conditions_id: str | None,
     policy: IllustrationPolicy,
+    style: str = ILLUSTRATION_STYLE_MONOCHROME_INK,
 ) -> dict[str, Any]:
     """Deterministically bound entity facts for DESIGN to `policy.initial_target_bytes`.
 
@@ -593,6 +578,7 @@ def _build_bounded_design_input(
             "entity_id": str(entity["entity_id"]),
             "canonical_name": str(entity["canonical_name"]),
             "entity_kind": entity_kind,
+            "style": style,
             "allowed_traits": allowed_traits,
             "facts": list(cur_facts),
             "omitted_episodic_count": omit_ep,
@@ -639,6 +625,7 @@ def _build_design_scope_spec(
             "request_input": thaw(request_input),
             "model_reference": revision.settings.model_reference,
             "route_id": route_id,
+            "style": revision.settings.style,
             "policy": revision.settings.policy.to_payload(),
         }
     )
@@ -647,6 +634,7 @@ def _build_design_scope_spec(
         "is_composite": False,
         "entity_id": entity_id,
         "entity_kind": entity_kind,
+        "style": revision.settings.style,
         "allowed_traits": list(closed_traits_for_kind(entity_kind)),
         "request_input": thaw(request_input),
     }
@@ -775,6 +763,7 @@ class IllustrationReference:
             build_request=_build_page_req,
             sizer=sizer,
             target_bytes=policy.initial_target_bytes,
+            max_items=_MAX_EXTRACT_UNITS_PER_PAGE,
         )
         specs: list[IllustrationScopeSpec] = []
         for page_idx, page_units in enumerate(pages):
@@ -1049,6 +1038,7 @@ class IllustrationReference:
                     return
 
             # ── Outside TX: physical LLM call ──
+            response: LLMResponse[Any] | None = None
             validation: _ValidationResult | None = None
             call_error: Exception | None = None
             try:
@@ -1063,7 +1053,9 @@ class IllustrationReference:
 
             # Decide outcome before TX3
             if call_error is not None:
-                if _is_context_limit_error(call_error):
+                if response is not None:
+                    record_rejection(self._uow, response, call_error)
+                if is_context_limit_error(call_error):
                     if is_composite:
                         notify_after = self._handle_post_send_split(
                             book_id=book_id,
@@ -1087,7 +1079,7 @@ class IllustrationReference:
                     )
                     return
 
-                if _is_truncated_error(call_error):
+                if is_truncated_error(call_error):
                     if is_composite:
                         notify_after = self._handle_post_send_split(
                             book_id=book_id,
@@ -1111,7 +1103,7 @@ class IllustrationReference:
                     )
                     return
 
-                if _is_transient_error(call_error):
+                if is_transient_error(call_error):
                     if self._can_continue_activation(activation_calls_used, scope.id, book_id, policy):
                         with self._uow.transaction() as tx:
                             tx.illustrations.record_attempt_outcome(
@@ -1135,6 +1127,7 @@ class IllustrationReference:
                     return
 
                 if isinstance(call_error, LLMResponseFormatError):
+                    err_detail = str(call_error)
                     if (
                         repairs_used < policy.max_repair_turns
                         and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1144,11 +1137,12 @@ class IllustrationReference:
                                 attempt.id,
                                 state=IllustrationAttemptState.REJECTED,
                                 outcome={
-                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value
+                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                                    "detail": compact_safe_detail(err_detail, max_bytes=256),
                                 },
                             )
                         repairs_used += 1
-                        repair_summary = str(call_error)
+                        repair_summary = err_detail
                         continue
                     self._finalize_scope_failure(
                         book_id=book_id,
@@ -1157,12 +1151,13 @@ class IllustrationReference:
                         scope_id=scope.id,
                         attempt_id=attempt.id,
                         reason_code=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                        detail=err_detail,
                     )
                     return
 
                 fallback_reason = (
                     IllustrationReasonCode.ROUTE_UNAVAILABLE.value
-                    if isinstance(call_error, LLMConfigurationError)
+                    if is_incompatible_route_error(call_error)
                     else IllustrationReasonCode.PROVIDER_ERROR.value
                 )
                 self._finalize_scope_failure(
@@ -1177,6 +1172,9 @@ class IllustrationReference:
 
             assert validation is not None
             if validation.request_split:
+                split_detail = "модель запросила дробление (complete=false)"
+                if response is not None:
+                    record_rejection(self._uow, response, ResultValidationError(split_detail))
                 if is_composite:
                     notify_after = self._handle_post_send_split(
                         book_id=book_id,
@@ -1188,6 +1186,7 @@ class IllustrationReference:
                         depth=depth,
                         policy=policy,
                         fail_reason=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
+                        detail=split_detail,
                     )
                     break
                 self._finalize_scope_failure(
@@ -1197,10 +1196,19 @@ class IllustrationReference:
                     scope_id=scope.id,
                     attempt_id=attempt.id,
                     reason_code=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
+                    detail=split_detail,
                 )
                 return
 
             if not validation.ok:
+                non_empty_details = [d for d in validation.repair_details if d and d.strip()]
+                detail_text = (
+                    f"{validation.repair_reason}: {'; '.join(non_empty_details)}"
+                    if non_empty_details
+                    else validation.repair_reason
+                )
+                if response is not None:
+                    record_rejection(self._uow, response, ResultValidationError(detail_text))
                 if (
                     repairs_used < policy.max_repair_turns
                     and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1209,12 +1217,13 @@ class IllustrationReference:
                         tx.illustrations.record_attempt_outcome(
                             attempt.id,
                             state=IllustrationAttemptState.REJECTED,
-                            outcome={"reason_code": validation.reason_code},
+                            outcome={
+                                "reason_code": validation.reason_code,
+                                "detail": compact_safe_detail(detail_text, max_bytes=256),
+                            },
                         )
                     repairs_used += 1
-                    repair_summary = validation.repair_reason
-                    if validation.repair_details:
-                        repair_summary = f"{repair_summary}: {'; '.join(validation.repair_details)}"
+                    repair_summary = detail_text
                     continue
                 self._finalize_scope_failure(
                     book_id=book_id,
@@ -1223,6 +1232,7 @@ class IllustrationReference:
                     scope_id=scope.id,
                     attempt_id=attempt.id,
                     reason_code=validation.reason_code,
+                    detail=detail_text,
                 )
                 return
 
@@ -1258,6 +1268,7 @@ class IllustrationReference:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": stale_reason},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     if stale_reason == IllustrationReasonCode.SOURCE_CHANGED.value:
                         revoke_active_in_transaction(
                             tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
@@ -1292,7 +1303,10 @@ class IllustrationReference:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     return
+
+                finalize_response(self._uow, response, "accepted", transaction=tx)
 
                 assert gen is not None
                 if self._advance_reference_pipeline(
@@ -1421,7 +1435,7 @@ class IllustrationReference:
                     "mention_key": mention_key,
                     "name": m.name.strip(),
                     "entity_kind": m.entity_kind,
-                    "alias_of_hint": m.alias_of_hint.strip() if m.alias_of_hint else None,
+                    "alias_of_hint": (m.alias_of_hint.strip() or None) if m.alias_of_hint else None,
                     "block_id": res.anchor.block_id,
                     "char_start": res.anchor.start,
                     "char_end": res.anchor.end,
@@ -1461,6 +1475,11 @@ class IllustrationReference:
                 return _ValidationResult(
                     ok=False,
                     repair_reason=f"цитата факта {f.fact_id} не найдена в блоке {f.quote_block_id}",
+                )
+            if has_cyrillic(f.description_en):
+                return _ValidationResult(
+                    ok=False,
+                    repair_reason=f"description_en факта {f.fact_id} должен быть написан строго на английском языке без кириллицы",
                 )
             fact_ids.add(f.fact_id)
             fact_key = f"{scope.scope_key}::{f.fact_id}"
@@ -1557,6 +1576,7 @@ class IllustrationReference:
             )
         seen_traits: set[str] = set()
         traits: list[dict[str, Any]] = []
+        style = str(scope.summary.get("style", ILLUSTRATION_STYLE_MONOCHROME_INK))
         for item in dto.traits:
             if item.trait not in allowed_traits:
                 return _ValidationResult(
@@ -1567,6 +1587,31 @@ class IllustrationReference:
                 return _ValidationResult(
                     ok=False,
                     repair_reason=f"дублируется черта {item.trait}",
+                )
+            if has_cyrillic(item.description_en):
+                return _ValidationResult(
+                    ok=False,
+                    repair_reason=(
+                        f"description_en черты {item.trait} должен быть написан строго "
+                        "на английском языке без кириллицы"
+                    ),
+                )
+            if (
+                style == ILLUSTRATION_STYLE_MONOCHROME_INK
+                and item.trait == "palette_value"
+                and (
+                    _MONOCHROME_COLOR_EN_RE.search(item.description_en)
+                    or _MONOCHROME_COLOR_EN_RE.search(item.description_ru)
+                    or _MONOCHROME_COLOR_RU_RE.search(item.description_ru)
+                    or _MONOCHROME_COLOR_RU_RE.search(item.description_en)
+                )
+            ):
+                return _ValidationResult(
+                    ok=False,
+                    repair_reason=(
+                        "для стиля monochrome_ink черта palette_value должна описывать "
+                        "только тональность, контраст и штриховку без названий цветов"
+                    ),
                 )
             seen_traits.add(item.trait)
             traits.append(
@@ -1729,6 +1774,7 @@ class IllustrationReference:
         depth: int,
         policy: IllustrationPolicy,
         fail_reason: str,
+        detail: str | None = None,
     ) -> bool:
         notify = False
         with self._uow.transaction() as tx:
@@ -1778,11 +1824,20 @@ class IllustrationReference:
                 return False
 
             if depth >= policy.max_split_depth:
+                fail_outcome = (
+                    {
+                        "reason_code": IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+                        "detail": compact_safe_detail(detail, max_bytes=256),
+                    }
+                    if detail and detail.strip()
+                    else None
+                )
                 try:
                     tx.illustrations.fail_scope(
                         scope.id,
                         attempt_id=attempt_id,
                         reason_code=IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+                        outcome=fail_outcome,
                     )
                 except IllustrationOwnershipError:
                     tx.illustrations.record_attempt_outcome(
@@ -1803,9 +1858,20 @@ class IllustrationReference:
                 return False
             children = self._split_children_for_scope(scope, revision, depth)
             if not children:
+                fail_outcome = (
+                    {
+                        "reason_code": fail_reason,
+                        "detail": compact_safe_detail(detail, max_bytes=256),
+                    }
+                    if detail and detail.strip()
+                    else None
+                )
                 try:
                     tx.illustrations.fail_scope(
-                        scope.id, attempt_id=attempt_id, reason_code=fail_reason
+                        scope.id,
+                        attempt_id=attempt_id,
+                        reason_code=fail_reason,
+                        outcome=fail_outcome,
                     )
                 except IllustrationOwnershipError:
                     tx.illustrations.record_attempt_outcome(
@@ -1865,11 +1931,23 @@ class IllustrationReference:
         scope_id: str,
         attempt_id: str,
         reason_code: str,
+        detail: str | None = None,
     ) -> None:
+        outcome = (
+            {
+                "reason_code": reason_code,
+                "detail": compact_safe_detail(detail, max_bytes=256),
+            }
+            if detail and detail.strip()
+            else None
+        )
         with self._uow.transaction() as tx:
             try:
                 tx.illustrations.fail_scope(
-                    scope_id, attempt_id=attempt_id, reason_code=reason_code
+                    scope_id,
+                    attempt_id=attempt_id,
+                    reason_code=reason_code,
+                    outcome=outcome,
                 )
             except IllustrationOwnershipError:
                 tx.illustrations.record_attempt_outcome(
@@ -1939,22 +2017,38 @@ class IllustrationReference:
                 ma = mention_by_key[a_key]
                 mb = mention_by_key[b_key]
                 pair_id = f"pair-{canonical_sha({'a': a_key, 'b': b_key})[:12]}"
+                left_side: dict[str, Any] = {
+                    "mention_key": a_key,
+                    "name": ma["name"],
+                    "quote": ma["quote"],
+                    "facts": facts_by_mention[a_key][:4],
+                }
+                left_hint = str(ma.get("alias_of_hint") or "").strip()
+                if left_hint:
+                    left_side["alias_of_hint"] = left_hint
+                left_gloss = glossary_links.get(glossary_key(str(ma["name"])))
+                if left_gloss is not None:
+                    left_side["glossary_concept_id"] = left_gloss
+
+                right_side: dict[str, Any] = {
+                    "mention_key": b_key,
+                    "name": mb["name"],
+                    "quote": mb["quote"],
+                    "facts": facts_by_mention[b_key][:4],
+                }
+                right_hint = str(mb.get("alias_of_hint") or "").strip()
+                if right_hint:
+                    right_side["alias_of_hint"] = right_hint
+                right_gloss = glossary_links.get(glossary_key(str(mb["name"])))
+                if right_gloss is not None:
+                    right_side["glossary_concept_id"] = right_gloss
+
                 pair_entries.append(
                     {
                         "pair_id": pair_id,
                         "entity_kind": ma["entity_kind"],
-                        "left": {
-                            "mention_key": a_key,
-                            "name": ma["name"],
-                            "quote": ma["quote"],
-                            "facts": facts_by_mention[a_key][:4],
-                        },
-                        "right": {
-                            "mention_key": b_key,
-                            "name": mb["name"],
-                            "quote": mb["quote"],
-                            "facts": facts_by_mention[b_key][:4],
-                        },
+                        "left": left_side,
+                        "right": right_side,
                     }
                 )
 
@@ -2185,6 +2279,7 @@ class IllustrationReference:
                     book_id=snapshot.book_id,
                     conditions_id=snapshot.conditions_id,
                     policy=policy,
+                    style=revision.settings.style,
                 )
                 draft = _build_design_scope_spec(
                     entity=ent,
@@ -2368,16 +2463,49 @@ class IllustrationReference:
         )
 
 
-_TRAIT_KEYWORDS: Mapping[str, tuple[str, ...]] = {
-    "hair": ("hair", "blond", "blonde", "redhead", "curly", "braid", "волос", "кудр", "кос"),
-    "eyes": ("eye", "eyes", "gaze", "глаз", "взгляд"),
-    "build": ("tall", "short", "slender", "stout", "thin", "broad", "рост", "худощ", "крепк", "высок"),
-    "age_appearance": ("young", "old", "elderly", "child", "boy", "girl", "teen", "молод", "стар", "ребён", "девоч", "мальч"),
-    "attire_default": ("coat", "dress", "cloak", "hat", "robe", "uniform", "suit", "плать", "плащ", "пальт", "шляп", "костюм"),
-    "distinctive_mark": ("scar", "freckle", "tattoo", "limp", "glasses", "шрам", "веснуш", "очки", "родинк"),
-    "palette_value": ("pale", "dark", "bright", "shadow", "светл", "тёмн", "бледн"),
-    "architecture": ("stone", "wood", "brick", "arch", "tower", "hall", "камен", "деревян", "башн", "зал"),
-    "atmosphere": ("dim", "mist", "fog", "warm", "gloomy", "туман", "мрачн", "светл", "уютн"),
+_TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
+    "hair": re.compile(
+        r"\b(?:hair|haired|blond|blonde|redhead|curly|braid|braids|beard|bearded|"
+        r"mustache|moustache|bald|shaggy|bun)\b"
+        r"|\b(?:волос|кудр|кос[аыуе]|бород|усы\b|усов\b|усами\b|лыс|пучок|лохмат)",
+        re.IGNORECASE,
+    ),
+    "eyes": re.compile(
+        r"\b(?:eye|eyes|gaze)\b|\b(?:глаз|взгляд)",
+        re.IGNORECASE,
+    ),
+    "build": re.compile(
+        r"\b(?:tall|short|slender|stout|thin|broad|beefy|giant|plump|skinny|stocky|bony)\b"
+        r"|\b(?:рост|худощ|крепк|высок|крупн|грузн|великан|худой|худая|тощ|полн|костляв)",
+        re.IGNORECASE,
+    ),
+    "age_appearance": re.compile(
+        r"\b(?:young|old|elderly|child|boy|girl|teen|teenager|baby|infant|toddler|middle-aged)\b"
+        r"|\b(?:молод|стар|ребён|ребен|девоч|мальч|младен|малыш|грудн|пожил)",
+        re.IGNORECASE,
+    ),
+    "attire_default": re.compile(
+        r"\b(?:coat|dress|cloak|hat|robe|robes|uniform|suit|boots|trousers|jacket|shirt|tie|scarf)\b"
+        r"|\b(?:плать|плащ|пальт|шляп|костюм|куртк|галстук|шарф|рубаш|манти|сапог)",
+        re.IGNORECASE,
+    ),
+    "distinctive_mark": re.compile(
+        r"\b(?:scar|freckle|freckles|tattoo|limp|glasses|spectacles|lightning)\b"
+        r"|\b(?:шрам|веснуш|очки|очков|очках|родинк|молни)",
+        re.IGNORECASE,
+    ),
+    "palette_value": re.compile(
+        r"\b(?:pale|dark|bright|shadow)\b|\b(?:светл|тёмн|темн|бледн)",
+        re.IGNORECASE,
+    ),
+    "architecture": re.compile(
+        r"\b(?:stone|wood|wooden|brick|arch|tower|hall)\b|\b(?:камен|деревян|башн|зал)",
+        re.IGNORECASE,
+    ),
+    "atmosphere": re.compile(
+        r"\b(?:dim|mist|fog|warm|gloomy)\b|\b(?:туман|мрачн|светл|уютн)",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -2392,14 +2520,14 @@ def resolve_appearance_with_design_fallback(
     """
     explicit_list = [thaw(f) for f in explicit_facts]
     explicit_blob = " ".join(
-        f"{f.get('description_en', '')} {f.get('description_ru', '')}".casefold()
+        f"{f.get('description_en', '')} {f.get('description_ru', '')}"
         for f in explicit_list
     )
     kept_design: list[dict[str, Any]] = []
     for trait_obj in design_traits:
         trait_name = str(trait_obj.get("trait", ""))
-        keywords = _TRAIT_KEYWORDS.get(trait_name, ())
-        if keywords and any(kw in explicit_blob for kw in keywords):
+        pattern = _TRAIT_PATTERNS.get(trait_name)
+        if pattern is not None and pattern.search(explicit_blob):
             continue
         kept_design.append(thaw(trait_obj))
     return tuple(explicit_list), tuple(kept_design)

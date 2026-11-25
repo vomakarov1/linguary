@@ -581,3 +581,18 @@ async def test_unique_uuid_attempt_id_per_physical_call_under_logging_client(
         calls = tx.llm_calls.list_for_book("book-1")
         assert len(calls) == 2
         assert len({c.attempt_id for c in calls}) == 2
+
+
+def test_illustration_candidates_schema_accepts_up_to_256_covered_ids_and_rejects_257() -> None:
+    base = _valid_json_for(LLMResponseKind.ILLUSTRATION_CANDIDATES)
+    ok_41 = {**base, "covered_source_unit_ids": [f"b-{i}" for i in range(41)]}
+    dto_41 = parse_payload(LLMResponseKind.ILLUSTRATION_CANDIDATES, json.dumps(ok_41))
+    assert len(dto_41.covered_source_unit_ids) == 41
+
+    ok_256 = {**base, "covered_source_unit_ids": [f"b-{i}" for i in range(256)]}
+    dto_256 = parse_payload(LLMResponseKind.ILLUSTRATION_CANDIDATES, json.dumps(ok_256))
+    assert len(dto_256.covered_source_unit_ids) == 256
+
+    too_many = {**base, "covered_source_unit_ids": [f"b-{i}" for i in range(257)]}
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.ILLUSTRATION_CANDIDATES, json.dumps(too_many))

@@ -46,8 +46,32 @@ def _clean_llm_settings(
     model: str,
     revision: IllustrationSettingsRevision,
 ) -> LLMSettings:
-    """Build clean illustration `LLMSettings`, isolated from global reasoning/temperature."""
+    """Build clean illustration `LLMSettings`, inheriting reasoning only for the primary model."""
     policy = revision.settings.policy
+    effective_max_tokens = (
+        base_llm.max_output_tokens
+        if base_llm.max_output_tokens is not None
+        else policy.max_completion_tokens
+    )
+    same_primary_model = model.strip() == base_llm.model.strip()
+    if same_primary_model:
+        reasoning_effort = base_llm.reasoning_effort
+        if (
+            reasoning_effort is None
+            and base_llm.reasoning_max_tokens is not None
+            and _is_openrouter_url(base_llm.base_url)
+            and (
+                effective_max_tokens is None
+                or base_llm.reasoning_max_tokens < effective_max_tokens
+            )
+        ):
+            reasoning_max_tokens = base_llm.reasoning_max_tokens
+        else:
+            reasoning_max_tokens = None
+    else:
+        reasoning_effort = None
+        reasoning_max_tokens = None
+
     return LLMSettings(
         provider=base_llm.provider,
         base_url=base_llm.base_url,
@@ -57,9 +81,9 @@ def _clean_llm_settings(
         model=model,
         timeout_seconds=base_llm.timeout_seconds,
         temperature=policy.temperature,
-        max_output_tokens=policy.max_completion_tokens,
-        reasoning_effort=None,
-        reasoning_max_tokens=None,
+        max_output_tokens=effective_max_tokens,
+        reasoning_effort=reasoning_effort,
+        reasoning_max_tokens=reasoning_max_tokens,
         max_attempts=1,
         requests_per_minute=base_llm.requests_per_minute,
         debug_llm_payloads=base_llm.debug_llm_payloads,
@@ -106,13 +130,13 @@ class IllustrationRuntime(IllustrationRuntimePort):
         self._uow = unit_of_work
         self._on_logged = on_logged
         self._injected_client = injected_client
-        self._pool: dict[tuple[tuple[Any, ...], str], OpenAICompatibleLLMClient] = {}
+        self._pool: dict[tuple[tuple[Any, ...], str, tuple[Any, ...]], OpenAICompatibleLLMClient] = {}
         self._retired: list[OpenAICompatibleLLMClient] = []
 
     def _current_llm(self) -> LLMSettings:
         return self._runtime_settings.current.settings.llm
 
-    def _transport_fingerprint(self, llm: LLMSettings) -> tuple[Any, ...]:
+    def _runtime_fingerprint(self, llm: LLMSettings) -> tuple[Any, ...]:
         return (
             llm.provider,
             llm.base_url,
@@ -120,6 +144,18 @@ class IllustrationRuntime(IllustrationRuntimePort):
             llm.proxy_url,
             llm.api_key,
             llm.timeout_seconds,
+            llm.model,
+            llm.max_output_tokens,
+            llm.reasoning_effort,
+            llm.reasoning_max_tokens,
+        )
+
+    def _policy_generation_fingerprint(self, clean: LLMSettings) -> tuple[Any, ...]:
+        return (
+            clean.temperature,
+            clean.max_output_tokens,
+            clean.reasoning_effort,
+            clean.reasoning_max_tokens,
         )
 
     def _pricing_for(self, llm: LLMSettings) -> TokenPricing | None:
@@ -178,12 +214,13 @@ class IllustrationRuntime(IllustrationRuntimePort):
                     "ключ провайдера LLM не настроен",
                 )
             clean = _clean_llm_settings(llm, model=model, revision=revision)
-            fp = self._transport_fingerprint(clean)
-            # Evict any cached clients belonging to an older transport fingerprint.
+            rt_fp = self._runtime_fingerprint(llm)
+            policy_gen_fp = self._policy_generation_fingerprint(clean)
+            # Evict any cached clients belonging to an older runtime fingerprint.
             for key in list(self._pool.keys()):
-                if key[0] != fp:
+                if key[0] != rt_fp:
                     self._retired.append(self._pool.pop(key))
-            pool_key = (fp, model)
+            pool_key = (rt_fp, model, policy_gen_fp)
             cached = self._pool.get(pool_key)
             if cached is None:
                 cached = OpenAICompatibleLLMClient(

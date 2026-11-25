@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -45,6 +46,7 @@ from linguary.domain.illustrations import (
     IllustrationValidationError,
     RecoveredIllustrationAttempt,
     RegistryItem,
+    derive_chapter_state,
 )
 
 
@@ -680,6 +682,64 @@ class SqlAlchemyIllustrationRepository:
             for row in rows
         )
 
+    def _resolve_pending_chapter_headers(
+        self,
+        generation_id: str,
+        page: Sequence[ChapterHeaderRow],
+    ) -> tuple[ChapterHeaderRow, ...]:
+        pending_sids = [
+            h.section_id
+            for h in page
+            if h.scope_id is not None and h.state == "queued"
+        ]
+        if not pending_sids:
+            return tuple(page)
+        child_rows = self._session.execute(
+            select(
+                IllustrationScopeRow.section_id,
+                IllustrationScopeRow.state,
+                IllustrationScopeRow.reason_code,
+            )
+            .where(
+                IllustrationScopeRow.generation_id == generation_id,
+                IllustrationScopeRow.stage != IllustrationScopeStage.CHAPTER.value,
+                IllustrationScopeRow.state != IllustrationScopeState.SPLIT.value,
+                IllustrationScopeRow.section_id.in_(pending_sids),
+            )
+            .order_by(
+                IllustrationScopeRow.stage,
+                IllustrationScopeRow.scope_key,
+            )
+        ).all()
+        children_by_sid: dict[str, list[tuple[IllustrationScopeState, str | None]]] = defaultdict(list)
+        for row in child_rows:
+            if row.section_id is not None:
+                children_by_sid[row.section_id].append(
+                    (IllustrationScopeState(row.state), row.reason_code)
+                )
+        resolved: list[ChapterHeaderRow] = []
+        for header in page:
+            if header.scope_id is not None and header.state == "queued":
+                new_state, new_reason = derive_chapter_state(
+                    IllustrationScopeState.PENDING,
+                    header.reason_code,
+                    children_by_sid.get(header.section_id, ()),
+                )
+                resolved.append(
+                    ChapterHeaderRow(
+                        section_id=header.section_id,
+                        order=header.order,
+                        title=header.title,
+                        state=new_state,
+                        reason_code=new_reason,
+                        moment_count=header.moment_count,
+                        scope_id=header.scope_id,
+                    )
+                )
+            else:
+                resolved.append(header)
+        return tuple(resolved)
+
     def get_chapter_header_page(
         self,
         book_id: str,
@@ -785,7 +845,10 @@ class SqlAlchemyIllustrationRepository:
                 for header in ordered_scope_headers:
                     if header.section_id not in seen:
                         merged.append(header)
-                return tuple(merged[offset : offset + limit]), len(merged)
+                return (
+                    self._resolve_pending_chapter_headers(gen.id, merged[offset : offset + limit]),
+                    len(merged),
+                )
 
             if ordered_scope_headers:
                 live_sections = self._session.execute(
@@ -812,9 +875,17 @@ class SqlAlchemyIllustrationRepository:
                                     scope_id=None,
                                 )
                             )
-                    return tuple(merged_live[offset : offset + limit]), len(merged_live)
-                return tuple(ordered_scope_headers[offset : offset + limit]), len(
-                    ordered_scope_headers
+                    return (
+                        self._resolve_pending_chapter_headers(
+                            gen.id, merged_live[offset : offset + limit]
+                        ),
+                        len(merged_live),
+                    )
+                return (
+                    self._resolve_pending_chapter_headers(
+                        gen.id, ordered_scope_headers[offset : offset + limit]
+                    ),
+                    len(ordered_scope_headers),
                 )
 
         section_total = int(
@@ -901,6 +972,7 @@ class SqlAlchemyIllustrationRepository:
             )
         statement = select(IllustrationScopeRow).where(
             IllustrationScopeRow.generation_id == generation_id,
+            IllustrationScopeRow.stage != IllustrationScopeStage.CHAPTER.value,
             IllustrationScopeRow.state == IllustrationScopeState.FAILED.value,
         )
         if section_id is not None:
