@@ -340,7 +340,31 @@ class Recovery:
             if any(scope.status in {'claimed', 'stopped'} for scope in scopes):
                 raise RecoveryError('interrupted', root_id)
             order = {block: index for index, block in enumerate(root.manifest['ordered_blocks'])}
-            return tuple(sorted((scope for scope in scopes if scope.status == 'pending'), key=lambda s: order[s.ordered_blocks[0]]))
+            by_id = {scope.id: scope for scope in scopes}
+            count_fn = getattr(transaction.work, 'scope_attempt_count', None)
+
+            def _depth(scope: RecoveryScope) -> int:
+                depth = 0
+                cur = scope
+                seen: set[str] = {cur.id}
+                while cur.parent_id is not None and cur.parent_id in by_id:
+                    if cur.parent_id in seen:
+                        break
+                    seen.add(cur.parent_id)
+                    depth += 1
+                    cur = by_id[cur.parent_id]
+                return depth
+
+            def _attempts(scope: RecoveryScope) -> int:
+                return int(count_fn(scope.id)) if callable(count_fn) else 0
+
+            pending = [scope for scope in scopes if scope.status == 'pending']
+            return tuple(
+                sorted(
+                    pending,
+                    key=lambda s: (_depth(s), _attempts(s), order[s.ordered_blocks[0]]),
+                )
+            )
 
     def split(self, root_id, scope_id, *, failing_block_ids: tuple[str, ...] = ()):
         with self.uow.transaction() as transaction:

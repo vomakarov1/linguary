@@ -2533,6 +2533,101 @@ async def test_process_chapter_and_regenerate_block_forward_failing_block_ids_to
     assert recorded_splits == [(root_rb_id, scope_rb_id, ("b1",))]
 
 
+def test_plan_unresolved_orders_scopes_bfs_by_depth_attempts_and_document_order() -> None:
+    """BFS ordering schedules shallower/untried sibling branches before deeper splits."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.application.recovery import Recovery, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+
+    root_id = "00000000-0000-0000-0000-000000000010"
+    cond_id = "00000000-0000-0000-0000-000000000011"
+    s_root_id = "00000000-0000-0000-0000-000000000020"
+    s_left_id = "00000000-0000-0000-0000-000000000021"
+    s_right_id = "00000000-0000-0000-0000-000000000022"
+    s_l1_id = "00000000-0000-0000-0000-000000000023"
+    s_l2_id = "00000000-0000-0000-0000-000000000024"
+
+    blocks = ("b1", "b2", "b3", "b4")
+    manifest = root_manifest(
+        book_id="book-1",
+        conditions_id=cond_id,
+        glossary_sha="g",
+        analysis_sha="a",
+        plan_sha=None,
+        ordered_blocks=blocks,
+        treatments=("TRANSLATE",) * len(blocks),
+        boundaries=(blocks,),
+        atomic_intervals=tuple((b,) for b in blocks),
+        max_source_chars=500,
+    )
+    root = RecoveryRoot(
+        root_id,
+        "book-1",
+        cond_id,
+        "rk-bfs",
+        manifest,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    # Root split into L (b1,b2) and R (b3,b4); L then split into L1 (b1) and L2 (b2).
+    scopes = (
+        RecoveryScope(s_root_id, root_id, blocks, status="split"),
+        RecoveryScope(s_left_id, root_id, ("b1", "b2"), status="split", parent_id=s_root_id),
+        RecoveryScope(s_right_id, root_id, ("b3", "b4"), status="pending", parent_id=s_root_id),
+        RecoveryScope(s_l1_id, root_id, ("b1",), status="pending", parent_id=s_left_id),
+        RecoveryScope(s_l2_id, root_id, ("b2",), status="pending", parent_id=s_left_id),
+    )
+    attempt_counts: dict[str, int] = {}
+
+    class WorkStore:
+        def get_root(self, rid):
+            return root if rid == root_id else None
+
+        def list_scopes(self, rid):
+            return scopes if rid == root_id else ()
+
+        def scope_attempt_count(self, sid):
+            return attempt_counts.get(sid, 0)
+
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore())
+
+    # 1. R (depth 1) must be scheduled before L1, L2 (depth 2); L1 precedes L2 by doc order.
+    planned = Recovery(Uow()).plan_unresolved(root_id)
+    assert [s.id for s in planned] == [s_right_id, s_l1_id, s_l2_id]
+
+    # 2. Within same depth, fewer attempts come before more attempts.
+    attempt_counts[s_l1_id] = 2
+    attempt_counts[s_l2_id] = 0
+    planned_by_attempts = Recovery(Uow()).plan_unresolved(root_id)
+    assert [s.id for s in planned_by_attempts] == [s_right_id, s_l2_id, s_l1_id]
+
+    # 3. Same depth and no scope_attempt_count callable -> strictly document order.
+    same_depth_scopes = (
+        RecoveryScope(s_root_id, root_id, blocks, status="split"),
+        RecoveryScope(s_right_id, root_id, ("b3", "b4"), status="pending", parent_id=s_root_id),
+        RecoveryScope(s_left_id, root_id, ("b1", "b2"), status="pending", parent_id=s_root_id),
+    )
+
+    class MinimalWorkStore:
+        def get_root(self, rid):
+            return root if rid == root_id else None
+
+        def list_scopes(self, rid):
+            return same_depth_scopes if rid == root_id else ()
+
+    class MinimalUow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=MinimalWorkStore())
+
+    planned_same_depth = Recovery(MinimalUow()).plan_unresolved(root_id)
+    assert [s.id for s in planned_same_depth] == [s_left_id, s_right_id]
+
+
 
 
 

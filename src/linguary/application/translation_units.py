@@ -39,6 +39,10 @@ from linguary.domain.content_plan import Scene
 #: JSON wrapping consumes ~5000-6000 tokens.
 DEFAULT_MAX_UNIT_SOURCE_CHARS = 8000
 
+#: Maximum number of blocks sent in a single processing request. Caps dialogue-heavy
+#: chapters whose short lines would otherwise pack dozens of blocks into one unit.
+DEFAULT_MAX_UNIT_BLOCKS = 16
+
 #: Block types occurring contiguously as a cohesive whole: list item, poem stanza, quote, table.
 #: Splitting a list midway deprives the model of its start, while poetry loses its stanza context.
 _COHESIVE_BLOCK_TYPES = frozenset(
@@ -63,6 +67,7 @@ def plan_translation_units(
     *,
     id_factory: Callable[[], str],
     max_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
+    max_blocks: int | None = DEFAULT_MAX_UNIT_BLOCKS,
     scenes: Sequence[Scene] = (),
 ) -> tuple[TranslationUnit, ...]:
     """Splits chapter blocks into groups for model calls (PRD § 10).
@@ -75,11 +80,13 @@ def plan_translation_units(
     A chapter with no textual blocks (cover, illustration page) yields an empty result:
     nothing to process, no model calls.
 
-    Scene endings may close a group once it fills 40% of the size limit. Cohesive
+    Scene endings may close a group once it fills 40% of the size or block limit. Cohesive
     runs stay intact and strict sizing takes precedence over this preference.
     """
     if max_source_chars < 1:
         raise TranslationUnitError("предел размера группы блоков должен быть положительным")
+    if max_blocks is not None and max_blocks < 1:
+        raise TranslationUnitError("предел числа блоков в группе должен быть положительным")
     ordered = tuple(
         block
         for block in blocks
@@ -89,41 +96,66 @@ def plan_translation_units(
         return ()
     return tuple(
         TranslationUnit.of_blocks(id=id_factory(), blocks=group, plan=plan)
-        for group in _grouped(ordered, max_source_chars=max_source_chars, scenes=scenes)
+        for group in _grouped(
+            ordered,
+            max_source_chars=max_source_chars,
+            max_blocks=max_blocks,
+            scenes=scenes,
+        )
     )
 
 
 def _grouped(
-    blocks: Sequence[DocumentBlock], *, max_source_chars: int, scenes: Sequence[Scene] = (),
+    blocks: Sequence[DocumentBlock],
+    *,
+    max_source_chars: int,
+    max_blocks: int | None = DEFAULT_MAX_UNIT_BLOCKS,
+    scenes: Sequence[Scene] = (),
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
     """Group boundaries: cohesive runs intact, sizing divided into balanced chapter portions.
 
-    The chapter is not partitioned into maximal-size chunks, but into `ceil(total / limit)`
-    evenly sized portions: a one-paragraph tail would cost an extra call without scene context.
-    The limit remains strict — a portion never exceeds it, unless a single block exceeds the
-    limit: `DocumentBlock` is indivisible (ADR § 3).
+    The chapter is not partitioned into maximal-size chunks, but into evenly sized portions
+    based on both character and block count limits: a one-paragraph tail would cost an extra
+    call without scene context. Limits remain strict — a portion never exceeds them, unless a
+    single block exceeds the character limit: `DocumentBlock` is indivisible (ADR § 3).
     """
     total = sum(len(block.text) for block in blocks)
-    count = max(1, -(-total // max_source_chars))
+    total_blocks = len(blocks)
+    count_by_chars = max(1, -(-total // max_source_chars))
+    count_by_blocks = max(1, -(-total_blocks // max_blocks)) if max_blocks is not None else 1
+    count = max(count_by_chars, count_by_blocks)
+    balance_by_blocks = count_by_blocks > count_by_chars
     groups: list[list[DocumentBlock]] = []
     current: list[DocumentBlock] = []
     current_size = 0
     placed = 0
+    placed_blocks = 0
     scene_ends = {scene.end_block_id for scene in scenes}
-    for cohesive in _cohesive_runs(blocks, max_source_chars=max_source_chars):
+    for cohesive in _cohesive_runs(
+        blocks, max_source_chars=max_source_chars, max_blocks=max_blocks
+    ):
         size = sum(len(block.text) for block in cohesive)
+        run_blocks = len(cohesive)
+        current_blocks = len(current)
         if current and _closes_group(
             position=placed + current_size,
             size=size,
             current_size=current_size,
+            position_blocks=placed_blocks + current_blocks,
+            run_blocks=run_blocks,
+            current_blocks=current_blocks,
             filled=len(groups),
             count=count,
             total=total,
+            total_blocks=total_blocks,
             max_source_chars=max_source_chars,
+            max_blocks=max_blocks,
+            balance_by_blocks=balance_by_blocks,
             scene_boundary=current[-1].id in scene_ends,
         ):
             groups.append(current)
             placed += current_size
+            placed_blocks += current_blocks
             current, current_size = [], 0
         current.extend(cohesive)
         current_size += size
@@ -136,38 +168,55 @@ def _closes_group(
     position: int,
     size: int,
     current_size: int,
+    position_blocks: int,
+    run_blocks: int,
+    current_blocks: int,
     filled: int,
     count: int,
     total: int,
+    total_blocks: int,
     max_source_chars: int,
+    max_blocks: int | None,
+    balance_by_blocks: bool,
     scene_boundary: bool = False,
 ) -> bool:
     """Whether the current group should close before the next cohesive run.
 
-    The strict request limit precedes a soft scene boundary at 40% capacity.
+    The strict request limits precede a soft scene boundary at 40% capacity.
     Otherwise, proximity to the balanced chapter partition boundary prevents a tiny tail:
     append a chunk while it brings the group closer to that boundary.
     """
     if current_size + size > max_source_chars:
         return True
-    if scene_boundary and current_size * 5 >= max_source_chars * 2:
+    if max_blocks is not None and current_blocks + run_blocks > max_blocks:
+        return True
+    if scene_boundary and (
+        current_size * 5 >= max_source_chars * 2
+        or (max_blocks is not None and current_blocks * 5 >= max_blocks * 2)
+    ):
         return True
     if filled >= count - 1:
         return False
+    if balance_by_blocks:
+        boundary = total_blocks * (filled + 1) / count
+        return abs(position_blocks + run_blocks - boundary) > abs(position_blocks - boundary)
     boundary = total * (filled + 1) / count
     return abs(position + size - boundary) > abs(position - boundary)
 
 
 def _cohesive_runs(
-    blocks: Sequence[DocumentBlock], *, max_source_chars: int
+    blocks: Sequence[DocumentBlock],
+    *,
+    max_source_chars: int,
+    max_blocks: int | None = DEFAULT_MAX_UNIT_BLOCKS,
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
     """Chapter chunks that should not be split across requests (PRD § 10).
 
     Adjacent blocks sharing a parent container and contiguous blocks of lists, poetry,
     quotes, or tables are considered cohesive. Dialogue and logically linked paragraphs
     lack structural markers: block order within the group holds them together. A chunk
-    exceeding the request limit on its own is broken into individual blocks: otherwise
-    it would drag the group past the size limit.
+    exceeding the request limits on its own is broken into individual blocks: otherwise
+    it would drag the group past the size or block limit.
     """
     runs: list[list[DocumentBlock]] = []
     for block in blocks:
@@ -178,7 +227,9 @@ def _cohesive_runs(
     return tuple(
         run
         for group in runs
-        for run in _split_oversized(group, max_source_chars=max_source_chars)
+        for run in _split_oversized(
+            group, max_source_chars=max_source_chars, max_blocks=max_blocks
+        )
     )
 
 
@@ -224,15 +275,21 @@ def _starts_with_italic(block: DocumentBlock) -> bool:
 
 
 def _split_oversized(
-    run: Sequence[DocumentBlock], *, max_source_chars: int
+    run: Sequence[DocumentBlock],
+    *,
+    max_source_chars: int,
+    max_blocks: int | None = DEFAULT_MAX_UNIT_BLOCKS,
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
-    """Cohesive run as a whole or, if exceeding the limit, decomposed into individual blocks."""
-    if sum(len(block.text) for block in run) <= max_source_chars:
+    """Cohesive run as a whole or, if exceeding the limits, decomposed into individual blocks."""
+    if sum(len(block.text) for block in run) <= max_source_chars and (
+        max_blocks is None or len(run) <= max_blocks
+    ):
         return (tuple(run),)
     return tuple((block,) for block in run)
 
 
 __all__ = [
+    "DEFAULT_MAX_UNIT_BLOCKS",
     "DEFAULT_MAX_UNIT_SOURCE_CHARS",
     "plan_translation_units",
 ]

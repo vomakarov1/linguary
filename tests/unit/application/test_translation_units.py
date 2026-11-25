@@ -10,6 +10,7 @@ from analysis_fakes import sequential_ids
 from processing_fakes import SECTION_ID, make_block, make_blocks, make_plan
 
 from linguary.application.translation_units import (
+    DEFAULT_MAX_UNIT_BLOCKS,
     DEFAULT_MAX_UNIT_SOURCE_CHARS,
     plan_translation_units,
 )
@@ -365,3 +366,89 @@ def test_cohesive_runs_keep_homogeneous_book_list_in_single_unit() -> None:
         (prose[2].id, prose[3].id),
         (prose[4].id, prose[5].id),
     )
+
+
+def test_default_max_blocks_splits_dialogue_heavy_chapter_into_balanced_units() -> None:
+    """32 short dialogue blocks (< 8000 chars) split into 2 balanced units of 16 by default."""
+    assert DEFAULT_MAX_UNIT_BLOCKS == 16
+    blocks = make_blocks(32, text="a" * 99 + ".")
+
+    units = plan_units(blocks)
+
+    assert len(units) == 2
+    assert tuple(len(unit.items) for unit in units) == (16, 16)
+    assert tuple(b.id for unit in units for b in unit.blocks) == tuple(b.id for b in blocks)
+
+    # 20 short blocks balance evenly (10 + 10) rather than leaving a 4-block tail.
+    twenty = make_blocks(20, text="a" * 99 + ".")
+    balanced = plan_units(twenty)
+    assert tuple(len(unit.items) for unit in balanced) == (10, 10)
+
+
+def test_max_blocks_none_disables_block_cap() -> None:
+    """Passing max_blocks=None preserves unrestricted block count within max_source_chars."""
+    blocks = make_blocks(32, text="a" * 99 + ".")
+
+    units = plan_translation_units(
+        blocks,
+        make_plan(blocks),
+        id_factory=sequential_ids(),
+        max_source_chars=DEFAULT_MAX_UNIT_SOURCE_CHARS,
+        max_blocks=None,
+    )
+
+    assert len(units) == 1
+    assert len(units[0].items) == 32
+
+
+@pytest.mark.parametrize("bad_limit", [0, -1, -10])
+def test_non_positive_max_blocks_is_rejected(bad_limit: int) -> None:
+    """A non-positive max_blocks limit raises TranslationUnitError."""
+    blocks = make_blocks(2)
+    with pytest.raises(TranslationUnitError, match="положительным"):
+        plan_translation_units(
+            blocks,
+            make_plan(blocks),
+            id_factory=sequential_ids(),
+            max_blocks=bad_limit,
+        )
+
+
+def test_cohesive_run_longer_than_max_blocks_splits_within_limit() -> None:
+    """A cohesive list exceeding max_blocks decomposes into individual blocks and respects the cap."""
+    blocks = tuple(
+        make_block(order=i, text=f"Item {i:02d}", type=BlockType.LIST_ITEM) for i in range(20)
+    )
+
+    units = plan_units(blocks)
+
+    assert len(units) == 2
+    assert tuple(len(unit.items) for unit in units) == (10, 10)
+    assert all(len(unit.items) <= DEFAULT_MAX_UNIT_BLOCKS for unit in units)
+
+
+def test_scene_boundary_closes_group_at_40_percent_of_max_blocks() -> None:
+    """A scene boundary closes a short-block group once 40% of max_blocks is filled."""
+    blocks = make_blocks(12, text="a" * 49 + ".")
+
+    # 6 blocks < 40% of 16 (6 * 5 = 30 < 32), so group does not close early.
+    below_threshold = plan_translation_units(
+        blocks,
+        make_plan(blocks),
+        id_factory=sequential_ids(),
+        max_source_chars=DEFAULT_MAX_UNIT_SOURCE_CHARS,
+        max_blocks=16,
+        scenes=(Scene("scene-1", 0, blocks[0].id, blocks[5].id, "Dialogue"),),
+    )
+    assert tuple(len(unit.items) for unit in below_threshold) == (12,)
+
+    # 7 blocks >= 40% of 16 (7 * 5 = 35 >= 32), so group closes at scene boundary.
+    at_threshold = plan_translation_units(
+        blocks,
+        make_plan(blocks),
+        id_factory=sequential_ids(),
+        max_source_chars=DEFAULT_MAX_UNIT_SOURCE_CHARS,
+        max_blocks=16,
+        scenes=(Scene("scene-1", 0, blocks[0].id, blocks[6].id, "Dialogue"),),
+    )
+    assert tuple(len(unit.items) for unit in at_threshold) == (7, 5)

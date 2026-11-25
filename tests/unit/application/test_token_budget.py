@@ -16,6 +16,7 @@ from linguary.application.ports.llm import LLMRequest, LLMResponse, LLMResponseF
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.token_budget import (
+    IMPLICIT_REASONING_MIN_TOKENS,
     REASONING_EFFORT_MIN_TOKENS,
     REASONING_EFFORT_RESERVE_PCT,
     recommended_unit_max_completion_tokens,
@@ -29,6 +30,7 @@ from linguary.domain import (
     LLMCallStage,
     SourceReference,
     SupportStatus,
+    TokenUsage,
     TranslationUnit,
     TreatmentPlan,
     TreatmentPlanItem,
@@ -716,3 +718,283 @@ async def test_block_processing_escalates_tokens_in_non_recovery_without_unbound
     )
     assert res.attempts == 2
     assert seen_limits == [6144, 32768]
+
+
+def test_recommended_unit_max_completion_tokens_implicit_reasoning_reserve() -> None:
+    assert IMPLICIT_REASONING_MIN_TOKENS == 8192
+
+    # Default (0) preserves exact existing behavior.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort=None,
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=0,
+        )
+        == 2048
+    )
+
+    # Small observed implicit reasoning uses IMPLICIT_REASONING_MIN_TOKENS floor.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort=None,
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=1000,
+        )
+        == 2048 + IMPLICIT_REASONING_MIN_TOKENS
+    )
+
+    # Larger observed implicit reasoning scales by 2x within max_output_tokens.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort=None,
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=5000,
+        )
+        == 2048 + 10000
+    )
+
+    # Clamped by max_output_tokens when configured.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=8000,
+            reasoning_effort=None,
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=5000,
+        )
+        == 8000
+    )
+
+    # Unbounded when max_output_tokens is None.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=None,
+            reasoning_effort=None,
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=5000,
+        )
+        == 2048 + 10000
+    )
+
+    # Explicit reasoning_effort (including "none") or reasoning_max_tokens takes precedence.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort="none",
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=5000,
+        )
+        == 2048
+    )
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort=None,
+            reasoning_max_tokens=4096,
+            implicit_reasoning_tokens=5000,
+        )
+        == 2048 + 4096
+    )
+
+
+async def test_translation_call_adapts_implicit_reasoning_floor_from_response_usage() -> None:
+    block, unit = _sample_unit("Hello world.")
+    cond_id = str(uuid4())
+    conditions = SimpleNamespace(
+        id=cond_id,
+        payload={
+            "models": {"processing": "implicit-thinker"},
+            "versions": {"validators": 1},
+            "llm_parameters": {
+                "max_output_tokens": 32768,
+                "reasoning_effort": None,
+                "reasoning_max_tokens": None,
+            },
+        },
+    )
+    fake_tx = SimpleNamespace(
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+        work=SimpleNamespace(
+            get_binding=lambda kind, key: None,
+            get_conditions=lambda cid: conditions if cid == cond_id else None,
+        ),
+    )
+    fake_uow = SimpleNamespace(transaction=lambda: nullcontext(fake_tx))
+    seen_limits: list[int | None] = []
+
+    async def gen(req: LLMRequest[TranslationResultResponse]) -> LLMResponse[TranslationResultResponse]:
+        seen_limits.append(req.max_completion_tokens)
+        return LLMResponse(
+            payload=TranslationResultResponse(blocks=()),
+            provider="fake",
+            model="implicit-thinker",
+            usage=TokenUsage(prompt_tokens=100, completion_tokens=5500, reasoning_tokens=5000),
+            call_context=req.call_context,
+        )
+
+    call = TranslationCall(
+        unit_of_work=fake_uow,  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(generate=gen),  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=SimpleNamespace(
+            validate=lambda payload, **kwargs: (
+                BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, "Привет."),
+            )
+        ),  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    ctx = CallContext(
+        conditions_id=cond_id,
+        stage=LLMCallStage.TRANSLATION_UNIT.value,
+        scope_id=unit.id,
+        ordered_block_ids=(block.id,),
+        attempt_id=str(uuid4()),
+        generation=0,
+        assigned_model="implicit-thinker",
+        prompt_hash="a" * 64,
+    )
+    req = replace(
+        LLMRequest.for_translation(instructions="Translate.", input_text="b1: Hello world."),
+        call_context=ctx,
+    )
+
+    await call.request(_translation_context(req), unit=unit, target_language="ru", note_ids=lambda: "n1")  # type: ignore[arg-type]
+    await call.request(_translation_context(req), unit=unit, target_language="ru", note_ids=lambda: "n2")  # type: ignore[arg-type]
+
+    assert seen_limits == [2048, 2048 + 10000]
+
+
+@pytest.mark.parametrize(
+    ("max_output_tokens", "error_reasoning", "expected_second_limit"),
+    [
+        (None, 6000, 2048 + 12000),
+        (None, None, 2048 + IMPLICIT_REASONING_MIN_TOKENS),
+        (32768, 6000, 2048 + 12000),
+        (32768, None, 2048 + IMPLICIT_REASONING_MIN_TOKENS),
+    ],
+)
+async def test_translation_call_adapts_implicit_reasoning_floor_on_truncated_error_and_none_max_output(
+    max_output_tokens: int | None,
+    error_reasoning: int | None,
+    expected_second_limit: int,
+) -> None:
+    block, unit = _sample_unit("Hello world.")
+    cond_id = str(uuid4())
+    conditions = SimpleNamespace(
+        id=cond_id,
+        payload={
+            "models": {"processing": "implicit-thinker"},
+            "versions": {"validators": 1},
+            "llm_parameters": {
+                "max_output_tokens": max_output_tokens,
+                "reasoning_effort": None,
+                "reasoning_max_tokens": None,
+            },
+        },
+    )
+    fake_tx = SimpleNamespace(
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+        work=SimpleNamespace(
+            get_binding=lambda kind, key: None,
+            get_conditions=lambda cid: conditions if cid == cond_id else None,
+        ),
+    )
+    fake_uow = SimpleNamespace(transaction=lambda: nullcontext(fake_tx))
+    seen_limits: list[int | None] = []
+    fail_first = {"flag": True}
+
+    async def gen(req: LLMRequest[TranslationResultResponse]) -> LLMResponse[TranslationResultResponse]:
+        seen_limits.append(req.max_completion_tokens)
+        if fail_first["flag"]:
+            fail_first["flag"] = False
+            raise LLMResponseFormatError(
+                "truncated",
+                truncated=True,
+                usage=(
+                    TokenUsage(prompt_tokens=100, completion_tokens=error_reasoning, reasoning_tokens=error_reasoning)
+                    if error_reasoning is not None
+                    else None
+                ),
+                violation=Violation(
+                    rule_code="provider_truncated",
+                    stage=LLMCallStage.TRANSLATION_UNIT.value,
+                    scope="global",
+                    safe_message="truncated",
+                ),
+            )
+        return LLMResponse(
+            payload=TranslationResultResponse(blocks=()),
+            provider="fake",
+            model="implicit-thinker",
+            call_context=req.call_context,
+        )
+
+    call = TranslationCall(
+        unit_of_work=fake_uow,  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(generate=gen),  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=SimpleNamespace(
+            validate=lambda payload, **kwargs: (
+                BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, "Привет."),
+            )
+        ),  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    ctx = CallContext(
+        conditions_id=cond_id,
+        stage=LLMCallStage.TRANSLATION_UNIT.value,
+        scope_id=unit.id,
+        ordered_block_ids=(block.id,),
+        attempt_id=str(uuid4()),
+        generation=0,
+        assigned_model="implicit-thinker",
+        prompt_hash="a" * 64,
+    )
+    req = replace(
+        LLMRequest.for_translation(instructions="Translate.", input_text="b1: Hello world."),
+        call_context=ctx,
+    )
+
+    with pytest.raises(LLMResponseFormatError):
+        await call.request(_translation_context(req), unit=unit, target_language="ru", note_ids=lambda: "n1")  # type: ignore[arg-type]
+
+    # Next unit call immediately gets the calibrated ceiling instead of 2048.
+    await call.request(_translation_context(req), unit=unit, target_language="ru", note_ids=lambda: "n2")  # type: ignore[arg-type]
+
+    assert seen_limits == [2048, expected_second_limit]
+
+
+def test_translation_call_implicit_reasoning_floor_is_thread_safe() -> None:
+    import threading
+
+    call = TranslationCall(
+        unit_of_work=None,  # type: ignore[arg-type]
+        llm_client=None,  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=None,  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    barrier = threading.Barrier(8)
+
+    def worker(offset: int) -> None:
+        barrier.wait()
+        for step in range(200):
+            call._raise_implicit_reasoning_floor(offset * 1000 + step)
+            assert call._get_implicit_reasoning_floor() >= 0
+
+    threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert call._get_implicit_reasoning_floor() == 8199
