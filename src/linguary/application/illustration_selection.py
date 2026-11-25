@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +11,11 @@ from uuid import uuid4
 from linguary.application.context_builder import source_text_for_model, textual_blocks
 from linguary.application.illustration_context import (
     IllustrationContext,
+    compact_safe_detail,
+    is_context_limit_error,
+    is_incompatible_route_error,
+    is_transient_error,
+    is_truncated_error,
     normalize_name_token,
     pack_items_by_wire_budget,
     resolve_quote_anchor,
@@ -30,19 +34,16 @@ from linguary.application.illustrations import (
     finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
+from linguary.application.llm_rejections import finalize_response, record_rejection
 from linguary.application.ports.illustrations import IllustrationRuntimePort
 from linguary.application.ports.llm import (
-    LLMConfigurationError,
-    LLMContextCapacityError,
-    LLMProviderError,
     LLMRequest,
-    LLMRequestTooLargeError,
+    LLMResponse,
     LLMResponseFormatError,
     LLMResponseKind,
-    LLMTransportError,
 )
 from linguary.application.ports.persistence import UnitOfWork
-from linguary.application.retry_policy import RetryPolicy
+from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.domain import (
     DocumentBlock,
     DocumentSection,
@@ -71,45 +72,12 @@ from linguary.domain.illustrations import (
 from linguary.domain.llm_log import LLMCallStage
 
 _MAX_SHORTLIST = 24
+_MAX_CANDIDATE_BLOCKS_PER_CHUNK = 24
 _DEFAULT_ZERO_REASON_RU = "В этой главе не нашлось выразительных визуальных моментов для иллюстрации."
-_CONTEXT_LIMIT_RE = re.compile(
-    r"context[_ ]length|maximum context|too many tokens|prompt is too long|request too large|413",
-    re.IGNORECASE,
-)
 
 
 def _default_id() -> str:
     return str(uuid4())
-
-
-def _is_context_limit_error(error: Exception) -> bool:
-    if isinstance(error, (LLMRequestTooLargeError, LLMContextCapacityError)):
-        return True
-    if isinstance(error, LLMProviderError):
-        status = getattr(error, "status_code", None)
-        if status == 413:
-            return True
-        if status in (400, 422) and _CONTEXT_LIMIT_RE.search(str(error)):
-            return True
-    return False
-
-
-def _is_truncated_error(error: Exception) -> bool:
-    if not isinstance(error, LLMResponseFormatError):
-        return False
-    if getattr(error, "truncated", False):
-        return True
-    violation = getattr(error, "violation", None)
-    return violation is not None and getattr(violation, "rule_code", None) == "provider_truncated"
-
-
-def _is_transient_error(error: Exception) -> bool:
-    if isinstance(error, LLMTransportError):
-        return True
-    if isinstance(error, LLMProviderError) and not isinstance(error, LLMRequestTooLargeError):
-        status = getattr(error, "status_code", None)
-        return status in (408, 429) or (isinstance(status, int) and status >= 500)
-    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,7 +352,7 @@ def _scene_candidate_units(
                     "scene_end_block_id": scene_blocks[-1].id,
                     "blocks": [
                         {
-                            "source_unit_id": f"{scene.id}:b:{b.id}",
+                            "source_unit_id": b.id,
                             "block_id": b.id,
                             "block_order": block_order_by_id[b.id],
                             "text": source_text_for_model(b),
@@ -406,7 +374,7 @@ def _scene_candidate_units(
                 "scene_end_block_id": blocks[-1].id,
                 "blocks": [
                     {
-                        "source_unit_id": f"{synthetic_scene_id}:b:{b.id}",
+                        "source_unit_id": b.id,
                         "block_id": b.id,
                         "block_order": idx,
                         "text": source_text_for_model(b),
@@ -591,6 +559,7 @@ class _ValidationOutcome:
     reason_code: str = IllustrationReasonCode.MODEL_OUTPUT_INVALID.value
     repair_reason: str = ""
     request_split: bool = False
+    split_eligible: bool = False
 
 
 class IllustrationSelection:
@@ -728,6 +697,7 @@ class IllustrationSelection:
                 build_request=_build_req,
                 sizer=sizer,
                 target_bytes=policy.initial_target_bytes,
+                max_items=_MAX_CANDIDATE_BLOCKS_PER_CHUNK,
             )
             for c_idx, chunk in enumerate(chunks):
                 scope_key = f"cand:{section_id}:s{s_idx:03d}:p{c_idx:03d}"
@@ -1045,6 +1015,7 @@ class IllustrationSelection:
                 except IllustrationOwnershipError:
                     return
 
+            response: LLMResponse[Any] | None = None
             validation: _ValidationOutcome | None = None
             call_error: Exception | None = None
             try:
@@ -1058,7 +1029,9 @@ class IllustrationSelection:
                 call_error = err
 
             if call_error is not None:
-                if _is_context_limit_error(call_error):
+                if response is not None:
+                    record_rejection(self._uow, response, call_error)
+                if is_context_limit_error(call_error):
                     if is_composite:
                         notify_after = self._handle_post_send_split(
                             book_id=book_id,
@@ -1082,7 +1055,7 @@ class IllustrationSelection:
                     )
                     return
 
-                if _is_truncated_error(call_error):
+                if is_truncated_error(call_error):
                     if is_composite:
                         notify_after = self._handle_post_send_split(
                             book_id=book_id,
@@ -1106,7 +1079,7 @@ class IllustrationSelection:
                     )
                     return
 
-                if _is_transient_error(call_error):
+                if is_transient_error(call_error):
                     if self._can_continue_activation(activation_calls_used, scope.id, book_id, policy):
                         with self._uow.transaction() as tx:
                             tx.illustrations.record_attempt_outcome(
@@ -1130,6 +1103,7 @@ class IllustrationSelection:
                     return
 
                 if isinstance(call_error, LLMResponseFormatError):
+                    err_detail = str(call_error)
                     if (
                         repairs_used < policy.max_repair_turns
                         and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1139,12 +1113,27 @@ class IllustrationSelection:
                                 attempt.id,
                                 state=IllustrationAttemptState.REJECTED,
                                 outcome={
-                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value
+                                    "reason_code": IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                                    "detail": compact_safe_detail(err_detail, max_bytes=256),
                                 },
                             )
                         repairs_used += 1
-                        repair_summary = str(call_error)
+                        repair_summary = err_detail
                         continue
+                    if scope.stage is IllustrationScopeStage.CANDIDATES and is_composite:
+                        notify_after = self._handle_post_send_split(
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            task_id=task.id,
+                            scope=scope,
+                            attempt_id=attempt.id,
+                            revision=revision,
+                            depth=depth,
+                            policy=policy,
+                            fail_reason=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                            detail=err_detail,
+                        )
+                        break
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1152,12 +1141,13 @@ class IllustrationSelection:
                         scope_id=scope.id,
                         attempt_id=attempt.id,
                         reason_code=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                        detail=err_detail,
                     )
                     return
 
                 fallback_reason = (
                     IllustrationReasonCode.ROUTE_UNAVAILABLE.value
-                    if isinstance(call_error, LLMConfigurationError)
+                    if is_incompatible_route_error(call_error)
                     else IllustrationReasonCode.PROVIDER_ERROR.value
                 )
                 self._finalize_failure(
@@ -1172,6 +1162,9 @@ class IllustrationSelection:
 
             assert validation is not None
             if validation.request_split:
+                split_detail = "модель запросила дробление (complete=false)"
+                if response is not None:
+                    record_rejection(self._uow, response, ResultValidationError(split_detail))
                 if is_composite:
                     notify_after = self._handle_post_send_split(
                         book_id=book_id,
@@ -1183,6 +1176,7 @@ class IllustrationSelection:
                         depth=depth,
                         policy=policy,
                         fail_reason=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
+                        detail=split_detail,
                     )
                     break
                 self._finalize_failure(
@@ -1192,10 +1186,14 @@ class IllustrationSelection:
                     scope_id=scope.id,
                     attempt_id=attempt.id,
                     reason_code=IllustrationReasonCode.ATOMIC_INPUT_TOO_LARGE.value,
+                    detail=split_detail,
                 )
                 return
 
             if not validation.ok:
+                detail_text = validation.repair_reason
+                if response is not None:
+                    record_rejection(self._uow, response, ResultValidationError(detail_text))
                 if (
                     repairs_used < policy.max_repair_turns
                     and self._can_continue_activation(activation_calls_used, scope.id, book_id, policy)
@@ -1204,11 +1202,32 @@ class IllustrationSelection:
                         tx.illustrations.record_attempt_outcome(
                             attempt.id,
                             state=IllustrationAttemptState.REJECTED,
-                            outcome={"reason_code": validation.reason_code},
+                            outcome={
+                                "reason_code": validation.reason_code,
+                                "detail": compact_safe_detail(detail_text, max_bytes=256),
+                            },
                         )
                     repairs_used += 1
-                    repair_summary = validation.repair_reason
+                    repair_summary = detail_text
                     continue
+                if (
+                    scope.stage is IllustrationScopeStage.CANDIDATES
+                    and is_composite
+                    and validation.split_eligible
+                ):
+                    notify_after = self._handle_post_send_split(
+                        book_id=book_id,
+                        generation_id=generation_id,
+                        task_id=task.id,
+                        scope=scope,
+                        attempt_id=attempt.id,
+                        revision=revision,
+                        depth=depth,
+                        policy=policy,
+                        fail_reason=validation.reason_code,
+                        detail=detail_text,
+                    )
+                    break
                 self._finalize_failure(
                     book_id=book_id,
                     generation_id=generation_id,
@@ -1216,6 +1235,7 @@ class IllustrationSelection:
                     scope_id=scope.id,
                     attempt_id=attempt.id,
                     reason_code=validation.reason_code,
+                    detail=detail_text,
                 )
                 return
 
@@ -1250,6 +1270,7 @@ class IllustrationSelection:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": stale_reason},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     if stale_reason == IllustrationReasonCode.SOURCE_CHANGED.value:
                         revoke_active_in_transaction(
                             tx, book_id, reason_code=IllustrationReasonCode.SOURCE_CHANGED.value
@@ -1282,7 +1303,10 @@ class IllustrationSelection:
                         state=IllustrationAttemptState.STALE,
                         outcome={"reason_code": IllustrationReasonCode.STALE_ATTEMPT.value},
                     )
+                    finalize_response(self._uow, response, "stale", transaction=tx)
                     return
+
+                finalize_response(self._uow, response, "accepted", transaction=tx)
 
                 assert gen is not None
                 if self._advance_section(
@@ -1323,11 +1347,28 @@ class IllustrationSelection:
             return _ValidationOutcome(ok=False, request_split=True)
 
         expected_units = set(str(u) for u in scope.summary.get("expected_source_unit_ids", ()))
-        if set(dto.covered_source_unit_ids) != expected_units:
-            return _ValidationOutcome(
-                ok=False,
-                repair_reason="неполный или лишний covered_source_unit_ids при complete=true",
-            )
+        covered = set(dto.covered_source_unit_ids)
+        if covered != expected_units:
+            ordered_blocks_set = {str(b) for b in scope.summary.get("ordered_block_ids", ())}
+            if not (
+                len(ordered_blocks_set) == len(expected_units)
+                and covered == ordered_blocks_set
+            ):
+                missing = sorted(expected_units - covered)
+                extra = sorted(covered - expected_units)
+                parts = [
+                    "неполный или лишний covered_source_unit_ids при complete=true — "
+                    "перечисли ВСЕ source_unit_id из blocks (включая блоки без событий)"
+                ]
+                if missing:
+                    parts.append(f"пропущены={missing[:4]}")
+                if extra:
+                    parts.append(f"лишние={extra[:4]}")
+                return _ValidationOutcome(
+                    ok=False,
+                    repair_reason="; ".join(parts),
+                    split_eligible=True,
+                )
 
         expected_scene_id = str(scope.summary.get("scene_id", ""))
         if dto.scene_id != expected_scene_id:
@@ -2199,6 +2240,7 @@ class IllustrationSelection:
         depth: int,
         policy: IllustrationPolicy,
         fail_reason: str,
+        detail: str | None = None,
     ) -> bool:
         notify = False
         with self._uow.transaction() as tx:
@@ -2248,11 +2290,20 @@ class IllustrationSelection:
                 return False
 
             if depth >= policy.max_split_depth:
+                fail_outcome = (
+                    {
+                        "reason_code": IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+                        "detail": compact_safe_detail(detail, max_bytes=256),
+                    }
+                    if detail and detail.strip()
+                    else None
+                )
                 try:
                     tx.illustrations.fail_scope(
                         scope.id,
                         attempt_id=attempt_id,
                         reason_code=IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value,
+                        outcome=fail_outcome,
                     )
                 except IllustrationOwnershipError:
                     tx.illustrations.record_attempt_outcome(
@@ -2273,9 +2324,20 @@ class IllustrationSelection:
                 return False
             children = self._split_children_for_scope(scope, revision, depth)
             if not children:
+                fail_outcome = (
+                    {
+                        "reason_code": fail_reason,
+                        "detail": compact_safe_detail(detail, max_bytes=256),
+                    }
+                    if detail and detail.strip()
+                    else None
+                )
                 try:
                     tx.illustrations.fail_scope(
-                        scope.id, attempt_id=attempt_id, reason_code=fail_reason
+                        scope.id,
+                        attempt_id=attempt_id,
+                        reason_code=fail_reason,
+                        outcome=fail_outcome,
                     )
                 except IllustrationOwnershipError:
                     tx.illustrations.record_attempt_outcome(
@@ -2333,11 +2395,23 @@ class IllustrationSelection:
         scope_id: str,
         attempt_id: str,
         reason_code: str,
+        detail: str | None = None,
     ) -> None:
+        outcome = (
+            {
+                "reason_code": reason_code,
+                "detail": compact_safe_detail(detail, max_bytes=256),
+            }
+            if detail and detail.strip()
+            else None
+        )
         with self._uow.transaction() as tx:
             try:
                 tx.illustrations.fail_scope(
-                    scope_id, attempt_id=attempt_id, reason_code=reason_code
+                    scope_id,
+                    attempt_id=attempt_id,
+                    reason_code=reason_code,
+                    outcome=outcome,
                 )
             except IllustrationOwnershipError:
                 tx.illustrations.record_attempt_outcome(

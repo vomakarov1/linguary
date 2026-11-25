@@ -8,6 +8,7 @@ from uuid import uuid4
 from linguary.application.illustration_source import IllustrationSource
 from linguary.application.illustrations import (
     dispatch_scope_task,
+    finalize_generation_state_in_tx,
     revoke_active_in_transaction,
 )
 from linguary.application.ports.persistence import UnitOfWork
@@ -226,26 +227,12 @@ class IllustrationCoordinator:
                         IllustrationScopeState.SPLIT,
                     }:
                         tx.tasks.save(task.supersede())
-                refreshed_scopes = illustrations_repo.list_scopes(gen.id)
-                active_scopes = [
-                    s for s in refreshed_scopes if s.state is not IllustrationScopeState.SPLIT
-                ]
-                has_active_work = any(
-                    s.state in {IllustrationScopeState.PENDING, IllustrationScopeState.RUNNING}
-                    for s in active_scopes
-                )
-                failed_scope = next(
-                    (s for s in active_scopes if s.state is IllustrationScopeState.FAILED),
-                    None,
-                )
-                if not has_active_work and failed_scope is not None:
-                    illustrations_repo.update_generation_state(
-                        gen.book_id,
-                        gen.id,
-                        state=IllustrationGenerationState.FAILED,
-                        reason_code=failed_scope.reason_code
-                        or IllustrationReasonCode.INTERRUPTED.value,
-                    )
+                if finalize_generation_state_in_tx(
+                    tx,
+                    gen.book_id,
+                    gen.id,
+                    fallback_reason=IllustrationReasonCode.INTERRUPTED.value,
+                ):
                     continue
                 if self.reconcile_in_transaction(tx, gen.book_id):
                     enqueued_any = True

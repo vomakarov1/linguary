@@ -15,6 +15,15 @@ REASONING_EFFORT_RESERVE_PCT: dict[str, int] = {
     "high": 75,
 }
 
+#: Minimum reasoning token floor added to visible output budget per reasoning effort level.
+REASONING_EFFORT_MIN_TOKENS: dict[str, int] = {
+    "none": 0,
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 8192,
+    "high": 12288,
+}
+
 _DEFAULT_MAX_FRAGMENT_BLOCKS = 160
 _TOKENS_PER_ANALYSED_BLOCK = 200
 _DEFAULT_ANALYSIS_OUTPUT_BUDGET = 32_768
@@ -103,7 +112,9 @@ def recommended_unit_max_completion_tokens(
     effort = reasoning_effort.strip().lower() if isinstance(reasoning_effort, str) else None
     if effort is not None:
         reserve = REASONING_EFFORT_RESERVE_PCT.get(effort, 0)
-        total = (visible * 100 + (99 - reserve)) // (100 - reserve) if reserve > 0 else visible
+        min_reasoning = REASONING_EFFORT_MIN_TOKENS.get(effort, 0)
+        pct_total = (visible * 100 + (99 - reserve)) // (100 - reserve) if reserve > 0 else visible
+        total = max(pct_total, visible + min_reasoning)
     elif reasoning_max_tokens is not None:
         total = visible + reasoning_max_tokens
     else:
@@ -116,6 +127,7 @@ def recommended_unit_max_completion_tokens(
 
 
 __all__ = [
+    "REASONING_EFFORT_MIN_TOKENS",
     "REASONING_EFFORT_RESERVE_PCT",
     "effective_output_token_budget_for",
     "narrative_max_fragment_blocks_for",

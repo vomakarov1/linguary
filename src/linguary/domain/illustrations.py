@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -220,7 +220,7 @@ class IllustrationPolicy:
 
     max_request_bytes: int = 24576
     repair_reserve_bytes: int = 1200
-    max_completion_tokens: int = 4096
+    max_completion_tokens: int = 16384
     max_split_depth: int = 8
     max_calls_per_generation: int = 2048
     max_scopes_per_generation: int = 8192
@@ -229,7 +229,7 @@ class IllustrationPolicy:
     identity_candidate_page_size: int = 16
     max_candidates_per_scene: int = 2
     selection_fan_in: int = 8
-    temperature: float = 0.2
+    temperature: float | None = None
     policy_version: str = ILLUSTRATION_POLICY_VERSION
 
     def __post_init__(self) -> None:
@@ -260,7 +260,10 @@ class IllustrationPolicy:
                 IllustrationReasonCode.INVALID_REQUEST,
                 "резерв на исправление должен быть меньше лимита запроса",
             )
-        if type(self.temperature) not in (int, float) or not (0.0 <= float(self.temperature) <= 2.0):
+        if self.temperature is not None and (
+            type(self.temperature) not in (int, float)
+            or not (0.0 <= float(self.temperature) <= 2.0)
+        ):
             raise IllustrationValidationError(
                 IllustrationReasonCode.INVALID_REQUEST,
                 "некорректная температура политики иллюстраций",
@@ -300,7 +303,7 @@ class IllustrationPolicy:
             policy_version=str(payload.get("policy_version", ILLUSTRATION_POLICY_VERSION)),
             max_request_bytes=payload.get("max_request_bytes", 24576),
             repair_reserve_bytes=payload.get("repair_reserve_bytes", 1200),
-            max_completion_tokens=payload.get("max_completion_tokens", 4096),
+            max_completion_tokens=payload.get("max_completion_tokens", 16384),
             max_split_depth=payload.get("max_split_depth", 8),
             max_calls_per_generation=payload.get("max_calls_per_generation", 2048),
             max_scopes_per_generation=payload.get("max_scopes_per_generation", 8192),
@@ -309,7 +312,7 @@ class IllustrationPolicy:
             identity_candidate_page_size=payload.get("identity_candidate_page_size", 16),
             max_candidates_per_scene=payload.get("max_candidates_per_scene", 2),
             selection_fan_in=payload.get("selection_fan_in", 8),
-            temperature=payload.get("temperature", 0.2),
+            temperature=payload.get("temperature", None),
         )
 
 
@@ -612,6 +615,41 @@ class RegistryItem:
         return thaw(self.payload)
 
 
+def executable_scopes(scopes: Sequence[IllustrationScope]) -> list[IllustrationScope]:
+    """Return executable (non-virtual, non-split) illustration scopes."""
+    return [
+        s
+        for s in scopes
+        if s.stage is not IllustrationScopeStage.CHAPTER
+        and s.state is not IllustrationScopeState.SPLIT
+    ]
+
+
+def derive_chapter_state(
+    chapter_state: IllustrationScopeState,
+    chapter_reason_code: str | None,
+    child_states: Sequence[tuple[IllustrationScopeState, str | None]],
+) -> tuple[str, str | None]:
+    """Derive deterministic chapter header/detail state from virtual CHAPTER and its executable children."""
+    if chapter_state is IllustrationScopeState.ACCEPTED:
+        return "ready", None
+    if chapter_state is IllustrationScopeState.SKIPPED:
+        return "skipped", chapter_reason_code
+    if chapter_state is IllustrationScopeState.FAILED:
+        return "failed", chapter_reason_code
+    if chapter_state in {IllustrationScopeState.RUNNING, IllustrationScopeState.SPLIT}:
+        return "running", None
+    # chapter_state is PENDING
+    if any(st is IllustrationScopeState.RUNNING for st, _ in child_states):
+        return "running", None
+    if any(st is IllustrationScopeState.PENDING for st, _ in child_states):
+        return "queued", None
+    for st, rc in child_states:
+        if st is IllustrationScopeState.FAILED:
+            return "failed", rc
+    return "queued", None
+
+
 __all__ = [
     "DEFAULT_ILLUSTRATION_POLICY",
     "DEFAULT_ILLUSTRATION_SETTINGS",
@@ -647,6 +685,8 @@ __all__ = [
     "IllustrationValidationError",
     "RecoveredIllustrationAttempt",
     "RegistryItem",
+    "derive_chapter_state",
+    "executable_scopes",
     "format_position_key",
     "normalize_model_name",
 ]
