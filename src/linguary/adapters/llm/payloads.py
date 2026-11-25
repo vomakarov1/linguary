@@ -587,6 +587,43 @@ def _format_loc(loc: tuple[int | str, ...]) -> str:
     return ".".join(parts)
 
 
+#: Static privacy-safe hints mapped by suffix for known `value_error` schema validators.
+_STATIC_VALUE_ERROR_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        "с переводами сегментов полный перевод блока недопустим",
+        "для блока с переводами сегментов полный перевод блока недопустим",
+    ),
+    (
+        "обязателен полный перевод",
+        "для выбранного режима блока обязателен полный перевод",
+    ),
+    (
+        "полный перевод недопустим",
+        "для выбранного режима блока полный перевод недопустим",
+    ),
+    (
+        "обязательны словарные подсказки",
+        "для выбранного режима блока обязательны словарные подсказки",
+    ),
+    (
+        "словарные подсказки недопустимы",
+        "для выбранного режима блока словарные подсказки недопустимы",
+    ),
+    (
+        "пустой перевод сегмента",
+        "перевод сегмента не может быть пустым",
+    ),
+)
+
+
+def _static_value_error_hint(raw_message: str) -> str | None:
+    """Map known schema `ValueError` messages to static privacy-safe hints, or `None`."""
+    for suffix, safe_hint in _STATIC_VALUE_ERROR_HINTS:
+        if raw_message.endswith(suffix):
+            return safe_hint
+    return None
+
+
 def _schema_hints(error: ValidationError) -> list[str]:
     """Collect up to 5 unique schema hints without parentheses or raw model input."""
     hints: list[str] = []
@@ -608,6 +645,22 @@ def _schema_hints(error: ValidationError) -> list[str]:
         elif err_type == "string_too_short":
             min_length = ctx.get("min_length", 1)
             hint = f"{prefix}строка не может быть пустой, минимум {min_length}"
+        elif err_type == "greater_than_equal":
+            if path.endswith(".index") and (".segments[" in path or path.startswith("segments[")):
+                hint = (
+                    f"{prefix}номер сегмента начинается с 1 и равен M из метки [bN.M]; "
+                    "не используй 0 и не перенумеровывай пропущенные сегменты"
+                )
+            else:
+                ge = ctx.get("ge", 1)
+                hint = f"{prefix}значение должно быть не меньше {ge}"
+        elif err_type == "greater_than":
+            gt = ctx.get("gt", 0)
+            hint = f"{prefix}значение должно быть больше {gt}"
+        elif err_type == "value_error":
+            static_hint = _static_value_error_hint(str(item.get("msg", "")))
+            if static_hint is not None:
+                hint = f"{prefix}{static_hint}"
         if hint is None:
             continue
         hint = hint.replace("(", "[").replace(")", "]")

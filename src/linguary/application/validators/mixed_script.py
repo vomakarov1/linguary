@@ -21,7 +21,7 @@ Source excerpts (`original`, `original_excerpt`) are original quotes and are not
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 
@@ -92,6 +92,26 @@ _MARKED_SPAN = re.compile(
 _PARENTHETICAL_GLOSS = re.compile(r"\([^)]*\)")
 _FORMULA_CYRILLIC_TAIL = re.compile(r"\+\s*[А-ЯЁа-яё-]+")
 
+#: Normalization table for matching verbatim multi-word source quotes in Russian notes.
+_SOURCE_MATCH_NORM = str.maketrans(
+    {
+        "’": "'",
+        "‘": "'",
+        "ʼ": "'",
+        "\u2010": "-",
+        "\u2011": "-",
+    }
+)
+
+#: Single Latin word token (allowing internal apostrophe or hyphen) on original note text.
+_LATIN_SOURCE_WORD = re.compile(r"[A-Za-zÀ-ɏ]+(?:['’‘ʼ\u2010\u2011-][A-Za-zÀ-ɏ]+)*")
+
+#: Contiguous multi-word (>= 2 words) Latin run on original note text (internal comma allowed, no newlines).
+_LATIN_MULTIWORD_RUN = re.compile(
+    r"[A-Za-zÀ-ɏ]+(?:['’‘ʼ\u2010\u2011-][A-Za-zÀ-ɏ]+)*"
+    r"(?:(?:,[ \t\xa0]+|[ \t\xa0]+)[A-Za-zÀ-ɏ]+(?:['’‘ʼ\u2010\u2011-][A-Za-zÀ-ɏ]+)*)+"
+)
+
 
 def mixed_script_violation(payload: TranslationResultResponse) -> str | None:
     """Violation description of the first word with mixed Latin and Cyrillic script, or `None`."""
@@ -112,6 +132,7 @@ def note_language_leak_violation(
     payload: TranslationResultResponse,
     *,
     target_language: str,
+    source_texts: Mapping[str, str] | None = None,
 ) -> str | None:
     """Asymmetric check for language leaks inside NOTE texts (P2.T1).
 
@@ -119,18 +140,72 @@ def note_language_leak_violation(
     1. Cyrillic words leaked inside English quotes of >= 2 words
        (e.g. `«was strongly reminded of Дадли»`);
     2. Unmarked (outside quotes/italics) frequent English words between Russian words,
-       respecting the closed whitelist of grammar/linguary terms.
+       respecting the closed whitelist of grammar/linguary terms and verbatim multi-word
+       quotes from the source excerpt / block text.
     """
     if target_language.strip().lower().split("-")[0] != "ru":
         return None
-    for subject, text in _note_texts_of(payload):
-        leak = _note_text_leak(text)
+    for subject, text, allowed_sources in _note_texts_of(payload, source_texts=source_texts):
+        leak = _note_text_leak(text, allowed_sources=allowed_sources)
         if leak is not None:
             return f"{subject} содержит языковое просачивание: {leak}"
     return None
 
 
-def _note_text_leak(text: str) -> str | None:
+def _normalize_for_source_match(text: str) -> str:
+    """Normalize apostrophes, hyphens, whitespace, and case for source quote comparison."""
+    return " ".join(text.translate(_SOURCE_MATCH_NORM).split()).casefold()
+
+
+def _cited_source_spans(
+    text: str, allowed_sources: Sequence[str]
+) -> list[tuple[int, int]]:
+    """Spans in original `text` of contiguous >=2-word Latin quotes present verbatim in `allowed_sources`."""
+    if not allowed_sources:
+        return []
+    normalized_sources = tuple(
+        normalized
+        for src in allowed_sources
+        if (normalized := _normalize_for_source_match(src))
+    )
+    if not normalized_sources:
+        return []
+    spans: list[tuple[int, int]] = []
+    for run in _LATIN_MULTIWORD_RUN.finditer(text):
+        words = list(_LATIN_SOURCE_WORD.finditer(text, run.start(), run.end()))
+        count = len(words)
+        if count < 2:
+            continue
+        for i in range(count - 1):
+            span_start = words[i].start()
+            for j in range(count, i + 1, -1):
+                span_end = words[j - 1].end()
+                if any(s <= span_start and span_end <= e for s, e in spans):
+                    break
+                phrase = _normalize_for_source_match(text[span_start:span_end])
+                if not phrase:
+                    continue
+                pattern: re.Pattern[str] | None = None
+                matched = False
+                for src in normalized_sources:
+                    if phrase not in src:
+                        continue
+                    if pattern is None:
+                        pattern = re.compile(
+                            rf"(?<![A-Za-zÀ-ɏ]){re.escape(phrase)}(?![A-Za-zÀ-ɏ])"
+                        )
+                    if pattern.search(src) is not None:
+                        matched = True
+                        break
+                if matched:
+                    spans.append((span_start, span_end))
+                    break
+    return spans
+
+
+def _note_text_leak(
+    text: str, *, allowed_sources: Sequence[str] = ()
+) -> str | None:
     """Returns a Russian description of the first language leak in one note text, or `None`."""
     marked_spans: list[tuple[int, int]] = []
     for match in _MARKED_SPAN.finditer(text):
@@ -143,6 +218,7 @@ def _note_text_leak(text: str) -> str | None:
             )
 
     whitelist_spans = [match.span() for match in _NOTE_WHITELIST.finditer(text)]
+    cited_spans = _cited_source_spans(text, allowed_sources)
     tokens = list(_LETTERS.finditer(text))
     cyrillic_tokens = [
         token
@@ -161,7 +237,11 @@ def _note_text_leak(text: str) -> str | None:
         word = token.group()
         if not _is_latin_word(word):
             continue
-        if _overlaps_any(start, end, marked_spans) or _overlaps_any(start, end, whitelist_spans):
+        if (
+            _overlaps_any(start, end, marked_spans)
+            or _overlaps_any(start, end, whitelist_spans)
+            or _overlaps_any(start, end, cited_spans)
+        ):
             continue
         if word.casefold() in _LEAK_EN_WORDS:
             return (
@@ -199,27 +279,44 @@ def _overlaps_any(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
     return any(span_start < end and start < span_end for span_start, span_end in spans)
 
 
-def _note_texts_of(payload: TranslationResultResponse) -> Iterator[tuple[str, str]]:
+def _non_empty_sources(*values: str | None) -> tuple[str, ...]:
+    return tuple(value for value in values if value)
+
+
+def _note_texts_of(
+    payload: TranslationResultResponse,
+    *,
+    source_texts: Mapping[str, str] | None = None,
+) -> Iterator[tuple[str, str, tuple[str, ...]]]:
     """Note-bearing texts scoped to `payload.blocks` when present, or all notes/assistances otherwise."""
     if payload.blocks:
         for block in payload.blocks:
             subject = f"примечание блока {block.source_block_id}"
+            block_source = source_texts.get(block.source_block_id, "") if source_texts else ""
             for hint in block.glossary_hints:
                 if hint.note is not None:
-                    yield subject, hint.note
+                    yield subject, hint.note, _non_empty_sources(hint.original, block_source)
             for note in payload.notes_for(block.source_block_id):
-                yield subject, note.note
+                allowed = _non_empty_sources(note.original_excerpt, block_source)
+                yield subject, note.note, allowed
                 if note.translated_excerpt is not None:
-                    yield subject, note.translated_excerpt
+                    yield subject, note.translated_excerpt, allowed
         return
     for note in payload.language_notes:
         subject = f"примечание блока {note.source_block_id}"
-        yield subject, note.note
+        note_source = source_texts.get(note.source_block_id, "") if source_texts else ""
+        allowed = _non_empty_sources(note.original_excerpt, note_source)
+        yield subject, note.note, allowed
         if note.translated_excerpt is not None:
-            yield subject, note.translated_excerpt
+            yield subject, note.translated_excerpt, allowed
+    all_sources = (
+        tuple(value for value in source_texts.values() if value)
+        if source_texts
+        else ()
+    )
     for assistance in payload.fragment_assistances:
         if assistance.text is not None:
-            yield f"помощь к трудности {assistance.difficulty_id}", assistance.text
+            yield f"помощь к трудности {assistance.difficulty_id}", assistance.text, all_sources
 
 
 def mixed_script_word(text: str) -> str | None:

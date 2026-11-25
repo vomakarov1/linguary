@@ -292,10 +292,15 @@ class TranslationResultValidator:
                     rule_code="dialogue_punctuation",
                     safe_message="Нарушены правила оформления прямой речи",
                 )
+            source_texts = {item.block.id: item.block.text for item in unit.items}
             for block in text_payload.blocks:
                 single = replace(text_payload, blocks=(block,))
                 self._ensure_block(
-                    note_language_leak_violation(single, target_language=target_language),
+                    note_language_leak_violation(
+                        single,
+                        target_language=target_language,
+                        source_texts=source_texts,
+                    ),
                     expected,
                     block_id=block.source_block_id,
                     rule_code="note_language_leak",
@@ -304,7 +309,9 @@ class TranslationResultValidator:
             if text_payload.fragment_assistances:
                 assist_payload = replace(text_payload, blocks=(), language_notes=())
                 assist_leak = note_language_leak_violation(
-                    assist_payload, target_language=target_language
+                    assist_payload,
+                    target_language=target_language,
+                    source_texts=source_texts,
                 )
                 if assist_leak is not None:
                     raise ResultValidationError(

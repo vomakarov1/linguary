@@ -126,6 +126,9 @@ def test_block_result_accepts_segment_translations() -> None:
     segment = wire["$defs"]["SegmentTranslationSchema"]
     assert set(segment["required"]) == {"index", "translated_text"}
     assert "minimum" not in repr(segment)
+    index_description = segment["properties"]["index"]["description"]
+    assert "1-based" in index_description
+    assert "[bN.M]" in index_description
 
     dto = parse_payload(
         LLMResponseKind.TRANSLATION_RESULT,

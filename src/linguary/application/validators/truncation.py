@@ -19,7 +19,10 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
-from linguary.application.validators.quotes import has_unclosed_british_quote
+from linguary.application.validators.quotes import (
+    british_quote_counts,
+    has_unclosed_british_quote,
+)
 from linguary.application.validators.treatment import planned_segment_modes
 from linguary.domain import (
     BlockTreatment,
@@ -56,15 +59,9 @@ def truncation_violation(
         item = items.get(block.source_block_id)
         if item is None:
             continue
-        for segment_index, source, text in _checked_translations(block, item):
-            violation = _text_violation(
-                text,
-                source=source,
-                block_id=block.source_block_id,
-                segment_index=segment_index,
-            )
-            if violation is not None:
-                return violation
+        issue = _block_truncation_issue(block, item)
+        if issue is not None:
+            return issue[0]
     return None
 
 
@@ -97,17 +94,88 @@ def _subject(block_id: str, segment_index: int | None) -> str:
     return f"сегмента {segment_index} блока {block_id}"
 
 
-def _text_violation(
-    text: str, *, source: str, block_id: str, segment_index: int | None = None
-) -> str | None:
-    """Truncation indicator for a single translation relative to its original."""
+def _slice_truncation_issue(
+    text: str,
+    *,
+    source: str,
+    block_id: str,
+    segment_index: int | None = None,
+    check_quotes: bool = True,
+) -> tuple[str, str, str] | None:
+    """Return `(message, rule_code, safe_message)` for one slice, or `None`."""
     subject = _subject(block_id, segment_index)
     if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
-        return f"перевод {subject} не заканчивается терминальной пунктуацией"
-    unbalanced = _unbalanced(text, source=source)
+        return (
+            f"перевод {subject} не заканчивается терминальной пунктуацией",
+            "terminal_punctuation",
+            "Перевод не завершён терминальной пунктуацией",
+        )
+    unbalanced = _unbalanced(text, source=source, check_quotes=check_quotes)
     if unbalanced is not None:
-        return f"в переводе {subject} не закрыты {unbalanced}"
+        code = "quote_balance" if unbalanced == "кавычки" else "bracket_balance"
+        safe_message = (
+            "Нарушена парность кавычек"
+            if code == "quote_balance"
+            else "Нарушена парность скобок"
+        )
+        return f"в переводе {subject} не закрыты {unbalanced}", code, safe_message
     return None
+
+
+def _block_truncation_issue(
+    block: BlockResultResponse, item: TranslationUnitItem
+) -> tuple[str, str, str] | None:
+    """Return `(message, rule_code, safe_message)` for the first truncation issue in `block`."""
+    slices = list(_checked_translations(block, item))
+    if not slices:
+        return None
+    if not planned_segment_modes(item):
+        segment_index, source, text = slices[0]
+        return _slice_truncation_issue(
+            text,
+            source=source,
+            block_id=block.source_block_id,
+            segment_index=segment_index,
+            check_quotes=True,
+        )
+    for segment_index, source, text in slices:
+        issue = _slice_truncation_issue(
+            text,
+            source=source,
+            block_id=block.source_block_id,
+            segment_index=segment_index,
+            check_quotes=False,
+        )
+        if issue is not None:
+            return issue
+    bad_indices: list[int | None] = []
+    nonzero_indices: list[int | None] = []
+    for segment_index, source, text in slices:
+        tr_bal = _balances(text)["кавычки"]
+        src_bal = _balances(source, allow_midline_british_open=True)["кавычки"]
+        if tr_bal != 0:
+            nonzero_indices.append(segment_index)
+        if not _quote_balance_matches(tr_bal, source=source, source_balance=src_bal):
+            bad_indices.append(segment_index)
+    joined_tr = " ".join(tr for _, _, tr in slices)
+    joined_src = " ".join(src for _, src, _ in slices)
+    total_tr = _balances(joined_tr)["кавычки"]
+    total_src = _balances(joined_src, allow_midline_british_open=True)["кавычки"]
+    if total_tr == 0 or _quote_balance_matches(
+        total_tr, source=joined_src, source_balance=total_src
+    ):
+        return None
+    report_index = (
+        bad_indices[0]
+        if bad_indices
+        else (nonzero_indices[0] if nonzero_indices else slices[0][0])
+    )
+    subject = _subject(block.source_block_id, report_index)
+    return (
+        f"в переводе {subject} не закрыты кавычки",
+        "quote_balance",
+        "Нарушена парность кавычек",
+    )
 
 
 def _ends_with_punctuation(text: str) -> bool:
@@ -116,17 +184,30 @@ def _ends_with_punctuation(text: str) -> bool:
     return bool(stripped) and stripped[-1] in _TERMINAL_PUNCTUATION
 
 
-def _unbalanced(text: str, *, source: str) -> str | None:
+def _quote_balance_matches(
+    tr_balance: int, *, source: str, source_balance: int
+) -> bool:
+    """Whether translation quote balance is consistent with `source`."""
+    if tr_balance == 0 or tr_balance == source_balance:
+        return True
+    if abs(tr_balance) == 1 and source.count(_SYMMETRIC_QUOTE) % 2 == 1:
+        return True
+    return tr_balance == 1 and _has_british_unclosed_opening_quote(source)
+
+
+def _unbalanced(text: str, *, source: str, check_quotes: bool = True) -> str | None:
     """Type of paired punctuation whose imbalance was introduced in the translation."""
     original = _balances(source)
     for name, balance in _balances(text).items():
+        if name == "кавычки":
+            if not check_quotes:
+                continue
+            if _quote_balance_matches(
+                balance, source=source, source_balance=original[name]
+            ):
+                continue
+            return name
         if balance == 0 or balance == original[name]:
-            continue
-        if (
-            name == "кавычки"
-            and balance == 1
-            and _has_british_unclosed_opening_quote(source)
-        ):
             continue
         return name
     return None
@@ -137,7 +218,9 @@ def _has_british_unclosed_opening_quote(source: str) -> bool:
     return has_unclosed_british_quote(source)
 
 
-def _balances(text: str) -> Mapping[str, int]:
+def _balances(
+    text: str, *, allow_midline_british_open: bool = False
+) -> Mapping[str, int]:
     """Imbalance for each type of paired punctuation: number of open marks left unclosed."""
     balances = {
         f"скобки {opening}{closing}": text.count(opening) - text.count(closing)
@@ -149,8 +232,15 @@ def _balances(text: str) -> Mapping[str, int]:
     n_high_open = text.count("“")
     n_high_close = text.count("”")
     paired_low = min(n_low, n_high_open)
-    openings = text.count("«") + n_low + (n_high_open - paired_low)
-    closings = text.count("»") + n_high_close + paired_low
+    brit_open, brit_close = british_quote_counts(text)
+    if (
+        brit_open > brit_close
+        and not allow_midline_british_open
+        and not text.lstrip().startswith("‘")
+    ):
+        brit_open = brit_close
+    openings = text.count("«") + n_low + (n_high_open - paired_low) + brit_open
+    closings = text.count("»") + n_high_close + paired_low + brit_close
     balances["кавычки"] = (openings - closings) + text.count(_SYMMETRIC_QUOTE) % 2
     return balances
 
@@ -161,27 +251,36 @@ __all__ = ["truncation_violation"]
 def truncation_diagnostic(payload, *, unit, truncated):
     """Structured provenance is formed where the punctuation check observes its block."""
     from linguary.domain.llm_log import Violation
+
     if truncated:
-        return (truncation_violation(payload, unit=unit, truncated=True),
-                Violation('provider_truncated', 'translation_unit', 'unit',
-                          tuple(item.block.id for item in unit.items), ('translated_text',),
-                          'Провайдер сообщил об обрыве ответа'))
+        return (
+            truncation_violation(payload, unit=unit, truncated=True),
+            Violation(
+                "provider_truncated",
+                "translation_unit",
+                "unit",
+                tuple(item.block.id for item in unit.items),
+                ("translated_text",),
+                "Провайдер сообщил об обрыве ответа",
+            ),
+        )
     items = {item.block.id: item for item in unit.items}
     for block in payload.blocks:
         item = items.get(block.source_block_id)
         if item is None:
             continue
-        for segment_index, source, text in _checked_translations(block, item):
-            if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
-                code, safe_message = 'terminal_punctuation', 'Перевод не завершён терминальной пунктуацией'
-            else:
-                unbalanced = _unbalanced(text, source=source)
-                if unbalanced is None:
-                    continue
-                code = 'quote_balance' if unbalanced == 'кавычки' else 'bracket_balance'
-                safe_message = 'Нарушена парность кавычек' if code == 'quote_balance' else 'Нарушена парность скобок'
-            return (_text_violation(text, source=source, block_id=block.source_block_id,
-                                    segment_index=segment_index),
-                    Violation(code, 'translation_unit', 'local', (block.source_block_id,),
-                              ('translated_text',), safe_message))
+        issue = _block_truncation_issue(block, item)
+        if issue is not None:
+            message, code, safe_message = issue
+            return (
+                message,
+                Violation(
+                    code,
+                    "translation_unit",
+                    "local",
+                    (block.source_block_id,),
+                    ("translated_text",),
+                    safe_message,
+                ),
+            )
     return None

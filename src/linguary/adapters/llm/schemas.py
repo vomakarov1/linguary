@@ -176,7 +176,14 @@ class GlossaryHintSchema(_ResponseModel):
 class SegmentTranslationSchema(_ResponseModel):
     """Перевод одного сегмента. Индекс начинается с 1."""
 
-    index: int = Field(ge=1, strict=True)
+    index: int = Field(
+        ge=1,
+        strict=True,
+        description=(
+            "1-based номер сегмента M из метки [bN.M] в исходном блоке "
+            "(только для сегментов TRANSLATE; не с 0 и без перенумерации пропущенных сегментов)"
+        ),
+    )
     translated_text: str | None
 
     @field_validator("translated_text")

@@ -854,3 +854,144 @@ def test_parse_payload_localizes_translation_result_validation_error_with_block_
     assert note_err.value.violation is not None
     assert note_err.value.violation.rule_code == "response_schema"
     assert note_err.value.violation.scope == "unknown"
+
+
+def test_format_error_schema_hints_for_segment_index_bounds_and_static_value_errors() -> None:
+    """WP-2: greater_than_equal/greater_than/value_error emit safe static hints without raw input or parentheses."""
+    # 1. Segment index == 0 produces specific 1-based [bN.M] hint without parentheses.
+    zero_index_payload = {
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "treatment": "TRANSLATE",
+                "translated_text": None,
+                "glossary_hints": [],
+                "segments": [{"index": 0, "translated_text": "Перевод."}],
+            }
+        ],
+        "language_notes": [],
+        "fragment_assistances": [],
+    }
+    with pytest.raises(LLMResponseFormatError) as idx_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(zero_index_payload),
+            contract_version=4,
+        )
+    idx_msg = str(idx_err.value)
+    assert "blocks[0].segments[0].index: greater_than_equal" in idx_msg
+    assert "подсказки схемы:" in idx_msg
+    assert "номер сегмента начинается с 1 и равен M из метки [bN.M]" in idx_msg
+    idx_suffix = idx_msg.split("подсказки схемы:", 1)[1]
+    assert "(" not in idx_suffix and ")" not in idx_suffix
+
+    # 2. Non-segment greater_than_equal and greater_than hints (e.g. SourceAnchorSchema).
+    bounds_data = analysis_payload()
+    bounds_data["content_plan"] = {
+        "version": 2,
+        "profile": "content-plan-v2",
+        "difficulties": [
+            {
+                "id": "d1",
+                "anchors": [{"block_id": "b1", "start": -1, "end": 0, "quote": "word"}],
+                "owner_block_id": "b1",
+                "kind": "vocabulary",
+                "priority": "useful",
+                "help_kind": "explanation",
+                "required_points": [{"id": "p1", "description": "объяснение"}],
+            }
+        ],
+        "before_you_read_evidence": [],
+    }
+    with pytest.raises(LLMResponseFormatError) as bounds_err:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS,
+            as_content(bounds_data),
+            contract_version=2,
+        )
+    bounds_msg = str(bounds_err.value)
+    assert "значение должно быть не меньше 0" in bounds_msg
+    assert "значение должно быть больше 0" in bounds_msg
+    bounds_suffix = bounds_msg.split("подсказки схемы:", 1)[1]
+    assert "(" not in bounds_suffix and ")" not in bounds_suffix
+
+    # 3. Known BlockResultSchema value_error cases emit static privacy-safe hints without block_id or treatment.
+    value_error_cases = [
+        (
+            {
+                "source_block_id": "secret-block-1",
+                "treatment": "READ_AS_IS",
+                "translated_text": "Секретный перевод.",
+                "glossary_hints": [],
+            },
+            "для выбранного режима блока полный перевод недопустим",
+        ),
+        (
+            {
+                "source_block_id": "secret-block-2",
+                "treatment": "GLOSSARY_ONLY",
+                "translated_text": None,
+                "glossary_hints": [],
+            },
+            "для выбранного режима блока обязательны словарные подсказки",
+        ),
+        (
+            {
+                "source_block_id": "secret-block-3",
+                "treatment": "TRANSLATE",
+                "translated_text": None,
+                "glossary_hints": [],
+            },
+            "для выбранного режима блока обязателен полный перевод",
+        ),
+        (
+            {
+                "source_block_id": "secret-block-4",
+                "treatment": "READ_AS_IS",
+                "translated_text": None,
+                "glossary_hints": [
+                    {"original": "word", "translation": "слово", "note": None}
+                ],
+            },
+            "для выбранного режима блока словарные подсказки недопустимы",
+        ),
+        (
+            {
+                "source_block_id": "secret-block-5",
+                "treatment": "TRANSLATE",
+                "translated_text": "Секретный перевод.",
+                "glossary_hints": [],
+                "segments": [{"index": 1, "translated_text": "Часть."}],
+            },
+            "для блока с переводами сегментов полный перевод блока недопустим",
+        ),
+    ]
+    for bad_block, expected_hint in value_error_cases:
+        with pytest.raises(LLMResponseFormatError) as val_err:
+            parse_payload(
+                LLMResponseKind.TRANSLATION_RESULT,
+                as_content({"blocks": [bad_block], "language_notes": []}),
+            )
+        msg = str(val_err.value)
+        assert "подсказки схемы:" in msg
+        assert f"blocks[0]: {expected_hint}" in msg
+        assert bad_block["source_block_id"] not in msg
+        for treatment_name in ("TRANSLATE", "GLOSSARY_ONLY", "READ_AS_IS"):
+            assert treatment_name not in msg
+        suffix = msg.split("подсказки схемы:", 1)[1]
+        assert "(" not in suffix and ")" not in suffix
+
+    # 4. Unknown value_error (not in static allowlist) is omitted from hints and never leaks raw text.
+    unknown_ve = narrative_payload()
+    unknown_ve["context_facts"][0]["certainty"] = "unknown"
+    unknown_ve["context_facts"][0]["value"] = "SECRET_CONTEXT_VALUE"
+    with pytest.raises(LLMResponseFormatError) as unknown_err:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
+            as_content(unknown_ve),
+        )
+    unknown_msg = str(unknown_err.value)
+    assert "context_facts[0]: value_error" in unknown_msg
+    assert "подсказки схемы:" not in unknown_msg
+    assert "SECRET_CONTEXT_VALUE" not in unknown_msg
+

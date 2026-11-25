@@ -4083,5 +4083,31 @@ def test_v8_prompts_omit_byr_for_a2_pedagogy_forbid_bare_translate_hints_and_rem
     assert "Фрагментная проверка" not in b2_frag_ctx.request.instructions
 
 
+def test_translation_prompts_specify_segment_index_and_a2_glossary_hint_rules() -> None:
+    """WP-2 & WP-6.2: Non-frozen v2/v3 prompts document bN vs bN.M & 1-based index; A2 hints stay consistent."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _TRANSLATION_CONTEXT_V2,
+    )
+    from linguary.application.reader_text import learner_instructions
+
+    for prompt in (_TRANSLATION_CONTEXT_V2, _CONTENT_PLAN_PROCESSING_V3):
+        assert "blocks[].source_block_id" in prompt
+        assert "language_notes[].source_block_id" in prompt
+        assert "никогда не метку сегмента bN.M" in prompt
+        assert "segments[].index" in prompt
+        assert "1-based номер M из исходной метки [bN.M]" in prompt
+
+    a2_instructions = learner_instructions("a2")
+    assert "Цитаты, expression, original и original_excerpt сохраняй дословно." not in a2_instructions
+    assert (
+        "Цитаты, expression и original_excerpt сохраняй дословно; "
+        "в glossary_hints.original глаголы приводи к инфинитиву с to, "
+        "остальные слова и выражения сохраняй как в тексте."
+    ) in a2_instructions
+    assert "отдельные трудные слова и устойчивые словосочетания" in a2_instructions
+
+
+
 
 

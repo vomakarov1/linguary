@@ -61,6 +61,17 @@ def test_a2_learner_instructions_require_infinitives_and_forbid_note_jargon():
     assert 'помета к глаголу речи' not in learner_instructions('b1')
 
 
+def test_a2_glossary_hints_original_rule_resolves_contradiction_without_touching_b1_b2_c1():
+    a2 = learner_instructions('a2')
+    assert 'Цитаты, expression, original и original_excerpt сохраняй дословно.' not in a2
+    assert 'в glossary_hints.original глаголы приводи к инфинитиву с to' in a2
+    assert 'а не перевод целого предложения целиком' in a2
+    for level in ('b1', 'b2', 'c1'):
+        text = learner_instructions(level)
+        assert 'Цитаты, expression, original и original_excerpt сохраняй дословно.' in text
+        assert 'а не перевод целого предложения целиком' not in text
+
+
 def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
     instructions = ' '.join(learner_instructions('a2').split())
 
