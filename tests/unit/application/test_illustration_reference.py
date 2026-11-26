@@ -1544,3 +1544,335 @@ def test_resolve_appearance_state_change_suppresses_anatomical_traits_and_short_
         ],
     )
     assert [t["trait"] for t in kept_short_echo] == ["palette_value"]
+
+
+def test_pack_extract_section_units_respects_scene_block_and_byte_caps() -> None:
+    """WP3: _pack_extract_section_units enforces max_units, max_blocks, byte cap, and singleton overflow."""
+    from types import SimpleNamespace
+
+    from linguary.application.illustration_reference import _pack_extract_section_units
+
+    class _FakeSizer:
+        def measure(self, req: LLMRequest[Any]) -> Any:
+            size = len(req.input_text.encode("utf-8"))
+            return SimpleNamespace(size_bytes=size)
+
+    def _mk_unit(uid: str, n_blocks: int, text: str = "short") -> dict[str, Any]:
+        return {
+            "source_unit_id": uid,
+            "section_id": "sec-1",
+            "scene_id": uid,
+            "blocks": [{"block_id": f"{uid}-b{i}", "block_order": i, "text": text} for i in range(n_blocks)],
+        }
+
+    def _build(units: Any) -> LLMRequest[Any]:
+        return LLMRequest(
+            kind=LLMResponseKind.ILLUSTRATION_EXTRACT,
+            instructions="test",
+            input_text=json.dumps({"units": list(units)}),
+        )
+
+    sizer = _FakeSizer()
+
+    # 1. Scene cap = 2, block cap = 16:
+    # u1(10 blocks) + u2(10 blocks) = 20 > 16 -> split; u2(10) + u3(5) = 15 <= 16 -> packed; u4(18) -> singleton; u5(2)+u6(2)+u7(2) -> (u5,u6), (u7)
+    units = [
+        _mk_unit("u1", 10),
+        _mk_unit("u2", 10),
+        _mk_unit("u3", 5),
+        _mk_unit("u4", 18),
+        _mk_unit("u5", 2),
+        _mk_unit("u6", 2),
+        _mk_unit("u7", 2),
+    ]
+    pages = _pack_extract_section_units(
+        units,
+        build_request=_build,
+        sizer=sizer,  # type: ignore[arg-type]
+        target_bytes=12_288,
+        max_units=2,
+        max_blocks=16,
+    )
+    assert [[u["source_unit_id"] for u in p] for p in pages] == [
+        ["u1"],
+        ["u2", "u3"],
+        ["u4"],
+        ["u5", "u6"],
+        ["u7"],
+    ]
+
+    # 2. Byte cap splits even when unit/block caps allow packing.
+    big_units = [_mk_unit("b1", 1, "x" * 7000), _mk_unit("b2", 1, "y" * 7000)]
+    byte_pages = _pack_extract_section_units(
+        big_units,
+        build_request=_build,
+        sizer=sizer,  # type: ignore[arg-type]
+        target_bytes=12_288,
+        max_units=2,
+        max_blocks=16,
+    )
+    assert [[u["source_unit_id"] for u in p] for p in byte_pages] == [["b1"], ["b2"]]
+
+
+async def test_plan_scopes_packs_extract_strictly_per_section(tmp_path: Path) -> None:
+    """WP3: EXTRACT scopes never span multiple chapters/sections; each has concrete section_id."""
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            ("sec-1", "Ch 1", [("b-1", "Alice walked down the lane.")]),
+            ("sec-2", "Ch 2", [("b-2", "Bob waited by the gate.")]),
+        ],
+        handler=lambda _req, _n: None,
+    )
+    _ref, gen_id = _create_and_plan(harness)
+    with harness.uow.read_transaction() as tx:
+        scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+    assert [s.scope_key for s in scopes] == ["extract:p0000", "extract:p0001"]
+    assert [s.section_id for s in scopes] == ["sec-1", "sec-2"]
+
+
+async def test_composite_extract_auto_splits_after_validation_repairs_exhausted(
+    tmp_path: Path,
+) -> None:
+    """WP3: composite EXTRACT scope auto-splits after exhausting max_repair_turns on validation errors."""
+    seen_unit_counts: list[int] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            units = data["units"]
+            total_blocks = sum(len(u["blocks"]) for u in units)
+            seen_unit_counts.append(total_blocks)
+            if total_blocks > 1:
+                # Emit unknown subject_mention_id on composite packet so all repair turns fail.
+                first_blk = units[0]["blocks"][0]["block_id"]
+                return IllustrationExtractResponse(
+                    mentions=(),
+                    facts=(
+                        IllustrationFactDTO(
+                            fact_id="f-bad",
+                            subject_mention_id="missing-mention",
+                            temporal_scope="permanent",
+                            back_applicable=True,
+                            reveals_future_spoiler=False,
+                            description_ru="Описание",
+                            description_en="Description",
+                            quote_block_id=first_blk,
+                            quote=units[0]["blocks"][0]["text"][:10],
+                        ),
+                    ),
+                    covered_source_unit_ids=tuple(u["source_unit_id"] for u in units),
+                    complete=True,
+                )
+            blk = units[0]["blocks"][0]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Alice",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Alice",
+                    ),
+                ),
+                facts=(),
+                covered_source_unit_ids=(units[0]["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(
+                decisions=tuple(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict="same_entity", evidence_fact_ids=()
+                    )
+                    for p in data.get("pairs", ())
+                )
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="Контрастная штриховка",
+                        description_en="Crisp ink hatching",
+                        assumption_ru="нейтральный выбор",
+                    ),
+                ),
+            )
+        raise AssertionError(f"unexpected {req.kind}")
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            (
+                "sec-1",
+                "Ch 1",
+                [
+                    ("b-1", "Alice stood at the wooden door."),
+                    ("b-2", "Alice looked across the garden."),
+                ],
+            )
+        ],
+        handler=_handler,
+        policy=IllustrationPolicy(max_repair_turns=1, max_calls_per_scope_activation=3),
+    )
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.read_transaction() as tx:
+        gen = tx.illustrations.get_generation(harness.book_id, gen_id)
+        extract_scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+    assert gen is not None and gen.registry_sha256 is not None
+    # Parent scope split into 2 single-block children (#L/#R) and both succeeded!
+    states_by_key = {s.scope_key: s.state for s in extract_scopes}
+    assert states_by_key["extract:p0000"] is IllustrationScopeState.SPLIT
+    assert states_by_key["extract:p0000.d1.0"] is IllustrationScopeState.ACCEPTED
+    assert states_by_key["extract:p0000.d1.1"] is IllustrationScopeState.ACCEPTED
+    # Parent attempted initial + 1 repair (2 calls with 2 blocks), then children ran with 1 block each.
+    assert seen_unit_counts == [2, 2, 1, 1]
+    # Repair prompt after unknown subject_mention_id explicitly instructs using mentions from the same response.
+    repair_req = harness.client.requests[1]
+    assert any(
+        "укажи mention_id из массива mentions этого же ответа" in instr
+        for instr in repair_req.repair_instructions
+    )
+
+
+async def test_composite_extract_auto_splits_after_format_error_repairs_exhausted(
+    tmp_path: Path,
+) -> None:
+    """WP3: composite EXTRACT scope auto-splits after exhausting max_repair_turns on LLMResponseFormatError."""
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            units = data["units"]
+            total_blocks = sum(len(u["blocks"]) for u in units)
+            if total_blocks > 1:
+                raise LLMResponseFormatError("invalid json schema")
+            blk = units[0]["blocks"][0]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Alice",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Alice",
+                    ),
+                ),
+                facts=(),
+                covered_source_unit_ids=(units[0]["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(
+                decisions=tuple(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict="same_entity", evidence_fact_ids=()
+                    )
+                    for p in data.get("pairs", ())
+                )
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="Контрастная штриховка",
+                        description_en="Crisp ink hatching",
+                        assumption_ru="нейтральный выбор",
+                    ),
+                ),
+            )
+        raise AssertionError(f"unexpected {req.kind}")
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            (
+                "sec-1",
+                "Ch 1",
+                [
+                    ("b-1", "Alice opened the iron gate."),
+                    ("b-2", "Alice stepped onto the path."),
+                ],
+            )
+        ],
+        handler=_handler,
+        policy=IllustrationPolicy(max_repair_turns=1, max_calls_per_scope_activation=3),
+    )
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.read_transaction() as tx:
+        gen = tx.illustrations.get_generation(harness.book_id, gen_id)
+        extract_scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+    assert gen is not None and gen.registry_sha256 is not None
+    states_by_key = {s.scope_key: s.state for s in extract_scopes}
+    assert states_by_key["extract:p0000"] is IllustrationScopeState.SPLIT
+    assert states_by_key["extract:p0000.d1.0"] is IllustrationScopeState.ACCEPTED
+    assert states_by_key["extract:p0000.d1.1"] is IllustrationScopeState.ACCEPTED
+
+
+async def test_composite_extract_respects_max_split_depth_on_repeated_validation_error(
+    tmp_path: Path,
+) -> None:
+    """WP3: auto-split stops cleanly with SPLIT_DEPTH_EXHAUSTED once max_split_depth is reached."""
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        units = data["units"]
+        first_blk = units[0]["blocks"][0]["block_id"]
+        return IllustrationExtractResponse(
+            mentions=(),
+            facts=(
+                IllustrationFactDTO(
+                    fact_id="f-bad",
+                    subject_mention_id="missing-mention",
+                    temporal_scope="permanent",
+                    back_applicable=True,
+                    reveals_future_spoiler=False,
+                    description_ru="Описание",
+                    description_en="Description",
+                    quote_block_id=first_blk,
+                    quote=units[0]["blocks"][0]["text"][:10],
+                ),
+            ),
+            covered_source_unit_ids=tuple(u["source_unit_id"] for u in units),
+            complete=True,
+        )
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            (
+                "sec-1",
+                "Ch 1",
+                [
+                    ("b-1", "Alice opened the wooden door."),
+                    ("b-2", "Alice walked into the hall."),
+                    ("b-3", "Alice looked up the stairs."),
+                    ("b-4", "Alice heard a soft whisper."),
+                ],
+            )
+        ],
+        handler=_handler,
+        policy=IllustrationPolicy(max_repair_turns=0, max_split_depth=1),
+    )
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.read_transaction() as tx:
+        scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+    by_key = {s.scope_key: s for s in scopes}
+    assert by_key["extract:p0000"].state is IllustrationScopeState.SPLIT
+    assert by_key["extract:p0000.d1.0"].state is IllustrationScopeState.FAILED
+    assert by_key["extract:p0000.d1.0"].reason_code == IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value
+    assert by_key["extract:p0000.d1.1"].state is IllustrationScopeState.FAILED
+    assert by_key["extract:p0000.d1.1"].reason_code == IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value
+

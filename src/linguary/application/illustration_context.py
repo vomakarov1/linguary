@@ -237,6 +237,75 @@ def _all_occurrences(haystack: str, needle: str) -> list[int]:
     return found
 
 
+_QUOTE_CHAR_MAP: Mapping[str, str] = {
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "`": "'",
+    "\u00b4": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u00ab": '"',
+    "\u00bb": '"',
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2212": "-",
+    "\u2011": "-",
+}
+
+
+def _normalize_quote_with_spans(text: str) -> tuple[str, list[int], list[int]]:
+    """Normalize typographic punctuation/whitespace and map each emitted char to source spans."""
+    chars: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    for idx, ch in enumerate(text):
+        if ch.isspace():
+            if chars and chars[-1] == " ":
+                ends[-1] = idx + 1
+            else:
+                chars.append(" ")
+                starts.append(idx)
+                ends.append(idx + 1)
+        elif ch == "\u2026":
+            for _ in range(3):
+                chars.append(".")
+                starts.append(idx)
+                ends.append(idx + 1)
+        else:
+            chars.append(_QUOTE_CHAR_MAP.get(ch, ch))
+            starts.append(idx)
+            ends.append(idx + 1)
+    lo = 1 if chars and chars[0] == " " else 0
+    hi = len(chars) - 1 if len(chars) > lo and chars[-1] == " " else len(chars)
+    return "".join(chars[lo:hi]), starts[lo:hi], ends[lo:hi]
+
+
+def _normalized_occurrences(haystack: str, needle: str) -> list[tuple[int, int]]:
+    """Return unique `(start, end)` spans in `haystack` matching `needle` after typographic folding."""
+    h_norm, h_starts, h_ends = _normalize_quote_with_spans(haystack)
+    n_norm, _, _ = _normalize_quote_with_spans(needle)
+    if not n_norm or not h_norm:
+        return []
+    n_len = len(n_norm)
+    spans: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for pos in _all_occurrences(h_norm, n_norm):
+        end_pos = pos + n_len
+        if pos > 0 and h_starts[pos] == h_starts[pos - 1]:
+            continue
+        if end_pos < len(h_ends) and h_ends[end_pos - 1] == h_ends[end_pos]:
+            continue
+        span = (h_starts[pos], h_ends[end_pos - 1])
+        if span not in seen:
+            seen.add(span)
+            spans.append(span)
+    return spans
+
+
 def resolve_quote_anchor(
     block: DocumentBlock,
     quote: str,
@@ -250,6 +319,8 @@ def resolve_quote_anchor(
     - Rejects repeated occurrences in the same block (`ambiguous`) so the repair turn asks for
       a longer unique substring.
     - Handles stripped footnote markers accurately via `_analysis_visible_origins(block)`.
+    - Falls back to deterministic typographic/whitespace folding when exact matching misses,
+      always storing the verbatim `block.text[s_start:s_end]` substring in `SourceAnchor.quote`.
     """
     if not quote or not quote.strip():
         return QuoteResolutionResult(status="missing")
@@ -295,6 +366,45 @@ def resolve_quote_anchor(
             anchor=anchor,
             position_key=format_position_key(section_order, block_order, s_start),
         )
+
+    norm_visible = _normalized_occurrences(visible, quote)
+    if len(norm_visible) > 1:
+        return QuoteResolutionResult(status="ambiguous")
+    if len(norm_visible) == 1:
+        v_start, v_end = norm_visible[0]
+        if v_end <= len(origins) and v_start < v_end:
+            s_start = origins[v_start]
+            s_end = origins[v_end - 1] + 1
+            if 0 <= s_start < s_end <= len(block.text):
+                anchor = SourceAnchor(
+                    block_id=block.id,
+                    start=s_start,
+                    end=s_end,
+                    quote=block.text[s_start:s_end],
+                )
+                return QuoteResolutionResult(
+                    status="resolved",
+                    anchor=anchor,
+                    position_key=format_position_key(section_order, block_order, s_start),
+                )
+
+    norm_raw = _normalized_occurrences(block.text, quote)
+    if len(norm_raw) > 1:
+        return QuoteResolutionResult(status="ambiguous")
+    if len(norm_raw) == 1:
+        s_start, s_end = norm_raw[0]
+        if 0 <= s_start < s_end <= len(block.text):
+            anchor = SourceAnchor(
+                block_id=block.id,
+                start=s_start,
+                end=s_end,
+                quote=block.text[s_start:s_end],
+            )
+            return QuoteResolutionResult(
+                status="resolved",
+                anchor=anchor,
+                position_key=format_position_key(section_order, block_order, s_start),
+            )
 
     return QuoteResolutionResult(status="missing")
 
@@ -354,6 +464,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Ты извлекаешь визуальные упоминания персонажей и мест и цитатные факты для справочника иллюстраций книги. "
         "Используй только приведённые блоки текста. Цитаты копируй дословно и достаточно длинно, чтобы они были уникальны внутри блока. "
         "Описания на русском и английском должны отражать только подтверждённые текстом сведения. "
+        "Каждый элемент facts обязан ссылаться в subject_mention_id на существующий mention_id из массива mentions этого же ответа "
+        "(только person или location; не создавай факты для предметов без субъекта в mentions). "
         "Для entity_kind=\"location\" используй точное различающее имя места из оригинального текста "
         "(улица — именем улицы; дом — адресом или названием дома; комната — названием комнаты; не подписывай конкретный дом голым названием улицы). "
         "Если в ближайшем тексте описательное или родственное обозначение прямо соотносится с названным персонажем или местом "

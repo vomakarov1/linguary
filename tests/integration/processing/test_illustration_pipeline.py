@@ -15,6 +15,7 @@ from sqlalchemy import event
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.application.book_overview import book_overview
 from linguary.application.illustration_dto import (
+    IllustrationAliasDecisionDTO,
     IllustrationAliasResponse,
     IllustrationCandidatesResponse,
     IllustrationDesignResponse,
@@ -168,8 +169,18 @@ class _PipelineFakeLLM:
                 usage=usage,
             )
         if request.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            data = _extract_json(request.input_text)
             return LLMResponse(
-                payload=IllustrationAliasResponse(decisions=()),
+                payload=IllustrationAliasResponse(
+                    decisions=tuple(
+                        IllustrationAliasDecisionDTO(
+                            pair_id=p["pair_id"],
+                            verdict="same_entity",
+                            evidence_fact_ids=(),
+                        )
+                        for p in data.get("pairs", ())
+                    )
+                ),
                 provider="fake",
                 model="gpt-5-mini",
                 usage=usage,

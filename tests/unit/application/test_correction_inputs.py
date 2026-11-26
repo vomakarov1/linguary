@@ -2628,3 +2628,132 @@ def test_segment_evidence_resolution_and_validation_on_mixed_block() -> None:
             _evidence_value(domain_dict, bad_path)
 
 
+def test_correction_verdict_allows_empty_reason_only_when_confirmed() -> None:
+    """WP1: confirmed verdict with all 4 True flags allows empty reason; needs_human or any False requires reason."""
+    from linguary.adapters.llm.correction_payloads import ChapterCorrectionReviewSchema
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.application.correction_dto import ChapterCorrectionReviewResponse, CorrectionVerdict
+    from linguary.application.llm_dto import LLMPayloadError
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    # Provider wire schema keeps `reason` in `required`.
+    verdict_def = strict_json_schema(ChapterCorrectionReviewSchema)["$defs"]["CorrectionVerdictSchema"]
+    assert "reason" in verdict_def["required"]
+
+    # 1. confirmed + all 4 True + empty/whitespace reason -> accepted and normalized to ""
+    for raw_reason in ("", "   "):
+        parsed = parse_payload(
+            LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "candidate_id": "cand-1",
+                            "verdict": "confirmed",
+                            "error_supported": True,
+                            "evidence_valid": True,
+                            "minimal": True,
+                            "no_semantic_loss": True,
+                            "reason": raw_reason,
+                        }
+                    ]
+                }
+            ),
+        )
+        assert isinstance(parsed, ChapterCorrectionReviewResponse)
+        assert parsed.candidates[0].confirmed is True
+        assert parsed.candidates[0].reason == ""
+
+    # 2. Missing `reason` key altogether still rejected by schema.
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(
+            LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "candidate_id": "cand-1",
+                            "verdict": "confirmed",
+                            "error_supported": True,
+                            "evidence_valid": True,
+                            "minimal": True,
+                            "no_semantic_loss": True,
+                        }
+                    ]
+                }
+            ),
+        )
+
+    # 3. needs_human + empty/whitespace reason -> rejected with actionable static hint.
+    for raw_reason in ("", "   "):
+        with pytest.raises(LLMResponseFormatError) as exc_info:
+            parse_payload(
+                LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "candidate_id": "cand-1",
+                                "verdict": "needs_human",
+                                "error_supported": False,
+                                "evidence_valid": True,
+                                "minimal": True,
+                                "no_semantic_loss": True,
+                                "reason": raw_reason,
+                            }
+                        ]
+                    }
+                ),
+            )
+        assert "для вердикта needs_human нужна непустая причина" in str(exc_info.value)
+
+    # 4. confirmed + any False boolean + empty reason -> rejected in schema and DTO.
+    for flag in ("error_supported", "evidence_valid", "minimal", "no_semantic_loss"):
+        entry = {
+            "candidate_id": "cand-1",
+            "verdict": "confirmed",
+            "error_supported": True,
+            "evidence_valid": True,
+            "minimal": True,
+            "no_semantic_loss": True,
+            "reason": "",
+        }
+        entry[flag] = False
+        with pytest.raises(LLMResponseFormatError) as exc_info:
+            parse_payload(
+                LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+                json.dumps({"candidates": [entry]}),
+            )
+        assert "для вердикта needs_human нужна непустая причина" in str(exc_info.value)
+        with pytest.raises(LLMPayloadError):
+            CorrectionVerdict(**entry)
+
+    # 5. Direct DTO construction (named + 7-arg legacy positional) normalizes whitespace reason on confirmed.
+    v_named = CorrectionVerdict(
+        candidate_id="cand-1",
+        verdict="confirmed",
+        error_supported=True,
+        evidence_valid=True,
+        minimal=True,
+        no_semantic_loss=True,
+        reason="  ",
+    )
+    assert v_named.confirmed is True
+    assert v_named.reason == ""
+
+    v_legacy = CorrectionVerdict("cand-1", "confirmed", True, True, True, True, "")
+    assert v_legacy.confirmed is True
+    assert v_legacy.proposal_sha256 is None
+    assert v_legacy.reason == ""
+
+    v_legacy_ws = CorrectionVerdict("cand-1", "confirmed", True, True, True, True, "   ")
+    assert v_legacy_ws.confirmed is True
+    assert v_legacy_ws.proposal_sha256 is None
+    assert v_legacy_ws.reason == ""
+
+    with pytest.raises(LLMPayloadError):
+        CorrectionVerdict("cand-1", "needs_human", True, True, True, True, "")
+
+
+

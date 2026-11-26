@@ -192,7 +192,54 @@ _BLOCKING_STOPWORDS = frozenset(
         "место",
     }
 )
-_MAX_EXTRACT_UNITS_PER_PAGE = 64
+_MAX_EXTRACT_TARGET_BYTES = 12_288
+_MAX_EXTRACT_BLOCKS_PER_PAGE = 16
+_MAX_EXTRACT_SCENE_UNITS_PER_PAGE = 2
+_MAX_EXTRACT_BLOCK_UNITS_PER_PAGE = 16
+
+
+def _pack_extract_section_units(
+    section_units: Sequence[dict[str, Any]],
+    *,
+    build_request: Callable[[Sequence[dict[str, Any]]], LLMRequest[Any]],
+    sizer: RequestWireSizer,
+    target_bytes: int,
+    max_units: int,
+    max_blocks: int,
+) -> tuple[tuple[dict[str, Any], ...], ...]:
+    """Pack one section's extract units respecting byte, unit, and block caps."""
+    if not section_units:
+        return ()
+    pages: list[tuple[dict[str, Any], ...]] = []
+    current: list[dict[str, Any]] = []
+    current_blocks = 0
+    for unit in section_units:
+        u_blocks = len(unit.get("blocks", ()))
+        if current:
+            can_append = (
+                len(current) < max_units
+                and current_blocks + u_blocks <= max_blocks
+                and sizer.measure(build_request([*current, unit])).size_bytes <= target_bytes
+            )
+            if can_append:
+                current.append(unit)
+                current_blocks += u_blocks
+                continue
+            pages.append(tuple(current))
+            current = []
+            current_blocks = 0
+        if (
+            max_units <= 1
+            or u_blocks >= max_blocks
+            or sizer.measure(build_request([unit])).size_bytes > target_bytes
+        ):
+            pages.append((unit,))
+        else:
+            current = [unit]
+            current_blocks = u_blocks
+    if current:
+        pages.append(tuple(current))
+    return tuple(pages)
 
 
 def _default_id() -> str:
@@ -812,16 +859,18 @@ class IllustrationReference:
             return False
         section_by_id = {sec.id: sec for sec in document.ordered_sections}
 
-        units: list[dict[str, Any]] = []
+        section_unit_groups: list[list[dict[str, Any]]] = []
         for entry in snapshot.entries:
             if entry.skipped:
                 continue
             sec = section_by_id.get(entry.section_id)
             if sec is None:
                 continue
-            units.extend(_section_extract_units(entry, sec))
+            sec_units = _section_extract_units(entry, sec)
+            if sec_units:
+                section_unit_groups.append(sec_units)
 
-        if not units:
+        if not section_unit_groups:
             # No textual units -> seal empty registry immediately and plan chapter scopes.
             empty_sha = canonical_sha({"kind": "illustration_registry_v1", "items": []})
             sealed_gen = tx.illustrations.seal_registry(
@@ -847,13 +896,25 @@ class IllustrationReference:
                 policy=policy,
             )
 
-        pages = pack_items_by_wire_budget(
-            units,
-            build_request=_build_page_req,
-            sizer=sizer,
-            target_bytes=policy.initial_target_bytes,
-            max_items=_MAX_EXTRACT_UNITS_PER_PAGE,
-        )
+        extract_target_bytes = min(policy.initial_target_bytes, _MAX_EXTRACT_TARGET_BYTES)
+        pages: list[tuple[dict[str, Any], ...]] = []
+        for section_units in section_unit_groups:
+            has_scenes = any(u.get("scene_id") is not None for u in section_units)
+            max_units = (
+                _MAX_EXTRACT_SCENE_UNITS_PER_PAGE
+                if has_scenes
+                else _MAX_EXTRACT_BLOCK_UNITS_PER_PAGE
+            )
+            pages.extend(
+                _pack_extract_section_units(
+                    section_units,
+                    build_request=_build_page_req,
+                    sizer=sizer,
+                    target_bytes=extract_target_bytes,
+                    max_units=max_units,
+                    max_blocks=_MAX_EXTRACT_BLOCKS_PER_PAGE,
+                )
+            )
         specs: list[IllustrationScopeSpec] = []
         for page_idx, page_units in enumerate(pages):
             draft = _build_extract_scope_spec(
@@ -1233,6 +1294,20 @@ class IllustrationReference:
                         repairs_used += 1
                         repair_summary = err_detail
                         continue
+                    if scope.stage is IllustrationScopeStage.EXTRACT and is_composite:
+                        notify_after = self._handle_post_send_split(
+                            book_id=book_id,
+                            generation_id=generation_id,
+                            task_id=task.id,
+                            scope=scope,
+                            attempt_id=attempt.id,
+                            revision=revision,
+                            depth=depth,
+                            policy=policy,
+                            fail_reason=IllustrationReasonCode.MODEL_OUTPUT_INVALID.value,
+                            detail=err_detail,
+                        )
+                        break
                     self._finalize_scope_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1314,6 +1389,20 @@ class IllustrationReference:
                     repairs_used += 1
                     repair_summary = detail_text
                     continue
+                if scope.stage is IllustrationScopeStage.EXTRACT and is_composite:
+                    notify_after = self._handle_post_send_split(
+                        book_id=book_id,
+                        generation_id=generation_id,
+                        task_id=task.id,
+                        scope=scope,
+                        attempt_id=attempt.id,
+                        revision=revision,
+                        depth=depth,
+                        policy=policy,
+                        fail_reason=validation.reason_code,
+                        detail=detail_text,
+                    )
+                    break
                 self._finalize_scope_failure(
                     book_id=book_id,
                     generation_id=generation_id,
@@ -1544,7 +1633,10 @@ class IllustrationReference:
             if f.subject_mention_id not in mention_ids:
                 return _ValidationResult(
                     ok=False,
-                    repair_reason=f"факт {f.fact_id} ссылается на неизвестный subject_mention_id {f.subject_mention_id}",
+                    repair_reason=(
+                        f"факт {f.fact_id} ссылается на неизвестный subject_mention_id "
+                        f"{f.subject_mention_id}; укажи mention_id из массива mentions этого же ответа"
+                    ),
                 )
             if f.quote_block_id not in allowed_blocks or f.quote_block_id not in block_lookup:
                 return _ValidationResult(

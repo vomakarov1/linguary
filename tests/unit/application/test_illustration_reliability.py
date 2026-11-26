@@ -1469,6 +1469,7 @@ def test_filter_non_assumption_placeholders_and_stage_instructions_contracts() -
     )
 
     assert "alias_of_hint" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
+    assert "subject_mention_id" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
     assert 'entity_kind="location"' in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
     assert 'entity_kind="location"' in _STAGE_INSTRUCTIONS[IllustrationScopeStage.ALIAS]
     assert "monochrome_ink" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.FACT_SCOPE]
@@ -1480,3 +1481,78 @@ def test_filter_non_assumption_placeholders_and_stage_instructions_contracts() -
     assert "known_characters" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.CANDIDATES]
     assert "known_locations" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.CANDIDATES]
     assert "selection_reasons_ru" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.SELECTION]
+
+
+def test_resolve_quote_anchor_typographic_and_whitespace_fallback() -> None:
+    """WP3: resolve_quote_anchor folds curly quotes/dashes/ellipsis/whitespace while storing verbatim source quote."""
+    from linguary.application.illustration_context import resolve_quote_anchor
+    from linguary.domain import BlockType, DocumentBlock, SourceReference
+
+    blk = DocumentBlock(
+        id="blk-typo",
+        section_id="sec-1",
+        order=0,
+        type=BlockType.PARAGRAPH,
+        text="“Mr Dursley’s   moustache—very thick… quite unusual,” she said.",
+        source_reference=SourceReference("ch1.xhtml", "p[0]"),
+    )
+
+    # 1. Straight quotes/apostrophes, ASCII hyphen, ASCII ellipsis, single spaces resolve to verbatim source span.
+    res = resolve_quote_anchor(
+        blk,
+        '"Mr Dursley\'s moustache-very thick... quite unusual,"',
+        section_order=0,
+        block_order=0,
+    )
+    assert res.status == "resolved"
+    assert res.anchor is not None
+    assert res.anchor.quote == "“Mr Dursley’s   moustache—very thick… quite unusual,”"
+    assert blk.text[res.anchor.start : res.anchor.end] == res.anchor.quote
+
+    # 2. Partial match inside expanded ellipsis (`..` against `…`) is rejected, never producing corrupted span.
+    res_partial = resolve_quote_anchor(
+        blk,
+        "thick..",
+        section_order=0,
+        block_order=0,
+    )
+    assert res_partial.status == "missing"
+
+    # 3. Repeated normalized occurrence is rejected as ambiguous.
+    blk_dup = DocumentBlock(
+        id="blk-dup",
+        section_id="sec-1",
+        order=1,
+        type=BlockType.PARAGRAPH,
+        text="“Wait,” he said, and again: “Wait,” she whispered.",
+        source_reference=SourceReference("ch1.xhtml", "p[1]"),
+    )
+    res_dup = resolve_quote_anchor(blk_dup, '"Wait,"', section_order=0, block_order=1)
+    assert res_dup.status == "ambiguous"
+
+    # 4. Combined stripped footnote marker (`origins` gap) + typographic quote/dash folding.
+    from linguary.domain import InlineAnnotation, InlineAnnotationType
+
+    fn_text = "“Strange—very1 strange,” he muttered."
+    blk_fn = DocumentBlock(
+        id="blk-fn",
+        section_id="sec-1",
+        order=2,
+        type=BlockType.PARAGRAPH,
+        text=fn_text,
+        source_reference=SourceReference("ch1.xhtml", "p[2]"),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=fn_text.index("1"),
+                end=fn_text.index("1") + 1,
+                target="ch1.xhtml#fn1",
+            ),
+        ),
+    )
+    res_fn = resolve_quote_anchor(blk_fn, '"Strange-very strange,"', section_order=0, block_order=2)
+    assert res_fn.status == "resolved"
+    assert res_fn.anchor is not None
+    assert res_fn.anchor.quote == "“Strange—very1 strange,”"
+    assert blk_fn.text[res_fn.anchor.start : res_fn.anchor.end] == res_fn.anchor.quote
+

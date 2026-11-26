@@ -3660,3 +3660,66 @@ def test_single_segment_block_with_segments_gives_actionable_violation() -> None
     )
 
 
+def test_mixed_block_glossary_only_violations_name_exact_segment_indices() -> None:
+    """WP2: segmented GLOSSARY_ONLY validator messages include exact 1-based segment indices."""
+    unit, block = _segmented(
+        ("First sentence.", " Second sentence.", " Third sentence."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
+    )
+
+    # 1. Missing hints altogether -> names segment 3.
+    missing_hints = _segmented_response(
+        block,
+        ((1, "Первое предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(),
+    )
+    msg_missing = str(rejection(missing_hints, unit=unit))
+    assert f"для блока {block.id} обязательны словарные подсказки" in msg_missing
+    assert "GLOSSARY_ONLY: 3" in msg_missing
+
+    # 2. Hint only from TRANSLATE segment -> names segment 3.
+    wrong_seg = _segmented_response(
+        block,
+        ((1, "Первое предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(original="First"),),
+    )
+    msg_wrong = str(rejection(wrong_seg, unit=unit))
+    assert f"для блока {block.id} ни одна словарная подсказка не относится к сегменту GLOSSARY_ONLY" in msg_wrong
+    assert "(3)" in msg_wrong
+
+    # 3. strict_v3 extra bare hint from TRANSLATE segment alongside valid GLOSSARY_ONLY hint -> names segment 3.
+    extra_bare = _segmented_response(
+        block,
+        ((1, "Первое предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(
+            make_hint(original="Third", translation="третий", note=""),
+            make_hint(original="First", translation="первый", note=""),
+        ),
+    )
+    msg_extra = str(rejection(extra_bare, unit=unit, validation_policy="v3"))
+    assert f"для блока {block.id} словарная подсказка «First» без note не относится к сегменту GLOSSARY_ONLY" in msg_extra
+    assert "(3)" in msg_extra
+
+    # 4. Multiple GLOSSARY_ONLY segments -> lists all indices (2, 4).
+    unit_multi, block_multi = _segmented(
+        ("One.", " Two.", " Three.", " Four."),
+        (
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.GLOSSARY_ONLY,
+        ),
+    )
+    missing_multi = _segmented_response(
+        block_multi,
+        ((1, "Один."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(),
+    )
+    assert "GLOSSARY_ONLY: 2, 4" in str(rejection(missing_multi, unit=unit_multi))
+
+
+

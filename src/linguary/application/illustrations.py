@@ -457,6 +457,7 @@ class IllustrationService:
                                 section_id is None
                                 or s.section_id is None
                                 or s.section_id == section_id
+                                or s.stage in _REFERENCE_STAGE_SET
                             )
                             for s in scopes
                         )
