@@ -1508,3 +1508,303 @@ async def test_candidates_known_entity_aliases_and_glossary_terms_ru_non_spoiler
         assert payload["glossary_terms_ru"] == {"Nick": "Ник"}
         assert "Future Relic" not in payload["glossary_terms_ru"]
 
+
+async def test_selection_non_composite_truncated_retry_recovers(tmp_path: Path) -> None:
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    sel_calls = 0
+    seen_sel_repairs: list[tuple[tuple[str | None, str], ...]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal sel_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id=f"ev-{blk['block_id']}",
+                        title_ru=f"Сцена {blk['block_id']}",
+                        event_ru=f"Событие {blk['block_id']}",
+                        significance_ru="Важный момент",
+                        event_kind="encounter",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=blk["block_id"], quote=blk["text"][:12]),
+                        ),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            sel_calls += 1
+            seen_sel_repairs.append(req.repair_turns)
+            if sel_calls == 1:
+                raise LLMResponseFormatError("truncated selection", truncated=True)
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевой кадр"),
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    # 2 candidates -> 1 non-composite SELECTION scope (is_composite is False when len(cards) <= 2).
+    h = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            ("Сцена 1", [("b-1", "Alice stepped across the bridge.")]),
+            ("Сцена 2", [("b-2", "A lantern glowed in the tower.")]),
+        ],
+        handler=_handler,
+        max_per_chapter=2,
+        book_id="book-sel-trunc-retry",
+    )
+    await _drain_selection_tasks(h)
+
+    assert sel_calls == 2
+    assert seen_sel_repairs[0] == ()
+    assert seen_sel_repairs[1] and "обрезан по длине" in seen_sel_repairs[1][0][1]
+    selected = h.selection.selected_moments(h.generation_id, h.section_id)
+    assert len(selected.winners) == 1
+
+
+async def test_wire_id_aliases_candidates_long_ids_decode_and_repair_rewrite(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustration_context import (
+        decode_wire_id_aliases,
+        encode_wire_id_aliases,
+    )
+
+    uuid_b1 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    cand_calls = 0
+    seen_wire_cand: list[dict[str, Any]] = []
+    seen_repairs: list[str] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal cand_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            cand_calls += 1
+            seen_wire_cand.append(data)
+            if req.repair_turns:
+                seen_repairs.append(req.repair_turns[0][1])
+            blk = data["blocks"][0]
+            if cand_calls == 1:
+                return IllustrationCandidatesResponse(
+                    scene_id=data["scene_id"],
+                    events=(),
+                    zero_reason_ru="Нет событий.",
+                    covered_source_unit_ids=(),  # triggers repair naming source_unit_id
+                    complete=True,
+                )
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-1",
+                        title_ru="Момент у моста",
+                        event_ru="Алиса пересекает мост.",
+                        significance_ru="Ключевой переход",
+                        event_kind="crossing",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id=blk["block_id"], quote="Alice crossed the narrow bridge"
+                            ),
+                        ),
+                        insert_after_block_id=blk["block_id"],
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Яркий момент"),
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    h = _setup_chapter(
+        tmp_path,
+        scenes_spec=[("Сцена моста", [(uuid_b1, "Alice crossed the narrow bridge at dawn.")])],
+        handler=_handler,
+        book_id="book-wire-cand",
+    )
+    await _drain_selection_tasks(h)
+
+    assert cand_calls == 2
+    assert seen_wire_cand[0]["scene_id"] == "s1"
+    assert seen_wire_cand[0]["blocks"][0]["block_id"] == "b1"
+    assert seen_wire_cand[0]["blocks"][0]["source_unit_id"] == "b1"
+    assert seen_repairs and "b1" in seen_repairs[0]
+    assert uuid_b1 not in seen_repairs[0]
+
+    selected = h.selection.selected_moments(h.generation_id, h.section_id)
+    assert len(selected.winners) == 1
+    assert selected.winners[0].anchors[0].block_id == uuid_b1
+    assert selected.winners[0].insert_after_block_id == uuid_b1
+
+    # Direct check: single_scene_id fallback maps "s1" even if canonical scene_id was short.
+    short_in = {"scene_id": "sc-short", "blocks": [{"source_unit_id": "u-0", "block_id": "b-0"}]}
+    wire_short, a2c_short, _ = encode_wire_id_aliases(IllustrationScopeStage.CANDIDATES, short_in)
+    assert wire_short["scene_id"] == "sc-short"
+    assert wire_short["blocks"][0]["block_id"] == "b-0"
+    assert a2c_short == {}
+    decoded_s1 = decode_wire_id_aliases(
+        IllustrationCandidatesResponse(scene_id="s1", events=(), covered_source_unit_ids=("u-0",)),
+        a2c_short,
+        single_scene_id="sc-short",
+    )
+    assert decoded_s1.scene_id == "sc-short"
+
+
+async def test_effective_chapter_illustration_cap_and_split_preservation(tmp_path: Path) -> None:
+    from linguary.application.illustration_selection import effective_chapter_illustration_cap
+
+    assert effective_chapter_illustration_cap(3, 1, 1) == 1
+    assert effective_chapter_illustration_cap(3, 2, 1) == 1
+    assert effective_chapter_illustration_cap(3, 3, 1) == 2
+    assert effective_chapter_illustration_cap(3, 8, 2) == 2
+    assert effective_chapter_illustration_cap(3, 3, 3) == 3
+    assert effective_chapter_illustration_cap(3, 9, 1) == 3
+    assert effective_chapter_illustration_cap(1, 12, 4) == 1
+
+    # 2-block, 1-scene chapter with max_per_chapter=3 MUST cap selection to 1!
+    seen_group_caps: list[int] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            b0, b1 = data["blocks"][0], data["blocks"][1]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-a",
+                        title_ru="Момент 1",
+                        event_ru="Первое событие.",
+                        significance_ru="Значимость 1",
+                        event_kind="entry",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=b0["block_id"], quote="First paragraph"),
+                        ),
+                    ),
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-b",
+                        title_ru="Момент 2",
+                        event_ru="Второе событие.",
+                        significance_ru="Значимость 2",
+                        event_kind="exit",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=b1["block_id"], quote="Second paragraph"),
+                        ),
+                    ),
+                ),
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            seen_group_caps.append(int(data["group_cap"]))
+            chosen = [c["candidate_id"] for c in data["candidates"][: data["group_cap"]]]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=tuple(chosen),
+                selection_reasons_ru=tuple(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Лучший кадр")
+                    for cid in chosen
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    h = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            (
+                "Короткая глава",
+                [
+                    ("b-0", "First paragraph in short chapter."),
+                    ("b-1", "Second paragraph in short chapter."),
+                ],
+            )
+        ],
+        handler=_handler,
+        max_per_chapter=3,
+        book_id="book-short-cap",
+    )
+    await _drain_selection_tasks(h)
+
+    assert seen_group_caps == [1]
+    selected = h.selection.selected_moments(h.generation_id, h.section_id)
+    assert len(selected.winners) == 1
+    with h.uow.read_transaction() as tx:
+        sel_scopes = [
+            s
+            for s in tx.illustrations.list_scopes(h.generation_id, stage=IllustrationScopeStage.SELECTION)
+            if s.summary.get("kind") == "tournament_group"
+        ]
+        assert sel_scopes
+        assert sel_scopes[0].summary["effective_max_per_chapter"] == 1
+
+        # Verify _split_children_for_scope preserves effective_max_per_chapter from scope.summary!
+        from linguary.application.illustration_selection import _build_selection_scope_spec
+
+        gen = tx.illustrations.get_generation(h.book_id, h.generation_id)
+        assert gen is not None
+        rev = tx.illustrations.get_settings(h.book_id, gen.settings_id)
+        assert rev is not None
+        cards4 = [
+            _make_card(f"c{i}", scene_id=f"s{i}", block_id=f"b-{i}", start=0, end=5, title=f"T{i}")
+            for i in range(4)
+        ]
+        parent_spec = _build_selection_scope_spec(
+            section_id=h.section_id,
+            section_order=0,
+            section_title="Short",
+            scope_key="select:test:split:parent",
+            round_num=1,
+            group_idx=0,
+            cards=cards4,
+            group_cap=1,
+            depth=0,
+            revision=rev,
+            route_id="route-1",
+            chapter_cap=1,
+        )
+        parent_scope = tx.illustrations.upsert_scopes(h.generation_id, [parent_spec])[0]
+        children = h.selection._split_children_for_scope(parent_scope, rev, depth=0)
+        assert children is not None and len(children) == 2
+        for child in children:
+            assert child.summary["effective_max_per_chapter"] == 1
+            assert child.summary["group_cap"] == 1
+
+
+def test_moments_conflict_diversity_min_block_gap() -> None:
+    order = {f"b-{i}": i for i in range(15)}
+    c_b2 = _make_card("c-b2", scene_id="s1", block_id="b-2", start=0, end=5, title="Событие A", event_kind="a")
+    c_b3 = _make_card("c-b3", scene_id="s2", block_id="b-3", start=0, end=5, title="Событие B", event_kind="b")
+    c_b5 = _make_card("c-b5", scene_id="s3", block_id="b-5", start=0, end=5, title="Событие C", event_kind="c")
+
+    # Default min_block_gap=0 -> no conflict between adjacent blocks in different scenes.
+    assert moments_conflict_diversity(c_b2, c_b3) is False
+    # With min_block_gap=2 -> |2 - 3| < 2 conflicts, |2 - 5| >= 2 does NOT conflict.
+    assert moments_conflict_diversity(c_b2, c_b3, block_order_by_id=order, min_block_gap=2) is True
+    assert moments_conflict_diversity(c_b2, c_b5, block_order_by_id=order, min_block_gap=2) is False
+
+    # enforce_intra_chapter_diversity activates min_block_gap=2 for >= 12 blocks and promotes c_b5!
+    winners, _shortlist, _zero = enforce_intra_chapter_diversity(
+        [c_b2, c_b3],
+        [c_b5],
+        block_order_by_id=order,
+    )
+    assert [w.candidate_id for w in winners] == ["c-b2", "c-b5"]
+
+    # Without block_order_by_id -> legacy behavior (both c_b2 and c_b3 kept).
+    winners_legacy, _, _ = enforce_intra_chapter_diversity([c_b2, c_b3], [c_b5])
+    assert [w.candidate_id for w in winners_legacy] == ["c-b2", "c-b3"]
+

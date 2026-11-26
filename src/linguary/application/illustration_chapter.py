@@ -622,6 +622,7 @@ def _build_prompt_scope_spec(
     base_fallback_entity_ids: Sequence[str] = (),
     entity_names: Sequence[str] = (),
     scene_location_ru: str | None = None,
+    anchor_quotes: Sequence[str] | None = None,
     glossary_terms_ru: Mapping[str, str] | None = None,
     revision: IllustrationSettingsRevision,
     route_id: str,
@@ -644,6 +645,14 @@ def _build_prompt_scope_spec(
     }
     if not locations and scene_location_ru and scene_location_ru.strip():
         request_input["scene_location_ru"] = scene_location_ru.strip()[:240]
+    raw_quotes = (
+        [a.quote for a in moment_card.anchors if a.quote and a.quote.strip()]
+        if anchor_quotes is None
+        else [str(q) for q in anchor_quotes if q is not None and str(q).strip()]
+    )
+    cleaned_quotes = [q.strip()[:240] for q in raw_quotes if q.strip()][:3]
+    if cleaned_quotes:
+        request_input["anchor_quotes"] = cleaned_quotes
     if glossary_terms_ru:
         cleaned_gloss = {
             str(k): str(v)
@@ -1113,6 +1122,74 @@ class IllustrationChapter:
                         (char_apps if kind_bucket == "person" else loc_apps).append(app)
                         continue
 
+                    # Deterministic fast-path for a single clean permanent fact (skips redundant FACT_SCOPE LLM call).
+                    if len(entity_facts) == 1:
+                        single_fact = entity_facts[0]
+                        single_desc_en = str(single_fact.get("description_en", "")).strip()
+                        single_desc_ru = str(single_fact.get("description_ru", "")).strip()
+                        ent_names_for_mono = _entity_names(ent)
+                        mono_ok = (
+                            revision.settings.style != ILLUSTRATION_STYLE_MONOCHROME_INK
+                            or (
+                                find_monochrome_color_word(
+                                    single_desc_en,
+                                    allowed_names=ent_names_for_mono,
+                                    strict_palette=False,
+                                )
+                                is None
+                                and find_monochrome_color_word(
+                                    single_desc_ru,
+                                    allowed_names=ent_names_for_mono,
+                                    strict_palette=False,
+                                )
+                                is None
+                            )
+                        )
+                        if (
+                            str(single_fact.get("temporal_scope", "")) == "permanent"
+                            and single_desc_en
+                            and not has_cyrillic(single_desc_en)
+                            and single_desc_ru
+                            and mono_ok
+                        ):
+                            _, kept_design = resolve_appearance_with_design_fallback(
+                                [single_fact],
+                                design_payloads,
+                                excluded_facts=(),
+                                compact_description_en=single_desc_en,
+                                compact_description_ru=single_desc_ru,
+                            )
+                            for d in kept_design:
+                                dkey = f"{eid}:{d['trait']}"
+                                if dkey in seen_design_keys:
+                                    continue
+                                seen_design_keys.add(dkey)
+                                allowed_dkeys.append(dkey)
+                                available_design_traits.append(
+                                    {
+                                        "key": dkey,
+                                        "entity_id": eid,
+                                        "entity_kind": kind_bucket,
+                                        "trait": str(d["trait"]),
+                                        "description_ru": str(d["description_ru"]),
+                                        "description_en": str(d["description_en"]),
+                                        "assumption_ru": str(d.get("assumption_ru", "")),
+                                    }
+                                )
+                            fid_str = str(single_fact["fact_id"])
+                            allowed_fids.append(fid_str)
+                            app = IllustrationAppearance(
+                                entity_id=eid,
+                                name_ru=display_name_ru,
+                                description_ru=single_desc_ru,
+                                description_en=single_desc_en,
+                                fact_ids=(fid_str,),
+                                assumptions_ru=(),
+                                name_en=eng_name,
+                            )
+                            (char_apps if kind_bucket == "person" else loc_apps).append(app)
+                            continue
+
                     # Pack entity_facts chronologically into bounded pages for FACT_SCOPE folding!
                     def _make_fs_probe(
                         f_page: Sequence[Mapping[str, Any]],
@@ -1577,47 +1654,69 @@ class IllustrationChapter:
                     if loc_apps
                     else _resolve_scene_location_ru(entry, section_id, card.scene_id)
                 )
+                raw_anchor_quotes = [
+                    a.quote.strip()[:240]
+                    for a in card.anchors
+                    if a.quote and a.quote.strip()
+                ][:3]
+
+                def _build_prompt_probe_payload(
+                    cur_quotes: Sequence[str],
+                    cur_gloss: Mapping[str, str],
+                    _card: SelectedMomentCard = card,
+                    _chars: Sequence[IllustrationAppearance] = char_apps,
+                    _locs: Sequence[IllustrationAppearance] = loc_apps,
+                    _fids: Sequence[str] = allowed_fids,
+                    _dkeys: Sequence[str] = allowed_dkeys,
+                    _dtraits: Sequence[Mapping[str, Any]] = avail_design_traits,
+                    _sloc: str | None = scene_loc_ru,
+                ) -> LLMRequest[Any]:
+                    p_in: dict[str, Any] = {
+                        "moment_id": _card.candidate_id,
+                        "scene_id": _card.scene_id,
+                        "title_ru": _card.title_ru,
+                        "event_ru": _card.event_ru,
+                        "reason_ru": _card.reason_ru,
+                        "style": revision.settings.style,
+                        "characters": [c.to_dict() for c in _chars],
+                        "locations": [loc.to_dict() for loc in _locs],
+                        "allowed_fact_ids": list(_fids),
+                        "allowed_design_keys": list(_dkeys),
+                        "available_design_traits": [thaw(t) for t in _dtraits],
+                    }
+                    if not _locs and _sloc and _sloc.strip():
+                        p_in["scene_location_ru"] = _sloc.strip()[:240]
+                    if cur_quotes:
+                        p_in["anchor_quotes"] = list(cur_quotes)
+                    if cur_gloss:
+                        p_in["glossary_terms_ru"] = dict(cur_gloss)
+                    return IllustrationContext.build_for_kind(
+                        kind=LLMResponseKind.ILLUSTRATION_PROMPT,
+                        stage=IllustrationScopeStage.PROMPT,
+                        input_payload=p_in,
+                        book_id=snapshot.book_id,
+                        conditions_id=snapshot.conditions_id,
+                        policy=policy,
+                    )
+
+                bounded_anchor_quotes: list[str] = []
+                for q in raw_anchor_quotes:
+                    cand_quotes = [*bounded_anchor_quotes, q]
+                    if (
+                        sizer.measure(_build_prompt_probe_payload(cand_quotes, {})).size_bytes
+                        <= policy.initial_target_bytes
+                    ):
+                        bounded_anchor_quotes = cand_quotes
+                    else:
+                        break
+
                 bounded_prompt_glossary: dict[str, str] = {}
                 if chapter_glossary_terms_ru:
-                    def _build_prompt_probe(
-                        cur_gloss: dict[str, str],
-                        _card: SelectedMomentCard = card,
-                        _chars: Sequence[IllustrationAppearance] = char_apps,
-                        _locs: Sequence[IllustrationAppearance] = loc_apps,
-                        _fids: Sequence[str] = allowed_fids,
-                        _dkeys: Sequence[str] = allowed_dkeys,
-                        _dtraits: Sequence[Mapping[str, Any]] = avail_design_traits,
-                        _sloc: str | None = scene_loc_ru,
-                    ) -> LLMRequest[Any]:
-                        p_in: dict[str, Any] = {
-                            "moment_id": _card.candidate_id,
-                            "scene_id": _card.scene_id,
-                            "title_ru": _card.title_ru,
-                            "event_ru": _card.event_ru,
-                            "reason_ru": _card.reason_ru,
-                            "style": revision.settings.style,
-                            "characters": [c.to_dict() for c in _chars],
-                            "locations": [loc.to_dict() for loc in _locs],
-                            "allowed_fact_ids": list(_fids),
-                            "allowed_design_keys": list(_dkeys),
-                            "available_design_traits": [thaw(t) for t in _dtraits],
-                        }
-                        if not _locs and _sloc and _sloc.strip():
-                            p_in["scene_location_ru"] = _sloc.strip()[:240]
-                        if cur_gloss:
-                            p_in["glossary_terms_ru"] = dict(cur_gloss)
-                        return IllustrationContext.build_for_kind(
-                            kind=LLMResponseKind.ILLUSTRATION_PROMPT,
-                            stage=IllustrationScopeStage.PROMPT,
-                            input_payload=p_in,
-                            book_id=snapshot.book_id,
-                            conditions_id=snapshot.conditions_id,
-                            policy=policy,
-                        )
-
                     bounded_prompt_glossary = fit_glossary_terms_to_wire_budget(
                         chapter_glossary_terms_ru,
-                        build_request=_build_prompt_probe,
+                        build_request=lambda g, _q=bounded_anchor_quotes: _build_prompt_probe_payload(
+                            _q, g
+                        ),
                         sizer=sizer,
                         target_bytes=policy.initial_target_bytes,
                     )
@@ -1635,6 +1734,7 @@ class IllustrationChapter:
                     base_fallback_entity_ids=base_fallback_eids,
                     entity_names=moment_entity_names,
                     scene_location_ru=scene_loc_ru,
+                    anchor_quotes=bounded_anchor_quotes,
                     glossary_terms_ru=bounded_prompt_glossary,
                     revision=revision,
                     route_id=route_id,
@@ -1659,6 +1759,7 @@ class IllustrationChapter:
                         base_fallback_entity_ids=base_fallback_eids,
                         entity_names=moment_entity_names,
                         scene_location_ru=scene_loc_ru,
+                        anchor_quotes=bounded_anchor_quotes,
                         glossary_terms_ru=bounded_prompt_glossary,
                         revision=revision,
                         route_id=route_id,
@@ -2086,6 +2187,22 @@ class IllustrationChapter:
                     )
                     return
                 if is_truncated_error(call_error):
+                    if self._can_continue_activation(
+                        activation_calls_used, scope.id, book_id, policy
+                    ):
+                        with self._uow.transaction() as tx:
+                            tx.illustrations.record_attempt_outcome(
+                                attempt.id,
+                                state=IllustrationAttemptState.FAILED,
+                                outcome={
+                                    "reason_code": IllustrationReasonCode.PROVIDER_TRUNCATED.value
+                                },
+                            )
+                        repair_summary = (
+                            "Предыдущий ответ был обрезан по длине. "
+                            "Верни компактный валидный JSON без повторов и лишних пробелов."
+                        )
+                        continue
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,

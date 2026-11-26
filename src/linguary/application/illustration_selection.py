@@ -13,6 +13,8 @@ from linguary.application.illustration_context import (
     IllustrationContext,
     _collect_book_glossary_terms_ru,
     compact_safe_detail,
+    decode_wire_id_aliases,
+    encode_wire_id_aliases,
     fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
@@ -324,14 +326,45 @@ def _anchors_overlap(a: Sequence[SelectedAnchor], b: Sequence[SelectedAnchor]) -
     return False
 
 
-def moments_conflict_diversity(a: SelectedMomentCard, b: SelectedMomentCard) -> bool:
-    """Return `True` iff two moments represent a duplicate beat within the same chapter.
+def effective_chapter_illustration_cap(
+    max_per_chapter: int,
+    content_block_count: int,
+    scene_count: int,
+) -> int:
+    """Scale chapter illustration cap down for very short chapters."""
+    if content_block_count <= 2 and scene_count <= 1:
+        return min(max_per_chapter, 1)
+    if 3 <= content_block_count <= 8 and scene_count <= 2:
+        return min(max_per_chapter, 2)
+    return max_per_chapter
+
+
+def _moment_block_position(
+    card: SelectedMomentCard, block_order_by_id: Mapping[str, int]
+) -> int | None:
+    if card.insert_after_block_id and card.insert_after_block_id in block_order_by_id:
+        return block_order_by_id[card.insert_after_block_id]
+    for anchor in card.anchors:
+        if anchor.block_id in block_order_by_id:
+            return block_order_by_id[anchor.block_id]
+    return None
+
+
+def moments_conflict_diversity(
+    a: SelectedMomentCard,
+    b: SelectedMomentCard,
+    *,
+    block_order_by_id: Mapping[str, int] | None = None,
+    min_block_gap: int = 0,
+) -> bool:
+    """Return `True` iff two moments represent a duplicate or too-close beat within the same chapter.
 
     - Overlapping quote anchors on the same block always conflict.
     - Identical normalized `title_ru` or `event_ru` always conflict.
     - Same `scene_id` + same normalized `event_kind` conflict (same beat type in same scene).
     - Distinct scenes with distinct conflicts sharing a broad `event_kind` (e.g. two different
-      `'action'` conflicts in different scenes) do NOT conflict.
+      `'action'` conflicts in different scenes) do NOT conflict unless `min_block_gap > 0`
+      and their resolved block positions are closer than `min_block_gap`.
     """
     if a.candidate_id == b.candidate_id:
         return True
@@ -351,6 +384,11 @@ def moments_conflict_diversity(a: SelectedMomentCard, b: SelectedMomentCard) -> 
         and normalize_name_token(a.event_kind) == normalize_name_token(b.event_kind)
     ):
         return True
+    if min_block_gap > 0 and block_order_by_id is not None:
+        pos_a = _moment_block_position(a, block_order_by_id)
+        pos_b = _moment_block_position(b, block_order_by_id)
+        if pos_a is not None and pos_b is not None and abs(pos_a - pos_b) < min_block_gap:
+            return True
     return False
 
 
@@ -359,6 +397,8 @@ def enforce_intra_chapter_diversity(
     shortlist: Sequence[SelectedMomentCard],
     *,
     zero_reason_ru: str | None = None,
+    block_order_by_id: Mapping[str, int] | None = None,
+    min_block_gap: int | None = None,
 ) -> tuple[tuple[SelectedMomentCard, ...], tuple[SelectedMomentCard, ...], str | None]:
     """Validate pairwise diversity among a chapter's winners, replacing duplicates from LIFO shortlist.
 
@@ -366,12 +406,25 @@ def enforce_intra_chapter_diversity(
     - At most `len(shortlist)` replacement attempts are performed.
     - Final winners and rejected duplicate beats are stripped from the returned `shortlist`.
     """
+    if min_block_gap is None:
+        effective_gap = 2 if (block_order_by_id is not None and len(block_order_by_id) >= 12) else 0
+    else:
+        effective_gap = min_block_gap if block_order_by_id is not None else 0
+
     accepted: list[SelectedMomentCard] = []
     rejected_ids: set[str] = set()
     available_shortlist = list(shortlist)
 
     for candidate in winners:
-        if not any(moments_conflict_diversity(candidate, existing) for existing in accepted):
+        if not any(
+            moments_conflict_diversity(
+                candidate,
+                existing,
+                block_order_by_id=block_order_by_id,
+                min_block_gap=effective_gap,
+            )
+            for existing in accepted
+        ):
             accepted.append(candidate)
             continue
 
@@ -383,7 +436,15 @@ def enforce_intra_chapter_diversity(
                 runner_up.candidate_id == w.candidate_id for w in accepted
             ):
                 continue
-            if not any(moments_conflict_diversity(runner_up, existing) for existing in accepted):
+            if not any(
+                moments_conflict_diversity(
+                    runner_up,
+                    existing,
+                    block_order_by_id=block_order_by_id,
+                    min_block_gap=effective_gap,
+                )
+                for existing in accepted
+            ):
                 promoted = SelectedMomentCard(
                     candidate_id=runner_up.candidate_id,
                     section_id=runner_up.section_id,
@@ -640,12 +701,16 @@ def _build_selection_scope_spec(
     depth: int,
     revision: IllustrationSettingsRevision,
     route_id: str,
+    chapter_cap: int | None = None,
     carried_singletons: Sequence[SelectedMomentCard] = (),
     prior_shortlist: Sequence[SelectedMomentCard] = (),
     prior_zero_reasons: Sequence[str] = (),
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
+    effective_cap = (
+        revision.settings.max_per_chapter if chapter_cap is None else chapter_cap
+    )
     request_input = {
         "section_id": section_id,
         "section_title": section_title,
@@ -661,6 +726,7 @@ def _build_selection_scope_spec(
             "route_id": route_id,
             "style": revision.settings.style,
             "max_per_chapter": revision.settings.max_per_chapter,
+            "effective_max_per_chapter": effective_cap,
             "policy": policy.to_payload(),
         }
     )
@@ -674,6 +740,7 @@ def _build_selection_scope_spec(
         "round": round_num,
         "group_idx": group_idx,
         "group_cap": group_cap,
+        "effective_max_per_chapter": effective_cap,
         "expected_candidate_ids": [c.candidate_id for c in cards],
         "cards": [c.to_dict() for c in cards],
         "carried_singletons": [c.to_dict() for c in carried_singletons],
@@ -1227,7 +1294,23 @@ class IllustrationSelection:
                     raise LLMResponseFormatError(
                         "ответ модели усечён по лимиту токенов", truncated=True
                     )
-                validation = self._validate_response(scope, response.payload, block_lookup)
+                payload_for_validation = response.payload
+                if scope.stage is IllustrationScopeStage.CANDIDATES:
+                    raw_input = scope.summary.get("request_input")
+                    if isinstance(raw_input, Mapping):
+                        _, alias_to_canonical, _ = encode_wire_id_aliases(scope.stage, raw_input)
+                        raw_scene_id = scope.summary.get("scene_id")
+                        single_scene_id = (
+                            str(raw_scene_id).strip()
+                            if raw_scene_id is not None and str(raw_scene_id).strip()
+                            else None
+                        )
+                        payload_for_validation = decode_wire_id_aliases(
+                            payload_for_validation,
+                            alias_to_canonical,
+                            single_scene_id=single_scene_id,
+                        )
+                validation = self._validate_response(scope, payload_for_validation, block_lookup)
             except Exception as err:
                 call_error = err
 
@@ -1272,6 +1355,22 @@ class IllustrationSelection:
                             fail_reason=IllustrationReasonCode.PROVIDER_TRUNCATED.value,
                         )
                         break
+                    if self._can_continue_activation(
+                        activation_calls_used, scope.id, book_id, policy
+                    ):
+                        with self._uow.transaction() as tx:
+                            tx.illustrations.record_attempt_outcome(
+                                attempt.id,
+                                state=IllustrationAttemptState.FAILED,
+                                outcome={
+                                    "reason_code": IllustrationReasonCode.PROVIDER_TRUNCATED.value
+                                },
+                            )
+                        repair_summary = (
+                            "Предыдущий ответ был обрезан по длине. "
+                            "Верни компактный валидный JSON без повторов и лишних пробелов."
+                        )
+                        continue
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1837,7 +1936,11 @@ class IllustrationSelection:
             if s.stage is IllustrationScopeStage.SELECTION and s.scope_key != final_key
         ]
 
-        max_per_chapter = revision.settings.max_per_chapter
+        max_per_chapter = effective_chapter_illustration_cap(
+            revision.settings.max_per_chapter,
+            len(entry.block_digests),
+            len(entry.scenes),
+        )
 
         if not sel_scopes:
             # Collect & deduplicate all candidate cards from accepted CANDIDATES leaves.
@@ -2037,10 +2140,13 @@ class IllustrationSelection:
 
         # Count is now in 1..max_per_chapter (and editorial gate or tournament round ran) -> diversity check!
         consolidated_zero = "; ".join(dict.fromkeys(zero_reasons)) or None
+        block_order_by_id = {bid: idx for idx, bid in enumerate(entry.block_digests)}
         final_winners, final_shortlist, final_zero = enforce_intra_chapter_diversity(
             next_cards,
             updated_shortlist,
             zero_reason_ru=consolidated_zero,
+            block_order_by_id=block_order_by_id,
+            min_block_gap=2 if len(entry.block_digests) >= 12 else 0,
         )
         self._persist_final_selection(
             tx,
@@ -2076,7 +2182,11 @@ class IllustrationSelection:
         id_factory: Callable[[], str],
     ) -> bool:
         policy = revision.settings.policy
-        max_per_chapter = revision.settings.max_per_chapter
+        max_per_chapter = effective_chapter_illustration_cap(
+            revision.settings.max_per_chapter,
+            len(entry.block_digests),
+            len(entry.scenes),
+        )
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
 
@@ -2158,6 +2268,7 @@ class IllustrationSelection:
                 depth=0,
                 revision=revision,
                 route_id=route_id,
+                chapter_cap=max_per_chapter,
                 carried_singletons=carried_singletons if g_idx == 0 else (),
                 prior_shortlist=prior_shortlist if g_idx == 0 else (),
                 prior_zero_reasons=prior_zero_reasons if g_idx == 0 else (),
@@ -2180,6 +2291,7 @@ class IllustrationSelection:
                     depth=0,
                     revision=revision,
                     route_id=route_id,
+                    chapter_cap=max_per_chapter,
                     carried_singletons=carried_singletons if g_idx == 0 else (),
                     prior_shortlist=prior_shortlist if g_idx == 0 else (),
                     prior_zero_reasons=prior_zero_reasons if g_idx == 0 else (),
@@ -2348,7 +2460,9 @@ class IllustrationSelection:
             # Both halves have size >= 2 if len(cards) >= 4; if len(cards) == 3, [2] and [1] -> carry singleton!
             round_num = int(scope.summary.get("round", 1))
             group_idx = int(scope.summary.get("group_idx", 0))
-            max_per = revision.settings.max_per_chapter
+            max_per = int(
+                scope.summary.get("effective_max_per_chapter", revision.settings.max_per_chapter)
+            )
             prior_singletons = [
                 SelectedMomentCard.from_dict(c)
                 for c in scope.summary.get("carried_singletons", ())
@@ -2375,6 +2489,7 @@ class IllustrationSelection:
                     depth=depth + 1,
                     revision=revision,
                     route_id=route_id,
+                    chapter_cap=max_per,
                     carried_singletons=([*prior_singletons, *extra_singletons] if idx == 0 else ()),
                     prior_shortlist=(prior_shortlist if idx == 0 else ()),
                     prior_zero_reasons=(prior_zeros if idx == 0 else ()),
@@ -2772,6 +2887,7 @@ __all__ = [
     "SelectedMomentCard",
     "SelectedMoments",
     "deduplicate_candidates",
+    "effective_chapter_illustration_cap",
     "enforce_intra_chapter_diversity",
     "moments_conflict_diversity",
 ]

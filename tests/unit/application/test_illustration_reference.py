@@ -2243,3 +2243,427 @@ async def test_entity_persists_glossary_translations_and_design_glossary_terms_r
     assert len(bounded_tight.get("glossary_terms_ru", {})) < len(many_terms)
 
 
+async def test_design_truncated_retry_recovers_and_exhaustion_fails_cleanly(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    # Case 1: DESIGN truncates on attempt 1, succeeds on attempt 2 with repair turn!
+    design_calls = 0
+    seen_design_repairs: list[tuple[tuple[str | None, str], ...]] = []
+
+    def _handler_recover(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal design_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            u = data["units"][0]
+            blk = u["blocks"][0]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Alice",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Alice",
+                    ),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        fact_id="f1",
+                        subject_mention_id="m1",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Светлые волосы",
+                        description_en="Light hair",
+                        quote_block_id=blk["block_id"],
+                        quote="light hair",
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            design_calls += 1
+            seen_design_repairs.append(req.repair_turns)
+            if design_calls == 1:
+                raise LLMResponseFormatError("truncated", truncated=True)
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="Чёткий силуэт",
+                        description_en="Crisp ink silhouette",
+                        assumption_ru="",
+                    ),
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    h1 = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[("sec-1", "Ch 1", [("b-1", "Alice had light hair.")])],
+        handler=_handler_recover,
+        book_id="book-design-trunc-ok",
+        policy=IllustrationPolicy(max_calls_per_scope_activation=3),
+    )
+    ref1, gen1 = _create_and_plan(h1)
+    await _drain_ref_tasks(h1, ref1)
+
+    assert design_calls == 2
+    assert seen_design_repairs[0] == ()
+    assert seen_design_repairs[1]
+    assert "обрезан по длине" in seen_design_repairs[1][0][1]
+    with h1.uow.read_transaction() as tx:
+        d_scopes = tx.illustrations.list_scopes(gen1, stage=IllustrationScopeStage.DESIGN)
+        assert len(d_scopes) == 1 and d_scopes[0].state is IllustrationScopeState.ACCEPTED
+
+    # Case 2: DESIGN always truncates -> stops at max_calls_per_scope_activation and fails PROVIDER_TRUNCATED.
+    always_calls = 0
+
+    def _handler_always_trunc(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal always_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            u = data["units"][0]
+            blk = u["blocks"][0]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Bob",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Bob",
+                    ),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        fact_id="f1",
+                        subject_mention_id="m1",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Высокий рост",
+                        description_en="Tall build",
+                        quote_block_id=blk["block_id"],
+                        quote="tall",
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            always_calls += 1
+            raise LLMResponseFormatError("truncated again", truncated=True)
+        raise AssertionError(req.kind)
+
+    h2 = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[("sec-1", "Ch 1", [("b-1", "Bob was tall.")])],
+        handler=_handler_always_trunc,
+        book_id="book-design-trunc-fail",
+        policy=IllustrationPolicy(max_calls_per_scope_activation=2),
+    )
+    ref2, gen2 = _create_and_plan(h2)
+    await _drain_ref_tasks(h2, ref2)
+
+    assert always_calls == 2
+    with h2.uow.read_transaction() as tx:
+        d_scopes2 = tx.illustrations.list_scopes(gen2, stage=IllustrationScopeStage.DESIGN)
+        assert len(d_scopes2) == 1
+        assert d_scopes2[0].state is IllustrationScopeState.FAILED
+        assert d_scopes2[0].reason_code == IllustrationReasonCode.PROVIDER_TRUNCATED.value
+
+
+async def test_wire_id_aliases_extract_long_and_short_ids_and_repair_rewrite(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustration_context import (
+        decode_wire_id_aliases,
+        encode_wire_id_aliases,
+        rewrite_repair_ids_to_wire,
+    )
+
+    uuid_b1 = "11111111-2222-4333-8444-555555555555"
+    long_scene = "a" * 64
+    long_unit = f"sec-uuid:scene:{long_scene}"
+    raw_input = {
+        "units": [
+            {
+                "source_unit_id": long_unit,
+                "section_id": "sec-1",
+                "scene_id": long_scene,
+                "blocks": [
+                    {"block_id": uuid_b1, "block_order": 0, "text": "Alice stood tall."},
+                    {"block_id": "b-0", "block_order": 1, "text": "Short block id."},
+                    {"block_id": "b-atomic", "block_order": 2, "text": "Atomic id."},
+                    {"block_id": "sec0-b0", "block_order": 3, "text": "Sec0 short id."},
+                ],
+            }
+        ]
+    }
+    wire_payload, a2c, c2a = encode_wire_id_aliases(IllustrationScopeStage.EXTRACT, raw_input)
+    unit0 = wire_payload["units"][0]
+    assert unit0["source_unit_id"] == "u1"
+    assert unit0["scene_id"] == "s1"
+    assert [b["block_id"] for b in unit0["blocks"]] == ["b1", "b-0", "b-atomic", "sec0-b0"]
+    assert a2c == {"u1": long_unit, "s1": long_scene, "b1": uuid_b1}
+    assert c2a == {long_unit: "u1", long_scene: "s1", uuid_b1: "b1"}
+    # Original input is never mutated.
+    assert raw_input["units"][0]["source_unit_id"] == long_unit
+    assert raw_input["units"][0]["blocks"][0]["block_id"] == uuid_b1
+
+    # Repair summary rewrites long canonical IDs back to wire aliases (longest-first).
+    rewritten = rewrite_repair_ids_to_wire(
+        f"нет покрытия {long_unit} и неверный блок {uuid_b1} в сцене {long_scene}",
+        c2a,
+    )
+    assert rewritten == "нет покрытия u1 и неверный блок b1 в сцене s1"
+
+    # Decode restores canonical IDs in mentions, facts, covered_source_unit_ids; raw IDs pass through.
+    raw_dto = IllustrationExtractResponse(
+        mentions=(
+            IllustrationMentionDTO("m1", "Alice", "person", None, "b1", "Alice"),
+            IllustrationMentionDTO("m2", "Bob", "person", None, "b-0", "Bob"),
+        ),
+        facts=(
+            IllustrationFactDTO(
+                "f1", "m1", "permanent", True, False, "Высокая", "Tall", "b1", "tall"
+            ),
+        ),
+        covered_source_unit_ids=("u1",),
+        complete=True,
+    )
+    decoded = decode_wire_id_aliases(raw_dto, a2c)
+    assert decoded.mentions[0].quote_block_id == uuid_b1
+    assert decoded.mentions[1].quote_block_id == "b-0"
+    assert decoded.facts[0].quote_block_id == uuid_b1
+    assert decoded.covered_source_unit_ids == (long_unit,)
+
+    # Full pipeline round-trip with 36-char UUID block_id + repair turn verifying wire aliases!
+    extract_calls = 0
+    seen_wire_inputs: list[dict[str, Any]] = []
+    seen_repair_texts: list[str] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal extract_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            extract_calls += 1
+            seen_wire_inputs.append(data)
+            if req.repair_turns:
+                seen_repair_texts.append(req.repair_turns[0][1])
+            u = data["units"][0]
+            blk = u["blocks"][0]
+            if extract_calls == 1:
+                # Omit covered_source_unit_ids to trigger repair mentioning source_unit_id!
+                return IllustrationExtractResponse(
+                    mentions=(),
+                    facts=(),
+                    covered_source_unit_ids=(),
+                    complete=True,
+                )
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Alice",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Alice",
+                    ),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        fact_id="f1",
+                        subject_mention_id="m1",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Высокого роста",
+                        description_en="Tall stature",
+                        quote_block_id=blk["block_id"],
+                        quote="tall",
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(req.kind)
+
+    h = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[("sec-long-1", "Ch 1", [(uuid_b1, "Alice was tall.")])],
+        handler=_handler,
+        book_id="book-wire-extract",
+    )
+    ref, gen_id = _create_and_plan(h)
+    await _drain_ref_tasks(h, ref)
+
+    assert extract_calls == 2
+    assert seen_wire_inputs[0]["units"][0]["blocks"][0]["block_id"] == "b1"
+    assert seen_wire_inputs[0]["units"][0]["source_unit_id"] == "u1"
+    assert seen_repair_texts and "u1" in seen_repair_texts[0]
+    assert uuid_b1 not in seen_repair_texts[0]
+
+    # Persisted scope.summary["request_input"] and fact payload remain strictly canonical!
+    with h.uow.read_transaction() as tx:
+        ex_scope = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)[0]
+        assert ex_scope.state is IllustrationScopeState.ACCEPTED
+        assert ex_scope.summary["request_input"]["units"][0]["blocks"][0]["block_id"] == uuid_b1
+        facts_reg, _ = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.FACT
+        )
+        assert len(facts_reg) == 1
+        assert facts_reg[0].raw_payload()["block_id"] == uuid_b1
+
+
+async def test_design_selection_filters_one_off_background_entities(tmp_path: Path) -> None:
+    designed_names: list[str] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            u = data["units"][0]
+            b0, b1 = u["blocks"][0], u["blocks"][1]
+            return IllustrationExtractResponse(
+                mentions=(
+                    # One-off bystander with 1 episodic fact and no glossary -> SKIP DESIGN!
+                    IllustrationMentionDTO("m-bg", "Passerby", "person", None, b0["block_id"], "Passerby"),
+                    # One-off character with 1 permanent fact -> KEEP DESIGN!
+                    IllustrationMentionDTO("m-perm", "Alice", "person", None, b0["block_id"], "Alice"),
+                    # Recurring character (mention_count=2) with 0 facts -> KEEP DESIGN!
+                    IllustrationMentionDTO("m-rec1", "Bob", "person", None, b0["block_id"], "Bob"),
+                    IllustrationMentionDTO("m-rec2", "Bob", "person", None, b1["block_id"], "Bob"),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        "f-bg", "m-bg", "episodic", False, False, "Держит зонт", "Holding an umbrella", b0["block_id"], "umbrella"
+                    ),
+                    IllustrationFactDTO(
+                        "f-perm", "m-perm", "permanent", True, False, "Шрам на щеке", "Scar on cheek", b0["block_id"], "scar"
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(
+                decisions=tuple(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"],
+                        verdict="same_entity" if p["left"]["name"] == p["right"]["name"] else "different",
+                        evidence_fact_ids=(),
+                    )
+                    for p in data["pairs"]
+                )
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            designed_names.append(data["canonical_name"])
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(req.kind)
+
+    h = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            (
+                "sec-1",
+                "Ch 1",
+                [
+                    ("b-0", "Passerby held an umbrella while Alice showed her scar and Bob smiled."),
+                    ("b-1", "Bob waved goodbye."),
+                ],
+            )
+        ],
+        handler=_handler,
+        book_id="book-design-filter",
+    )
+    ref, _ = _create_and_plan(h)
+    await _drain_ref_tasks(h, ref)
+    assert set(designed_names) == {"Alice", "Bob"}
+    assert "Passerby" not in designed_names
+
+
+def test_build_bounded_design_input_episodic_context_only_and_extract_back_applicable_instruction() -> None:
+    from linguary.application.illustration_context import _STAGE_INSTRUCTIONS
+
+    policy = IllustrationPolicy()
+    sizer = _real_sizer()
+    entity = {"entity_id": "ent-nick", "canonical_name": "Nick", "entity_kind": "person"}
+    p1 = {
+        "fact_id": "f-p1",
+        "temporal_scope": "permanent",
+        "position_key": format_position_key(0, 0, 0),
+        "description_ru": "Светлые волосы",
+        "description_en": "Light hair",
+    }
+    p2 = {
+        "fact_id": "f-p2",
+        "temporal_scope": "permanent",
+        "position_key": format_position_key(0, 0, 5),
+        "description_ru": "Высокий рост",
+        "description_en": "Tall stature",
+    }
+    ep1 = {
+        "fact_id": "f-e1",
+        "temporal_scope": "episodic",
+        "position_key": format_position_key(0, 1, 0),
+        "description_ru": "В тёмном плаще",
+        "description_en": "Wearing a dark cloak",
+    }
+    ep2 = {
+        "fact_id": "f-e2",
+        "temporal_scope": "episodic",
+        "position_key": format_position_key(0, 2, 0),
+        "description_ru": "Держит фонарь",
+        "description_en": "Holding a lantern",
+    }
+    ep3 = {
+        "fact_id": "f-e3",
+        "temporal_scope": "episodic",
+        "position_key": format_position_key(0, 3, 0),
+        "description_ru": "В шляпе",
+        "description_en": "Wearing a hat",
+    }
+
+    # Exactly 1 permanent fact + 3 episodic facts -> episodic_context_only has up to 2 earliest episodic facts,
+    # while facts/non_permanent_context_only/omitted counts remain unchanged.
+    one_perm = _build_bounded_design_input(
+        entity=entity,
+        facts=[p1, ep3, ep1, ep2],
+        sizer=sizer,
+        book_id="b1",
+        conditions_id=None,
+        policy=policy,
+    )
+    assert one_perm["non_permanent_context_only"] is False
+    assert [f["fact_id"] for f in one_perm["facts"]] == ["f-p1"]
+    assert one_perm["omitted_episodic_count"] == 3
+    assert one_perm["omitted_fact_count"] == 3
+    assert [f["fact_id"] for f in one_perm["episodic_context_only"]] == ["f-e1", "f-e2"]
+
+    # >= 2 permanent facts -> NO episodic_context_only.
+    two_perm = _build_bounded_design_input(
+        entity=entity,
+        facts=[p1, p2, ep1],
+        sizer=sizer,
+        book_id="b1",
+        conditions_id=None,
+        policy=policy,
+    )
+    assert "episodic_context_only" not in two_perm
+
+    # EXTRACT instructions restrict back_applicable=true against episodic clothes/smudges/post-mortem changes.
+    extract_instr = _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
+    assert "одежд" in extract_instr.casefold()
+    assert "посмерт" in extract_instr.casefold() or "временных" in extract_instr.casefold()
+
+

@@ -627,6 +627,8 @@ def test_selection_candidates_and_prompt_strict_schema_descriptions_and_depicted
         schema_for(LLMResponseKind.ILLUSTRATION_CANDIDATES, contract_version=1)
     )
     ev_props = cand_strict["$defs"]["IllustrationCandidateEventSchema"]["properties"]
+    assert ev_props["quote_anchors"].get("description")
+    assert "block_id" in ev_props["quote_anchors"]["description"]
     assert ev_props["participant_names"].get("description")
     assert ev_props["location_names"].get("description")
 

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, TypeVar
 
 from linguary.application.context_builder import _analysis_visible_origins
+from linguary.application.illustration_dto import (
+    IllustrationCandidatesResponse,
+    IllustrationExtractResponse,
+)
 from linguary.application.illustration_source import IllustrationSourceSnapshot
 from linguary.application.ports.illustrations import RequestWireSizer
 from linguary.application.ports.llm import (
@@ -38,6 +43,26 @@ from linguary.domain.llm_log import CallContext, LLMCallStage
 
 REPAIR_RESERVE_BYTES = 1200
 MAX_REPAIR_SUMMARY_BYTES = 1024
+MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS = 6144
+_WIRE_ID_ALIAS_MIN_LEN = 16
+
+_STAGE_COMPLETION_TOKEN_CAPS: Mapping[IllustrationScopeStage, int] = {
+    IllustrationScopeStage.DESIGN: MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+    IllustrationScopeStage.SELECTION: MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+    IllustrationScopeStage.FACT_SCOPE: MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+    IllustrationScopeStage.PROMPT: MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+    IllustrationScopeStage.EXTRACT: 8192,
+    IllustrationScopeStage.ALIAS: 8192,
+    IllustrationScopeStage.CANDIDATES: 8192,
+}
+
+
+def _stage_max_completion_tokens(
+    stage: IllustrationScopeStage, policy: IllustrationPolicy
+) -> int:
+    """Return the per-stage completion token cap bounded by `policy.max_completion_tokens`."""
+    cap = _STAGE_COMPLETION_TOKEN_CAPS.get(stage, MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS)
+    return min(policy.max_completion_tokens, cap)
 
 PERSON_CLOSED_TRAITS: tuple[str, ...] = (
     "hair",
@@ -472,7 +497,9 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "(улица — именем улицы; дом — адресом или названием дома; комната — названием комнаты; не подписывай конкретный дом голым названием улицы). "
         "Если в ближайшем тексте описательное или родственное обозначение прямо соотносится с названным персонажем или местом "
         "(например, «сын X по имени Y»), укажи это имя в alias_of_hint. "
-        "Ставь back_applicable=true только для неизменных черт (например, цвет глаз), которые не раскрывают будущий спойлер. "
+        "Ставь back_applicable=true ТОЛЬКО для врождённых или долговременных физических черт (например, цвет глаз, рост, телосложение), "
+        "которые не раскрывают будущий спойлер; запрещено ставить back_applicable=true для одежды конкретного эпизода, "
+        "загрязнений, временных предметов и посмертных изменений. "
         "Если материал слишком велик для полного извлечения без пропусков, верни complete=false. "
         "При complete=true перечисли все обработанные source_unit_id в covered_source_unit_ids."
     ),
@@ -502,6 +529,7 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "анатомические или видовые черты только одной из форм; оставляй только нейтральные признаки (например, palette_value) или traits: []. "
         "Не противоречь переданным facts и не дублируй черты, уже описанные в facts; если деталей в facts достаточно или переданы только временные факты "
         "(non_permanent_context_only=true), допустимо вернуть только palette_value или traits: []. "
+        "Если передано поле episodic_context_only, используй его только как вспомогательный ориентир контекста, не закрепляя эпизодические детали в постоянных чертах. "
         "Если style == \"monochrome_ink\", описывай palette_value ТОЛЬКО тональными характеристиками чёрно-белой туши "
         "(контраст, светлые/средние/тёмные тона, плотность штриховки, чёткие силуэты) и НЕ используй названия хроматических цветов и оттенков "
         "(зелёный, красный, синий, бежевый, коричневый, жёлтый и т. п.) ни в palette_value, ни в любых других чертах дизайна. "
@@ -514,6 +542,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Противоречивые или устаревшие эпизодические факты помещай в excluded_fact_ids, актуальные — в applicable_fact_ids (не более 32). "
         "Сформируй компактные описания ТОЛЬКО визуального облика сущности на момент события на русском (compact_description_ru) и английском (compact_description_en), "
         "без пересказа диалога и сюжетных действий. "
+        "Не отбрасывай подтверждённую фактами привязку персонажа к конкретному транспорту или локации события. "
+        "Не трактуй образные или метафорические реплики об одежде буквально как телесные деформации. "
         "Если style == \"monochrome_ink\", переводи цветовые признаки исходных фактов в светотень, тональность и фактуру "
         "(например, светлый/тёмный/насыщенно-тёмный тон, контраст, металлический блеск, яркое свечение) и НЕ используй названия хроматических цветов "
         "(blue, purple, emerald, orange, red, green и т. п.) в compact_description_en и compact_description_ru. "
@@ -557,6 +587,9 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "для комнатных сцен не показывай снаружи фасад здания без выхода наружу; "
         "для уличных и наружных сцен (улица, крыльцо, двор, сад, дорога) изображай именно наружную обстановку, а не интерьер; "
         "не меняй положение тела персонажа вопреки описанию события. "
+        "В пользовательском поле assumptions_ru пиши только содержательные визуальные допущения простым русским языком; "
+        "запрещено писать внутренние технические ключи и имена полей "
+        "(attire_default, palette_value, description_en, description_ru, characters[], used_design_keys, depicted_entity_ids, facts, compact_description_en). "
         "В русскоязычных полях используй переводы имён и терминов из glossary_terms_ru (если термин там присутствует)."
     ),
 }
@@ -781,6 +814,178 @@ def fit_glossary_terms_to_wire_budget(
 collect_book_glossary_terms_ru = _collect_book_glossary_terms_ru
 
 
+def encode_wire_id_aliases(
+    stage: IllustrationScopeStage,
+    input_payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
+    """Deterministically shorten long IDs (`len > 16`) on the wire boundary for EXTRACT / CANDIDATES.
+
+    Canonical IDs (`<= 16` chars, e.g. `b-0`, `b-atomic`, `sec0-b0`) are left untouched.
+    Returns `(wire_payload, alias_to_canonical, canonical_to_alias)` without mutating `input_payload`.
+    """
+    wire_payload: dict[str, Any] = copy.deepcopy(thaw(input_payload))
+    if stage not in {IllustrationScopeStage.EXTRACT, IllustrationScopeStage.CANDIDATES}:
+        return wire_payload, {}, {}
+
+    existing_short_ids: set[str] = set()
+    if stage is IllustrationScopeStage.EXTRACT:
+        for unit in wire_payload.get("units", ()):
+            if not isinstance(unit, Mapping):
+                continue
+            for key in ("source_unit_id", "scene_id"):
+                val = unit.get(key)
+                if isinstance(val, str) and val and len(val) <= _WIRE_ID_ALIAS_MIN_LEN:
+                    existing_short_ids.add(val)
+            for blk in unit.get("blocks", ()):
+                if isinstance(blk, Mapping):
+                    bid = blk.get("block_id")
+                    if isinstance(bid, str) and bid and len(bid) <= _WIRE_ID_ALIAS_MIN_LEN:
+                        existing_short_ids.add(bid)
+    elif stage is IllustrationScopeStage.CANDIDATES:
+        sid = wire_payload.get("scene_id")
+        if isinstance(sid, str) and sid and len(sid) <= _WIRE_ID_ALIAS_MIN_LEN:
+            existing_short_ids.add(sid)
+        for blk in wire_payload.get("blocks", ()):
+            if isinstance(blk, Mapping):
+                for key in ("source_unit_id", "block_id"):
+                    val = blk.get(key)
+                    if isinstance(val, str) and val and len(val) <= _WIRE_ID_ALIAS_MIN_LEN:
+                        existing_short_ids.add(val)
+
+    alias_to_canonical: dict[str, str] = {}
+    canonical_to_alias: dict[str, str] = {}
+    counters: dict[str, int] = {"u": 1, "b": 1, "s": 1}
+
+    def _alias(raw_value: Any, prefix: str) -> Any:
+        if not isinstance(raw_value, str) or len(raw_value) <= _WIRE_ID_ALIAS_MIN_LEN:
+            return raw_value
+        existing = canonical_to_alias.get(raw_value)
+        if existing is not None:
+            return existing
+        idx = counters[prefix]
+        while f"{prefix}{idx}" in existing_short_ids or f"{prefix}{idx}" in alias_to_canonical:
+            idx += 1
+        alias = f"{prefix}{idx}"
+        counters[prefix] = idx + 1
+        canonical_to_alias[raw_value] = alias
+        alias_to_canonical[alias] = raw_value
+        return alias
+
+    if stage is IllustrationScopeStage.EXTRACT:
+        raw_units = wire_payload.get("units")
+        if isinstance(raw_units, list):
+            for unit in raw_units:
+                if not isinstance(unit, dict):
+                    continue
+                if "source_unit_id" in unit:
+                    unit["source_unit_id"] = _alias(unit["source_unit_id"], "u")
+                if unit.get("scene_id"):
+                    unit["scene_id"] = _alias(unit["scene_id"], "s")
+                raw_blocks = unit.get("blocks")
+                if isinstance(raw_blocks, list):
+                    for blk in raw_blocks:
+                        if isinstance(blk, dict) and "block_id" in blk:
+                            blk["block_id"] = _alias(blk["block_id"], "b")
+    elif stage is IllustrationScopeStage.CANDIDATES:
+        if wire_payload.get("scene_id"):
+            wire_payload["scene_id"] = _alias(wire_payload["scene_id"], "s")
+        raw_blocks = wire_payload.get("blocks")
+        if isinstance(raw_blocks, list):
+            for blk in raw_blocks:
+                if not isinstance(blk, dict):
+                    continue
+                if "block_id" in blk:
+                    blk["block_id"] = _alias(blk["block_id"], "b")
+                if "source_unit_id" in blk:
+                    blk["source_unit_id"] = _alias(blk["source_unit_id"], "u")
+
+    return wire_payload, alias_to_canonical, canonical_to_alias
+
+
+def decode_wire_id_aliases(
+    response: Any,
+    alias_to_canonical: Mapping[str, str],
+    *,
+    single_scene_id: str | None = None,
+) -> Any:
+    """Deterministically expand short wire ID aliases back into canonical IDs on response DTOs."""
+    if isinstance(response, IllustrationExtractResponse):
+        if not alias_to_canonical:
+            return response
+        return replace(
+            response,
+            mentions=tuple(
+                replace(
+                    m,
+                    quote_block_id=alias_to_canonical.get(m.quote_block_id, m.quote_block_id),
+                )
+                for m in response.mentions
+            ),
+            facts=tuple(
+                replace(
+                    f,
+                    quote_block_id=alias_to_canonical.get(f.quote_block_id, f.quote_block_id),
+                )
+                for f in response.facts
+            ),
+            covered_source_unit_ids=tuple(
+                alias_to_canonical.get(uid, uid) for uid in response.covered_source_unit_ids
+            ),
+        )
+
+    if isinstance(response, IllustrationCandidatesResponse):
+        decoded_scene_id = alias_to_canonical.get(response.scene_id)
+        if decoded_scene_id is None:
+            if single_scene_id is not None and response.scene_id == "s1":
+                decoded_scene_id = single_scene_id
+            else:
+                decoded_scene_id = response.scene_id
+        if not alias_to_canonical and decoded_scene_id == response.scene_id:
+            return response
+        return replace(
+            response,
+            scene_id=decoded_scene_id,
+            events=tuple(
+                replace(
+                    ev,
+                    quote_anchors=tuple(
+                        replace(a, block_id=alias_to_canonical.get(a.block_id, a.block_id))
+                        for a in ev.quote_anchors
+                    ),
+                    insert_after_block_id=(
+                        alias_to_canonical.get(
+                            ev.insert_after_block_id, ev.insert_after_block_id
+                        )
+                        if ev.insert_after_block_id is not None
+                        else None
+                    ),
+                )
+                for ev in response.events
+            ),
+            covered_source_unit_ids=tuple(
+                alias_to_canonical.get(uid, uid) for uid in response.covered_source_unit_ids
+            ),
+        )
+
+    return response
+
+
+def rewrite_repair_ids_to_wire(
+    repair_summary: str,
+    canonical_to_alias: Mapping[str, str],
+) -> str:
+    """Replace canonical long IDs mentioned in a repair message with their wire aliases."""
+    if not repair_summary or not canonical_to_alias:
+        return repair_summary
+    rewritten = repair_summary
+    for canonical_id, alias in sorted(
+        canonical_to_alias.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        if canonical_id in rewritten:
+            rewritten = rewritten.replace(canonical_id, alias)
+    return rewritten
+
+
 class IllustrationContext:
     """Builds bounded `LLMRequest` objects for all illustration stages."""
 
@@ -800,11 +1005,13 @@ class IllustrationContext:
         assigned_model: str | None = None,
         ordered_block_ids: tuple[str, ...] = (),
     ) -> LLMRequest[Any]:
+        wire_payload, _, canonical_to_alias = encode_wire_id_aliases(stage, input_payload)
         instructions = _STAGE_INSTRUCTIONS[stage]
-        input_text = compact_json(input_payload)
+        input_text = compact_json(wire_payload)
         repair_turns: tuple[tuple[str | None, str], ...] = ()
         if repair_summary is not None:
-            repair_turns = ((None, compact_repair_summary(repair_summary, stage=stage)),)
+            wire_repair = rewrite_repair_ids_to_wire(repair_summary, canonical_to_alias)
+            repair_turns = ((None, compact_repair_summary(wire_repair, stage=stage)),)
 
         call_stage = (
             LLMCallStage.ILLUSTRATION_REFERENCE
@@ -846,6 +1053,7 @@ class IllustrationContext:
             scope_id=scope_id,
             ordered_block_ids=dedup_blocks,
             max_request_bytes=policy.max_request_bytes,
+            max_completion_tokens=_stage_max_completion_tokens(stage, policy),
         )
 
     @classmethod
@@ -892,17 +1100,21 @@ __all__ = [
     "ALL_DESIGN_TRAITS",
     "LOCATION_CLOSED_TRAITS",
     "MAX_REPAIR_SUMMARY_BYTES",
+    "MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS",
     "PERSON_CLOSED_TRAITS",
     "REPAIR_RESERVE_BYTES",
     "TIMELESS_POSITION_KEY",
     "IllustrationContext",
     "QuoteResolutionResult",
     "_collect_book_glossary_terms_ru",
+    "_stage_max_completion_tokens",
     "closed_traits_for_kind",
     "collect_book_glossary_terms_ru",
     "compact_json",
     "compact_repair_summary",
     "compact_safe_detail",
+    "decode_wire_id_aliases",
+    "encode_wire_id_aliases",
     "fit_glossary_terms_to_wire_budget",
     "format_position_key",
     "is_context_limit_error",
@@ -912,4 +1124,5 @@ __all__ = [
     "normalize_name_token",
     "pack_items_by_wire_budget",
     "resolve_quote_anchor",
+    "rewrite_repair_ids_to_wire",
 ]

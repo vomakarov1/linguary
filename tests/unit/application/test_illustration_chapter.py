@@ -790,9 +790,11 @@ async def test_contradictory_facts_preserved_separately(tmp_path: Path) -> None:
 async def test_backward_propagation_fetched_via_query_registry_items_and_requires_invariance_no_spoiler(
     tmp_path: Path,
 ) -> None:
-    seen_in_ch0: list[str] = []
+    seen_prompt_fact_ids: list[str] = []
+    fact_scope_calls = 0
 
     def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal fact_scope_calls
         data = json.loads(req.input_text)
         if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
             blk = data["blocks"][0]
@@ -823,7 +825,7 @@ async def test_backward_propagation_fetched_via_query_registry_items_and_require
                 ),
             )
         if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
-            seen_in_ch0.extend(f["fact_id"] for f in data["facts"])
+            fact_scope_calls += 1
             return IllustrationFactScopeResponse(
                 event_id=data["event_id"],
                 applicable_fact_ids=tuple(f["fact_id"] for f in data["facts"]),
@@ -833,6 +835,7 @@ async def test_backward_propagation_fetched_via_query_registry_items_and_require
                 complete=True,
             )
         if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            seen_prompt_fact_ids.extend(data["allowed_fact_ids"])
             return IllustrationPromptResponse(
                 moment_id=data["moment_id"],
                 scene_composition_en="Alice sits beside the fireplace.",
@@ -846,7 +849,7 @@ async def test_backward_propagation_fetched_via_query_registry_items_and_require
         sections_spec=[("sec-0", "Chapter 1", 0, [("b-0", "Alice sat quietly near the hearth.")])],
         registry_items_spec=[
             _entity_item("ent-alice", "Alice"),
-            # Permanent + back_applicable + NOT spoiler -> INCLUDED in ch0!
+            # Permanent + back_applicable + NOT spoiler -> INCLUDED in ch0 via deterministic fast-path!
             _fact_item(
                 "f-perm-ok",
                 "ent-alice",
@@ -883,7 +886,16 @@ async def test_backward_propagation_fetched_via_query_registry_items_and_require
         handler=_handler,
     )
     await _drain_chapter_tasks(harness)
-    assert seen_in_ch0 == ["f-perm-ok"]
+    assert fact_scope_calls == 0
+    assert seen_prompt_fact_ids == ["f-perm-ok"]
+    with harness.uow.read_transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.payload is not None
+        assert list(ch.payload["moments"][0]["character_descriptions"][0]["fact_ids"]) == [
+            "f-perm-ok"
+        ]
 
 
 def test_ambiguous_identity_remains_separate() -> None:
@@ -2476,7 +2488,7 @@ async def test_chapter_glossary_terms_ru_non_spoiler_localized_appearances_and_w
                 "ent-nick",
                 section_order=0,
                 block_order=0,
-                temporal_scope="permanent",
+                temporal_scope="episodic",
                 desc_ru="В тёмном пальто",
                 desc_en="Wearing a dark coat",
             ),
@@ -2634,7 +2646,7 @@ async def test_chapter_glossary_terms_ru_non_spoiler_localized_appearances_and_w
                         "ent-nick",
                         section_order=0,
                         block_order=0,
-                        temporal_scope="permanent",
+                        temporal_scope="episodic",
                         desc_ru="В тёмном пальто",
                         desc_en="Wearing a dark coat",
                     ),
@@ -2725,4 +2737,298 @@ async def test_chapter_glossary_terms_ru_non_spoiler_localized_appearances_and_w
         )
         == {}
     )
+
+
+async def test_trivial_permanent_fact_scope_fast_path_and_guards(tmp_path: Path) -> None:
+    # 1. Single permanent fact without color words -> fast-path skips FACT_SCOPE LLM call
+    #    and populates allowed_fact_ids + available_design_traits + IllustrationAppearance.
+    fact_scope_entities: list[str] = []
+    seen_prompt_inputs: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-fp",
+                        title_ru="Встреча героев",
+                        event_ru="Алиса, Боб и Клара встречаются на площади.",
+                        significance_ru="Ключевая встреча",
+                        event_kind="encounter",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id=blk["block_id"], quote="Alice, Bob, and Clara met"
+                            ),
+                        ),
+                        participant_names=("Alice", "Bob", "Clara"),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевой кадр"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            fact_scope_entities.append(str(data["entity_id"]))
+            fids = tuple(f["fact_id"] for f in data["facts"])
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=fids,
+                excluded_fact_ids=(),
+                compact_description_ru="Светлый взгляд" if data["entity_id"] == "ent-clara" else "В плаще",
+                compact_description_en="Bright gaze" if data["entity_id"] == "ent-clara" else "In a cloak",
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            seen_prompt_inputs.append(data)
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Alice, Bob, and Clara stand on the stone square in monochrome ink.",
+                depicted_entity_ids=("ent-alice", "ent-bob", "ent-clara"),
+                used_fact_ids=tuple(data["allowed_fact_ids"]),
+                used_design_keys=(),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[
+            ("sec-0", "Ch 1", 0, [("b-0", "Alice, Bob, and Clara met on the stone square.")])
+        ],
+        registry_items_spec=[
+            _entity_item("ent-alice", "Alice"),
+            _entity_item("ent-bob", "Bob"),
+            _entity_item("ent-clara", "Clara"),
+            # Alice: 1 permanent fact, no color words, clean EN/RU -> FAST-PATH!
+            _fact_item(
+                "f-alice-perm",
+                "ent-alice",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Высокого роста",
+                desc_en="Tall stature",
+            ),
+            _design_item(
+                "ent-alice",
+                "hair",
+                desc_ru="Тёмные короткие волосы",
+                desc_en="Short dark hair",
+                assumption_ru="нейтральный выбор",
+            ),
+            # Bob: 1 episodic fact -> MUST call FACT_SCOPE (NO fast-path for episodic)!
+            _fact_item(
+                "f-bob-ep",
+                "ent-bob",
+                section_order=0,
+                temporal_scope="episodic",
+                desc_ru="В дорожном плаще",
+                desc_en="Wearing a travelling cloak",
+            ),
+            # Clara: 1 permanent fact WITH chromatic color word ("Green") in monochrome_ink -> MUST call FACT_SCOPE!
+            _fact_item(
+                "f-clara-color",
+                "ent-clara",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Яркие зелёные глаза",
+                desc_en="Bright green eyes",
+            ),
+        ],
+        handler=_handler,
+        book_id="book-fact-fastpath",
+    )
+    await _drain_chapter_tasks(harness)
+
+    # Alice bypassed FACT_SCOPE; Bob (episodic) and Clara (color word) ran FACT_SCOPE!
+    assert "ent-alice" not in fact_scope_entities
+    assert set(fact_scope_entities) == {"ent-bob", "ent-clara"}
+    assert len(seen_prompt_inputs) == 1
+    p_in = seen_prompt_inputs[0]
+    assert "f-alice-perm" in p_in["allowed_fact_ids"]
+    assert "ent-alice:hair" in p_in["allowed_design_keys"]
+    alice_char = next(c for c in p_in["characters"] if c["entity_id"] == "ent-alice")
+    assert alice_char["description_en"] == "Tall stature"
+    assert alice_char["description_ru"] == "Высокого роста"
+    assert alice_char["fact_ids"] == ["f-alice-perm"]
+
+
+async def test_prompt_truncated_retry_recovers_on_second_attempt(tmp_path: Path) -> None:
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    prompt_calls = 0
+    seen_prompt_repairs: list[tuple[tuple[str | None, str], ...]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal prompt_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-1",
+                        title_ru="У ворот",
+                        event_ru="Алиса открывает ворота.",
+                        significance_ru="Начало пути",
+                        event_kind="entry",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=blk["block_id"], quote="Alice opened"),
+                        ),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевой кадр"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            prompt_calls += 1
+            seen_prompt_repairs.append(req.repair_turns)
+            if prompt_calls == 1:
+                raise LLMResponseFormatError("truncated prompt response", truncated=True)
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Alice pushes open the heavy iron gate in crisp ink.",
+                depicted_entity_ids=(),
+                used_fact_ids=(),
+                used_design_keys=(),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[("sec-0", "Ch 1", 0, [("b-0", "Alice opened the heavy iron gate.")])],
+        registry_items_spec=[],
+        handler=_handler,
+        book_id="book-prompt-trunc-retry",
+    )
+    await _drain_chapter_tasks(harness)
+
+    assert prompt_calls == 2
+    assert seen_prompt_repairs[0] == ()
+    assert seen_prompt_repairs[1] and "обрезан по длине" in seen_prompt_repairs[1][0][1]
+    with harness.uow.read_transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.state is IllustrationScopeState.ACCEPTED
+
+
+async def test_prompt_anchor_quotes_and_technical_assumptions_filtered(tmp_path: Path) -> None:
+    from linguary.application.illustration_context import _STAGE_INSTRUCTIONS
+    from linguary.application.illustration_validation import filter_non_assumption_placeholders
+
+    # 1. Deterministic filtering of technical keys in assumptions_ru without losing real assumptions.
+    filtered = filter_non_assumption_placeholders(
+        [
+            "Использован ключ attire_default из справочника.",
+            "Взято из characters[].description_en для согласованности.",
+            "Параметр palette_value задаёт штриховку.",
+            "Добавлено по used_design_keys и depicted_entity_ids.",
+            "Основано на compact_description_en и description_ru.",
+            "Не указан фасон плаща, выбран простой дорожный покрой.",
+        ]
+    )
+    assert filtered == ("Не указан фасон плаща, выбран простой дорожный покрой.",)
+
+    # 2. Prompt stage instructions preserve characters[].description_en AND forbid technical keys in assumptions_ru.
+    prompt_instr = _STAGE_INSTRUCTIONS[IllustrationScopeStage.PROMPT]
+    assert "characters[].description_en" in prompt_instr
+    assert "attire_default" in prompt_instr
+    fact_scope_instr = _STAGE_INSTRUCTIONS[IllustrationScopeStage.FACT_SCOPE]
+    assert "транспорт" in fact_scope_instr.casefold()
+    assert "деформац" in fact_scope_instr.casefold()
+
+    # 3. End-to-end PROMPT receives anchor_quotes (<= 3, <= 240 chars) and strips technical assumptions without repair!
+    seen_prompt_inputs: list[dict[str, Any]] = []
+    prompt_calls = 0
+    long_quote = "Alice stepped across the old bridge " + ("under flickering lanterns " * 12)
+    assert len(long_quote) > 260
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal prompt_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-q",
+                        title_ru="На мосту",
+                        event_ru="Алиса идёт по мосту под фонарями.",
+                        significance_ru="Ключевой переход",
+                        event_kind="crossing",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id=blk["block_id"], quote=long_quote),
+                        ),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Яркий момент"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            prompt_calls += 1
+            seen_prompt_inputs.append(data)
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Alice crosses an old arched stone bridge beneath dim lanterns.",
+                depicted_entity_ids=(),
+                used_fact_ids=(),
+                used_design_keys=(),
+                assumptions_ru=(
+                    "Поле description_en не уточняет тип фонарей.",
+                    "Фонари изображены подвесными коваными.",
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[("sec-0", "Ch 1", 0, [("b-0", long_quote)])],
+        registry_items_spec=[],
+        handler=_handler,
+        book_id="book-prompt-hygiene",
+    )
+    await _drain_chapter_tasks(harness)
+
+    assert prompt_calls == 1  # No repair turn wasted on filtering technical assumption!
+    assert len(seen_prompt_inputs) == 1
+    anchor_quotes = seen_prompt_inputs[0].get("anchor_quotes")
+    assert isinstance(anchor_quotes, list) and len(anchor_quotes) == 1
+    assert len(anchor_quotes[0]) == 240
+    assert anchor_quotes[0] == long_quote.strip()[:240]
+
+    with harness.uow.read_transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.payload is not None
+        assert list(ch.payload["moments"][0]["assumptions_ru"]) == [
+            "Фонари изображены подвесными коваными."
+        ]
 

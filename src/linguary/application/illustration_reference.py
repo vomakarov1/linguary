@@ -16,6 +16,8 @@ from linguary.application.illustration_context import (
     _collect_book_glossary_terms_ru,
     closed_traits_for_kind,
     compact_safe_detail,
+    decode_wire_id_aliases,
+    encode_wire_id_aliases,
     fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
@@ -752,6 +754,7 @@ def _build_bounded_design_input(
         omit_ep: int,
         omit_all: int,
         cur_glossary: Mapping[str, str] | None = None,
+        cur_episodic_context: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         raw_aliases = entity.get("aliases") or ()
         bounded_aliases = [
@@ -771,6 +774,8 @@ def _build_bounded_design_input(
             "omitted_episodic_count": omit_ep,
             "omitted_fact_count": omit_all,
         }
+        if cur_episodic_context:
+            payload["episodic_context_only"] = list(cur_episodic_context)
         if cur_glossary:
             payload["glossary_terms_ru"] = {str(k): str(v) for k, v in cur_glossary.items()}
         return payload
@@ -800,6 +805,30 @@ def _build_bounded_design_input(
             if fact["temporal_scope"] != "permanent":
                 omitted_episodic += 1
 
+    episodic_context: list[dict[str, Any]] = []
+    if len(permanent_facts) == 1:
+        earliest_episodic = [
+            f for f in non_permanent_facts if str(f.get("temporal_scope", "")) == "episodic"
+        ][:2]
+        for ep_fact in earliest_episodic:
+            cand_ep = _compact_fact(ep_fact)
+            ep_payload = _make_payload(
+                included,
+                omitted_episodic,
+                omitted_total,
+                cur_episodic_context=[*episodic_context, cand_ep],
+            )
+            ep_req = IllustrationContext.build_for_kind(
+                kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+                stage=IllustrationScopeStage.DESIGN,
+                input_payload=ep_payload,
+                book_id=book_id,
+                conditions_id=conditions_id,
+                policy=policy,
+            )
+            if sizer.measure(ep_req).size_bytes <= target_bytes:
+                episodic_context.append(cand_ep)
+
     bounded_glossary: dict[str, str] = {}
     if glossary_terms_ru:
         def _build_gloss_req(cur_glossary: dict[str, str]) -> LLMRequest[Any]:
@@ -807,7 +836,11 @@ def _build_bounded_design_input(
                 kind=LLMResponseKind.ILLUSTRATION_DESIGN,
                 stage=IllustrationScopeStage.DESIGN,
                 input_payload=_make_payload(
-                    included, omitted_episodic, omitted_total, cur_glossary
+                    included,
+                    omitted_episodic,
+                    omitted_total,
+                    cur_glossary,
+                    cur_episodic_context=episodic_context,
                 ),
                 book_id=book_id,
                 conditions_id=conditions_id,
@@ -821,7 +854,13 @@ def _build_bounded_design_input(
             target_bytes=target_bytes,
         )
 
-    return _make_payload(included, omitted_episodic, omitted_total, bounded_glossary)
+    return _make_payload(
+        included,
+        omitted_episodic,
+        omitted_total,
+        bounded_glossary,
+        cur_episodic_context=episodic_context,
+    )
 
 
 def _build_design_scope_spec(
@@ -1299,7 +1338,16 @@ class IllustrationReference:
                     raise LLMResponseFormatError(
                         "ответ модели усечён по лимиту токенов", truncated=True
                     )
-                validation = self._validate_response(scope, response.payload, block_lookup)
+                payload_for_validation = response.payload
+                if scope.stage is IllustrationScopeStage.EXTRACT:
+                    raw_input = scope.summary.get("request_input")
+                    if isinstance(raw_input, Mapping):
+                        _, alias_to_canonical, _ = encode_wire_id_aliases(scope.stage, raw_input)
+                        if alias_to_canonical:
+                            payload_for_validation = decode_wire_id_aliases(
+                                payload_for_validation, alias_to_canonical
+                            )
+                validation = self._validate_response(scope, payload_for_validation, block_lookup)
             except Exception as err:
                 call_error = err
 
@@ -1345,6 +1393,22 @@ class IllustrationReference:
                             fail_reason=IllustrationReasonCode.PROVIDER_TRUNCATED.value,
                         )
                         break
+                    if self._can_continue_activation(
+                        activation_calls_used, scope.id, book_id, policy
+                    ):
+                        with self._uow.transaction() as tx:
+                            tx.illustrations.record_attempt_outcome(
+                                attempt.id,
+                                state=IllustrationAttemptState.FAILED,
+                                outcome={
+                                    "reason_code": IllustrationReasonCode.PROVIDER_TRUNCATED.value
+                                },
+                            )
+                        repair_summary = (
+                            "Предыдущий ответ был обрезан по длине. "
+                            "Верни компактный валидный JSON без повторов и лишних пробелов."
+                        )
+                        continue
                     self._finalize_scope_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -2616,12 +2680,21 @@ class IllustrationReference:
                 generation.id, [*entity_items, *fact_items, *alias_decision_items]
             )
 
-        # Stage 3: DESIGN for entities with facts or recurring mentions
+        # Stage 3: DESIGN for significant entities (recurring, multi-fact, permanent fact, or in glossary)
         design_scopes = [s for s in all_scopes if s.stage is IllustrationScopeStage.DESIGN]
         design_entities = [
             e
             for e in entities
-            if int(e["mention_count"]) >= 1 and closed_traits_for_kind(str(e["entity_kind"]))
+            if closed_traits_for_kind(str(e["entity_kind"]))
+            and (
+                int(e["mention_count"]) >= 2
+                or len(facts_by_entity.get(str(e["entity_id"]), ())) >= 2
+                or any(
+                    str(f.get("temporal_scope", "")) == "permanent"
+                    for f in facts_by_entity.get(str(e["entity_id"]), ())
+                )
+                or bool(e.get("glossary_translation_ru"))
+            )
         ]
         if design_entities and not design_scopes:
             policy = revision.settings.policy

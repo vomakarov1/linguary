@@ -234,7 +234,14 @@ class IllustrationCandidateEventSchema(_IllustrationStrictBase):
     event_ru: str = Field(min_length=1, max_length=_MAX_STR)
     significance_ru: str = Field(min_length=1, max_length=_MAX_STR)
     event_kind: str = Field(min_length=1, max_length=200)
-    quote_anchors: list[IllustrationQuoteAnchorSchema] = Field(min_length=1, max_length=_MAX_ANCHORS)
+    quote_anchors: list[IllustrationQuoteAnchorSchema] = Field(
+        min_length=1,
+        max_length=_MAX_ANCHORS,
+        description=(
+            "Обязательно непустой список (минимум 1 элемент) дословных цитат "
+            "{block_id, quote} из переданных блоков."
+        ),
+    )
     insert_after_block_id: str | None = Field(default=None, max_length=200)
     participant_names: list[str] = Field(
         max_length=_MAX_LIST,
