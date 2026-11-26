@@ -11,7 +11,9 @@ from uuid import uuid4
 from linguary.application.context_builder import source_text_for_model, textual_blocks
 from linguary.application.illustration_context import (
     IllustrationContext,
+    _collect_book_glossary_terms_ru,
     compact_safe_detail,
+    fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
     is_transient_error,
@@ -100,18 +102,21 @@ def _load_entity_payloads(tx: UnitOfWork, generation_id: str) -> list[dict[str, 
     return items
 
 
-def _known_entity_names_for_chapter(
+_MAX_KNOWN_ENTITY_ALIASES = 3
+
+
+def _known_entities_context_for_chapter(
     tx: UnitOfWork,
     generation_id: str,
     *,
     section_order: int,
     limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Collect spoiler-free known character and location names visible by the end of `section_order`."""
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, list[str]]]:
+    """Collect clean spoiler-free known names and separate non-spoiler aliases visible by `section_order`."""
     chapter_end_pos = format_position_key(section_order, 999_999, 99_999_999)
     entities = _load_entity_payloads(tx, generation_id)
-    persons: list[tuple[int, str, str, str]] = []
-    locations: list[tuple[int, str, str, str]] = []
+    persons: list[tuple[int, str, str, str, list[str]]] = []
+    locations: list[tuple[int, str, str, str, list[str]]] = []
     for ent in entities:
         raw_orders = ent.get("section_orders")
         has_orders = isinstance(raw_orders, (list, tuple))
@@ -129,28 +134,78 @@ def _known_entity_names_for_chapter(
         display_name = _display_name_at_position(ent, chapter_end_pos).strip()
         if not display_name:
             continue
+        display_norm = normalize_name_token(display_name)
+        visible_aliases: list[str] = []
+        raw_positions = ent.get("alias_first_positions")
+        if isinstance(raw_positions, Mapping):
+            eligible_aliases: list[tuple[str, str, str]] = []
+            for raw_alias, pos in raw_positions.items():
+                if (
+                    raw_alias is None
+                    or not isinstance(pos, str)
+                    or not pos
+                    or pos > chapter_end_pos
+                ):
+                    continue
+                clean_alias = str(raw_alias).strip()
+                if not clean_alias:
+                    continue
+                alias_norm = normalize_name_token(clean_alias)
+                if not alias_norm or alias_norm == display_norm:
+                    continue
+                eligible_aliases.append((pos, clean_alias.casefold(), clean_alias))
+            eligible_aliases.sort()
+            seen_alias_norms: set[str] = set()
+            for _, _, clean_alias in eligible_aliases:
+                alias_norm = normalize_name_token(clean_alias)
+                if alias_norm in seen_alias_norms:
+                    continue
+                seen_alias_norms.add(alias_norm)
+                visible_aliases.append(clean_alias)
+                if len(visible_aliases) >= _MAX_KNOWN_ENTITY_ALIASES:
+                    break
         priority = 0 if in_current else 1
-        row = (priority, first_pos, display_name.casefold(), display_name)
+        row = (priority, first_pos, display_name.casefold(), display_name, visible_aliases)
         kind = str(ent.get("entity_kind", ""))
         if kind == "person":
             persons.append(row)
         elif kind == "location":
             locations.append(row)
 
-    def _finalize(rows: list[tuple[int, str, str, str]]) -> tuple[str, ...]:
+    known_entity_aliases: dict[str, list[str]] = {}
+
+    def _finalize(rows: list[tuple[int, str, str, str, list[str]]]) -> tuple[str, ...]:
         rows.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
         seen: set[str] = set()
         out: list[str] = []
-        for _, _, key, name in rows:
+        for _, _, key, name, aliases_list in rows:
             if key in seen:
                 continue
             seen.add(key)
             out.append(name)
+            if aliases_list and name not in known_entity_aliases:
+                known_entity_aliases[name] = aliases_list
             if len(out) >= limit_per_kind:
                 break
         return tuple(out)
 
-    return _finalize(persons), _finalize(locations)
+    known_chars = _finalize(persons)
+    known_locs = _finalize(locations)
+    return known_chars, known_locs, known_entity_aliases
+
+
+def _known_entity_names_for_chapter(
+    tx: UnitOfWork,
+    generation_id: str,
+    *,
+    section_order: int,
+    limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Collect spoiler-free known character and location names visible by the end of `section_order`."""
+    known_chars, known_locs, _ = _known_entities_context_for_chapter(
+        tx, generation_id, section_order=section_order, limit_per_kind=limit_per_kind
+    )
+    return known_chars, known_locs
 
 
 def _default_id() -> str:
@@ -490,12 +545,14 @@ def _build_candidate_scope_spec(
     route_id: str,
     known_characters: Sequence[str] = (),
     known_locations: Sequence[str] = (),
+    known_entity_aliases: Mapping[str, Sequence[str]] | None = None,
+    glossary_terms_ru: Mapping[str, str] | None = None,
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
     expected_unit_ids = [str(b["source_unit_id"]) for b in blocks_chunk]
     ordered_block_ids = [str(b["block_id"]) for b in blocks_chunk]
-    request_input = {
+    request_input: dict[str, Any] = {
         "section_id": section_id,
         "section_title": section_title,
         "scene_id": str(scene_meta["scene_id"]),
@@ -507,6 +564,23 @@ def _build_candidate_scope_spec(
         "max_candidates": policy.max_candidates_per_scene,
         "blocks": [thaw(b) for b in blocks_chunk],
     }
+    if known_entity_aliases:
+        cleaned_aliases = {
+            str(k): [str(a) for a in v if a is not None and str(a).strip()]
+            for k, v in known_entity_aliases.items()
+            if k is not None and str(k).strip() and v
+        }
+        cleaned_aliases = {k: v for k, v in cleaned_aliases.items() if v}
+        if cleaned_aliases:
+            request_input["known_entity_aliases"] = cleaned_aliases
+    if glossary_terms_ru:
+        cleaned_gloss = {
+            str(k): str(v)
+            for k, v in glossary_terms_ru.items()
+            if k is not None and str(k).strip() and v is not None and str(v).strip()
+        }
+        if cleaned_gloss:
+            request_input["glossary_terms_ru"] = cleaned_gloss
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.CANDIDATES.value,
@@ -746,37 +820,72 @@ class IllustrationSelection:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
-        known_characters, known_locations = _known_entity_names_for_chapter(
-            tx, generation.id, section_order=entry.order
+        known_characters, known_locations, known_entity_aliases = (
+            _known_entities_context_for_chapter(
+                tx, generation.id, section_order=entry.order
+            )
+        )
+        chapter_glossary_terms_ru = _collect_book_glossary_terms_ru(
+            tx,
+            generation.book_id,
+            generation_id=generation.id,
+            max_section_order=entry.order,
         )
 
         specs: list[IllustrationScopeSpec] = []
         for s_idx, scene_meta in enumerate(scene_units):
             blocks_list = scene_meta["blocks"]
 
-            def _build_req(
+            def _make_cand_req(
                 chunk: Sequence[dict[str, Any]],
+                cur_glossary: Mapping[str, str],
                 _meta: Mapping[str, Any] = scene_meta,
             ) -> LLMRequest[Any]:
+                payload: dict[str, Any] = {
+                    "section_id": section_id,
+                    "section_title": entry.title,
+                    "scene_id": str(_meta["scene_id"]),
+                    "scene_summary": str(_meta.get("scene_summary", "")),
+                    "location": str(_meta.get("location", "")),
+                    "participants": list(_meta.get("participants", ())),
+                    "known_characters": list(known_characters),
+                    "known_locations": list(known_locations),
+                    "max_candidates": policy.max_candidates_per_scene,
+                    "blocks": list(chunk),
+                }
+                if known_entity_aliases:
+                    payload["known_entity_aliases"] = {
+                        k: list(v) for k, v in known_entity_aliases.items()
+                    }
+                if cur_glossary:
+                    payload["glossary_terms_ru"] = dict(cur_glossary)
                 return IllustrationContext.build_for_kind(
                     kind=LLMResponseKind.ILLUSTRATION_CANDIDATES,
                     stage=IllustrationScopeStage.CANDIDATES,
-                    input_payload={
-                        "section_id": section_id,
-                        "section_title": entry.title,
-                        "scene_id": str(_meta["scene_id"]),
-                        "scene_summary": str(_meta.get("scene_summary", "")),
-                        "location": str(_meta.get("location", "")),
-                        "participants": list(_meta.get("participants", ())),
-                        "known_characters": list(known_characters),
-                        "known_locations": list(known_locations),
-                        "max_candidates": policy.max_candidates_per_scene,
-                        "blocks": list(chunk),
-                    },
+                    input_payload=payload,
                     book_id=snapshot.book_id,
                     conditions_id=snapshot.conditions_id,
                     policy=policy,
                 )
+
+            bounded_glossary_terms_ru: dict[str, str] = {}
+            if chapter_glossary_terms_ru and blocks_list:
+                heaviest_block = max(
+                    blocks_list,
+                    key=lambda b: len(str(b.get("text", "")).encode("utf-8")),
+                )
+                bounded_glossary_terms_ru = fit_glossary_terms_to_wire_budget(
+                    chapter_glossary_terms_ru,
+                    build_request=lambda g, _hb=heaviest_block: _make_cand_req([_hb], g),
+                    sizer=sizer,
+                    target_bytes=policy.initial_target_bytes,
+                )
+
+            def _build_req(
+                chunk: Sequence[dict[str, Any]],
+                _gloss: Mapping[str, str] = bounded_glossary_terms_ru,
+            ) -> LLMRequest[Any]:
+                return _make_cand_req(chunk, _gloss)
 
             chunks = pack_items_by_wire_budget(
                 blocks_list,
@@ -799,6 +908,8 @@ class IllustrationSelection:
                     route_id=route_id,
                     known_characters=known_characters,
                     known_locations=known_locations,
+                    known_entity_aliases=known_entity_aliases,
+                    glossary_terms_ru=bounded_glossary_terms_ru,
                 )
                 reusable = tx.illustrations.find_reusable_scope(
                     generation.book_id,
@@ -818,6 +929,8 @@ class IllustrationSelection:
                         route_id=route_id,
                         known_characters=known_characters,
                         known_locations=known_locations,
+                        known_entity_aliases=known_entity_aliases,
+                        glossary_terms_ru=bounded_glossary_terms_ru,
                         reusable=reusable,
                     )
                 specs.append(draft)
@@ -2191,6 +2304,22 @@ class IllustrationSelection:
             }
             known_characters = [str(n) for n in req_input.get("known_characters", ())]
             known_locations = [str(n) for n in req_input.get("known_locations", ())]
+            raw_known_aliases = req_input.get("known_entity_aliases")
+            known_entity_aliases = (
+                {
+                    str(k): [str(a) for a in v]
+                    for k, v in raw_known_aliases.items()
+                    if isinstance(v, (list, tuple)) and v
+                }
+                if isinstance(raw_known_aliases, Mapping)
+                else None
+            )
+            raw_glossary = req_input.get("glossary_terms_ru")
+            glossary_terms_ru = (
+                {str(k): str(v) for k, v in raw_glossary.items()}
+                if isinstance(raw_glossary, Mapping) and raw_glossary
+                else None
+            )
             return [
                 _build_candidate_scope_spec(
                     section_id=section_id,
@@ -2204,6 +2333,8 @@ class IllustrationSelection:
                     route_id=route_id,
                     known_characters=known_characters,
                     known_locations=known_locations,
+                    known_entity_aliases=known_entity_aliases,
+                    glossary_terms_ru=glossary_terms_ru,
                 )
                 for idx, half in enumerate((blocks[:mid], blocks[mid:]))
             ]

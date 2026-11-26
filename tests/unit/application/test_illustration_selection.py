@@ -1319,3 +1319,192 @@ async def test_candidates_receives_spoiler_free_known_entities_and_preserves_on_
         assert "Future Villain" not in payload["known_characters"]
         assert payload["known_locations"] == ["Privet Drive"]
         assert "Future Fortress" not in payload["known_locations"]
+
+
+async def test_candidates_known_entity_aliases_and_glossary_terms_ru_non_spoiler_and_split(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustration_selection import (
+        _known_entities_context_for_chapter,
+        _known_entity_names_for_chapter,
+    )
+    from linguary.domain.glossary import ConceptType, TermConcept, TermStatus, TermVariant
+    from linguary.domain.illustrations import (
+        TIMELESS_POSITION_KEY,
+        IllustrationRegistryKind,
+        RegistryItem,
+    )
+
+    seen_inputs: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            seen_inputs.append(data)
+            if len(data["blocks"]) > 1:
+                return IllustrationCandidatesResponse(
+                    scene_id=data["scene_id"],
+                    events=(),
+                    covered_source_unit_ids=(),
+                    complete=False,
+                )
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(),
+                zero_reason_ru="Тихая сцена.",
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        raise AssertionError(req.kind)
+
+    harness = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            (
+                "Сцена в лесу",
+                [
+                    ("b-0", "Nick looked at the boy in the quiet forest."),
+                    ("b-1", "Chocolate Boy stepped onto the mossy path."),
+                ],
+            )
+        ],
+        handler=_handler,
+        book_id="book-aliases-gloss",
+    )
+
+    with harness.uow.transaction() as tx:
+        # Seed glossary concepts: Nick (backed by ENTITY in ch0) and Future Relic (not in ch0 -> MUST NOT spoil!).
+        tx.glossary.save(
+            TermConcept(
+                id="c-nick",
+                book_id=harness.book_id,
+                type=ConceptType.PERSON,
+                canonical_source_text="Nick",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-nick",
+                        language="ru",
+                        text="Ник",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+        tx.glossary.save(
+            TermConcept(
+                id="c-future",
+                book_id=harness.book_id,
+                type=ConceptType.FICTIONAL_CONCEPT,
+                canonical_source_text="Future Relic",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-future",
+                        language="ru",
+                        text="Будущая реликвия",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+
+        gen = tx.illustrations.get_generation(harness.book_id, harness.generation_id)
+        assert gen is not None
+        snap = harness.source.snapshot(tx, harness.book_id)
+        head = tx.illustrations.get_head(harness.book_id)
+        assert head.settings_id is not None
+        tx.illustrations.revoke_generation(harness.book_id, gen.id, reason_code="settings_changed")
+        gen2, _ = tx.illustrations.create_or_get_generation(
+            harness.book_id,
+            settings_id=head.settings_id,
+            request_key="req-aliases-gloss-2",
+            source_sha256=gen.source_sha256,
+            source_authority=gen.source_authority,
+            requested_sections=(harness.section_id,),
+        )
+        assert snap.manifest is not None and snap.manifest_sha256 is not None
+        gen2 = tx.illustrations.seal_manifest(
+            harness.book_id, gen2.id, manifest=snap.manifest, manifest_sha256=snap.manifest_sha256
+        )
+
+        nick_pay = {
+            "entity_id": "ent-nick",
+            "entity_kind": "person",
+            "canonical_name": "Nick",
+            "aliases": ["the boy", "Chocolate Boy", "Future King"],
+            "alias_first_positions": {
+                "the boy": format_position_key(0, 0, 0),
+                "Nick": format_position_key(0, 0, 5),
+                "Chocolate Boy": format_position_key(0, 1, 0),
+                "Future King": format_position_key(5, 0, 0),
+            },
+            "section_orders": [0, 5],
+            "mention_count": 4,
+            "first_position_key": format_position_key(0, 0, 0),
+        }
+        # Legacy ENTITY without alias_first_positions / glossary_translation_ru must work without KeyError.
+        legacy_loc_pay = {
+            "entity_id": "ent-forest",
+            "entity_kind": "location",
+            "canonical_name": "Whispering Forest",
+            "aliases": ["dark forest"],
+            "section_orders": [0],
+            "mention_count": 1,
+            "first_position_key": format_position_key(0, 0, 10),
+        }
+        tx.illustrations.upsert_registry_items(
+            gen2.id,
+            [
+                RegistryItem(
+                    generation_id=gen2.id,
+                    kind=IllustrationRegistryKind.ENTITY,
+                    item_key="ent-nick",
+                    entity_id="ent-nick",
+                    position_key=TIMELESS_POSITION_KEY,
+                    is_back_applicable=False,
+                    payload_sha256=canonical_sha(nick_pay),
+                    payload=nick_pay,
+                ),
+                RegistryItem(
+                    generation_id=gen2.id,
+                    kind=IllustrationRegistryKind.ENTITY,
+                    item_key="ent-forest",
+                    entity_id="ent-forest",
+                    position_key=TIMELESS_POSITION_KEY,
+                    is_back_applicable=False,
+                    payload_sha256=canonical_sha(legacy_loc_pay),
+                    payload=legacy_loc_pay,
+                ),
+            ],
+        )
+        gen2 = tx.illustrations.seal_registry(harness.book_id, gen2.id, registry_sha256="f" * 64)
+        gen2 = tx.illustrations.update_generation_state(
+            harness.book_id, gen2.id, state=IllustrationGenerationState.QUEUED, reason_code=None
+        )
+        new_gen_id = gen2.id
+
+        # Backward-compatible 2-tuple signature stays clean!
+        kc2, kl2 = _known_entity_names_for_chapter(tx, new_gen_id, section_order=0)
+        assert kc2 == ("Nick",)
+        assert kl2 == ("Whispering Forest",)
+
+        # Extended 3-tuple returns clean names + separate non-spoiler aliases.
+        kc3, kl3, alias_map = _known_entities_context_for_chapter(tx, new_gen_id, section_order=0)
+        assert kc3 == ("Nick",)
+        assert kl3 == ("Whispering Forest",)
+        assert alias_map == {"Nick": ["the boy", "Chocolate Boy"]}
+        assert "Future King" not in alias_map["Nick"]
+
+    harness.selection.plan_scopes(new_gen_id, harness.section_id)
+    await _drain_selection_tasks(harness)
+
+    # 1 initial composite call + 2 split child calls all preserve clean lists + aliases + glossary_terms_ru!
+    assert len(seen_inputs) == 3
+    for payload in seen_inputs:
+        assert payload["known_characters"] == ["Nick"]
+        assert payload["known_locations"] == ["Whispering Forest"]
+        assert payload["known_entity_aliases"] == {"Nick": ["the boy", "Chocolate Boy"]}
+        assert payload["glossary_terms_ru"] == {"Nick": "Ник"}
+        assert "Future Relic" not in payload["glossary_terms_ru"]
+

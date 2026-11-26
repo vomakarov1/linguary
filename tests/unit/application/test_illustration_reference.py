@@ -1876,3 +1876,370 @@ async def test_composite_extract_respects_max_split_depth_on_repeated_validation
     assert by_key["extract:p0000.d1.1"].state is IllustrationScopeState.FAILED
     assert by_key["extract:p0000.d1.1"].reason_code == IllustrationReasonCode.SPLIT_DEPTH_EXHAUSTED.value
 
+
+def test_resolve_verdict_graph_clusters_clique_single_diff_and_order_independent() -> None:
+    import random
+
+    # 9-clique with 35 same_edges and 1 diff_edge(n7, n8) -> preserves 7 nodes in one cluster!
+    nodes_k9 = [f"n{i}" for i in range(9)]
+    diff_k9 = [("n7", "n8")]
+    same_k9 = [
+        (nodes_k9[i], nodes_k9[j])
+        for i in range(9)
+        for j in range(i + 1, 9)
+        if not (nodes_k9[i] == "n7" and nodes_k9[j] == "n8")
+    ]
+    assert len(same_k9) == 35
+
+    rng = random.Random(42)
+    expected_k9 = (tuple(f"n{i}" for i in range(7)), ("n7",), ("n8",))
+    for _ in range(20):
+        same_perm = list(same_k9)
+        diff_perm = list(diff_k9)
+        rng.shuffle(same_perm)
+        rng.shuffle(diff_perm)
+        same_perm = [(v, u) if rng.random() < 0.5 else (u, v) for u, v in same_perm]
+        clusters = resolve_verdict_graph_clusters(
+            nodes_k9, same_edges=same_perm, diff_edges=diff_perm
+        )
+        assert clusters == expected_k9
+        for comp in clusters:
+            assert not ("n7" in comp and "n8" in comp)
+
+    # {A1..A3}-X-{B1,B2} with diff(A1, B1) -> 3 clusters: (A1,A2,A3), (B1,B2), (X,)
+    nodes_bridge = ["A1", "A2", "A3", "X", "B1", "B2"]
+    same_bridge = [
+        ("A1", "A2"),
+        ("A2", "A3"),
+        ("A1", "A3"),
+        ("A1", "X"),
+        ("X", "B1"),
+        ("B1", "B2"),
+    ]
+    diff_bridge = [("A1", "B1")]
+    expected_bridge = (("A1", "A2", "A3"), ("B1", "B2"), ("X",))
+    for _ in range(20):
+        same_perm = list(same_bridge)
+        rng.shuffle(same_perm)
+        clusters = resolve_verdict_graph_clusters(
+            nodes_bridge, same_edges=same_perm, diff_edges=diff_bridge
+        )
+        assert clusters == expected_bridge
+
+
+def test_build_alias_candidate_pairs_anonymous_context_blocking() -> None:
+    # Anonymous "the boy" in section 0 with valid position_key pairs with <= 8 nearest person neighbors.
+    mentions: list[dict[str, Any]] = [
+        {
+            "mention_key": "m-anon",
+            "name": "the boy",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, 10, 0),
+        },
+        # Location in same section must NOT be paired with person.
+        {
+            "mention_key": "m-loc",
+            "name": "Everlost",
+            "entity_kind": "location",
+            "position_key": format_position_key(0, 10, 5),
+        },
+        # Person in another section must NOT be paired via context blocking.
+        {
+            "mention_key": "m-other-sec",
+            "name": "OtherChapterHero",
+            "entity_kind": "person",
+            "position_key": format_position_key(1, 10, 0),
+        },
+    ]
+    # 10 named persons in section 0 at varying distances from block 10.
+    for idx in range(10):
+        mentions.append(
+            {
+                "mention_key": f"m-named-{idx:02d}",
+                "name": f"Hero{idx}",
+                "entity_kind": "person",
+                "position_key": format_position_key(0, 10 + idx + 1, 0),
+            }
+        )
+
+    pairs = build_alias_candidate_pairs(mentions)
+    anon_neighbors = {
+        b if a == "m-anon" else a
+        for a, b in pairs
+        if "m-anon" in (a, b)
+    }
+    assert len(anon_neighbors) == 8
+    assert anon_neighbors == {f"m-named-{idx:02d}" for idx in range(8)}
+    assert "m-loc" not in anon_neighbors
+    assert "m-other-sec" not in anon_neighbors
+
+    # Mentions WITHOUT valid position_key MUST NOT be linked by contextual blocking.
+    no_pos = [
+        {"mention_key": "m1", "name": "the boy", "entity_kind": "person"},
+        {"mention_key": "m2", "name": "Nick", "entity_kind": "person"},
+        {"mention_key": "m3", "name": "the girl", "entity_kind": "person", "position_key": "bad"},
+        {"mention_key": "m4", "name": "Allie", "entity_kind": "person", "position_key": format_position_key(0, 1, 0)},
+    ]
+    assert build_alias_candidate_pairs(no_pos) == ()
+
+    # Descriptors containing proper names ("the Smiths’ son" vs "the Bakers’ son") MUST NOT link even with position_key.
+    family_with_pos = [
+        {
+            "mention_key": "f1",
+            "name": "the Smiths’ son",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, 1, 0),
+        },
+        {
+            "mention_key": "f2",
+            "name": "the Bakers’ son",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, 2, 0),
+        },
+    ]
+    assert build_alias_candidate_pairs(family_with_pos) == ()
+
+
+def test_choose_canonical_name_glossary_and_frequency_priority() -> None:
+    from linguary.application.illustration_reference import _choose_canonical_name
+    from linguary.domain import glossary_key
+
+    # Frequent glossary name Nick beats rare multi-word nickname Chocolate Boy.
+    members = [
+        {"name": "Chocolate Boy", "position_key": format_position_key(0, 1, 0)},
+        *[
+            {"name": "Nick", "position_key": format_position_key(0, 2 + i, 0)}
+            for i in range(8)
+        ],
+    ]
+    assert (
+        _choose_canonical_name(
+            members,
+            glossary_source_keys=frozenset({glossary_key("Nick")}),
+        )
+        == "Nick"
+    )
+    # Even without glossary, frequency (8 vs 1) beats rare multi-word nickname.
+    assert _choose_canonical_name(members) == "Nick"
+
+    # At equal count (1 vs 1), glossary membership wins.
+    equal_members = [
+        {"name": "Chocolate Boy", "position_key": format_position_key(0, 1, 0)},
+        {"name": "Nick", "position_key": format_position_key(0, 2, 0)},
+    ]
+    assert (
+        _choose_canonical_name(
+            equal_members,
+            glossary_source_keys=frozenset({glossary_key("Nick")}),
+        )
+        == "Nick"
+    )
+
+    # At equal count and equal glossary status, more complete name still wins (Professor McGonagall > McGonagall).
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "McGonagall", "position_key": format_position_key(0, 1, 0)},
+                {"name": "Professor McGonagall", "position_key": format_position_key(0, 2, 0)},
+            ]
+        )
+        == "Professor McGonagall"
+    )
+
+
+def test_display_name_preserves_canonical_once_revealed() -> None:
+    from linguary.application.illustration_reference import _display_name_at_position
+
+    entity = {
+        "entity_id": "ent-nick",
+        "entity_kind": "person",
+        "canonical_name": "Nick",
+        "aliases": ["the boy", "Chocolate Boy"],
+        "alias_first_positions": {
+            "the boy": format_position_key(0, 0, 0),
+            "Nick": format_position_key(1, 0, 0),
+            "Chocolate Boy": format_position_key(1, 38, 0),
+        },
+    }
+    # Before Nick is revealed (ch 0), spoiler-free display stays "the boy".
+    assert _display_name_at_position(entity, format_position_key(0, 5, 0)) == "the boy"
+    # Once Nick is revealed (ch 1 and ch 4 / order 3), canonical_name "Nick" is preserved (never reverts to "Chocolate Boy").
+    assert _display_name_at_position(entity, format_position_key(1, 5, 0)) == "Nick"
+    assert _display_name_at_position(entity, format_position_key(3, 5, 0)) == "Nick"
+
+
+async def test_entity_persists_glossary_translations_and_design_glossary_terms_ru(
+    tmp_path: Path,
+) -> None:
+    from linguary.domain.glossary import ConceptType, TermConcept, TermStatus, TermVariant
+
+    design_inputs: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            u = data["units"][0]
+            blk = u["blocks"][0]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m1",
+                        name="Nick",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="Nick",
+                    ),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        fact_id="f1",
+                        subject_mention_id="m1",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Мальчик с шоколадом вокруг рта в Everlost",
+                        description_en="Boy with chocolate around his mouth in Everlost",
+                        quote_block_id=blk["block_id"],
+                        quote="chocolate around his mouth",
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            design_inputs.append(data)
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="Чёткий силуэт тушью",
+                        description_en="Crisp ink silhouette",
+                        assumption_ru="",
+                    ),
+                ),
+            )
+        raise AssertionError(f"unexpected {req.kind}")
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            ("sec-1", "Ch 1", [("b-1", "Nick stood in Everlost with chocolate around his mouth.")])
+        ],
+        handler=_handler,
+    )
+    with harness.uow.transaction() as tx:
+        tx.glossary.save(
+            TermConcept(
+                id="c-nick",
+                book_id=harness.book_id,
+                type=ConceptType.PERSON,
+                canonical_source_text="Nick",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-nick",
+                        language="ru",
+                        text="Ник",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+        tx.glossary.save(
+            TermConcept(
+                id="c-everlost",
+                book_id=harness.book_id,
+                type=ConceptType.PLACE,
+                canonical_source_text="Everlost",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-everlost",
+                        language="ru",
+                        text="Эверлост",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+        tx.glossary.save(
+            TermConcept(
+                id="c-future",
+                book_id=harness.book_id,
+                type=ConceptType.PERSON,
+                canonical_source_text="Future Villain",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-future",
+                        language="ru",
+                        text="Будущий злодей",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.read_transaction() as tx:
+        entities, _ = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.ENTITY
+        )
+    assert len(entities) == 1
+    ent_pay = entities[0].raw_payload()
+    assert ent_pay["canonical_name"] == "Nick"
+    assert ent_pay["glossary_translation_ru"] == "Ник"
+    assert ent_pay["alias_translations_ru"] == {"Nick": "Ник"}
+
+    assert len(design_inputs) == 1
+    assert design_inputs[0]["glossary_terms_ru"] == {"Everlost": "Эверлост", "Nick": "Ник"}
+    assert "Future Villain" not in design_inputs[0]["glossary_terms_ru"]
+
+    # Wire budget truncates glossary_terms_ru in _build_bounded_design_input when tight.
+    sizer = _real_sizer()
+    base_req = IllustrationContext.build_for_kind(
+        kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+        stage=IllustrationScopeStage.DESIGN,
+        input_payload=_build_bounded_design_input(
+            entity=ent_pay,
+            facts=(),
+            sizer=sizer,
+            book_id=harness.book_id,
+            conditions_id=None,
+            policy=IllustrationPolicy(),
+        ),
+        book_id=harness.book_id,
+        conditions_id=None,
+        policy=IllustrationPolicy(),
+    )
+    tight_budget = sizer.measure(base_req).size_bytes + 80
+    many_terms = {f"Term{i:02d}": f"Термин{i:02d}" for i in range(30)}
+    tight_policy = IllustrationPolicy(
+        max_request_bytes=tight_budget + REPAIR_RESERVE_BYTES,
+        repair_reserve_bytes=REPAIR_RESERVE_BYTES,
+    )
+    bounded_tight = _build_bounded_design_input(
+        entity=ent_pay,
+        facts=(),
+        sizer=sizer,
+        book_id=harness.book_id,
+        conditions_id=None,
+        policy=tight_policy,
+        glossary_terms_ru=many_terms,
+    )
+    bounded_req = IllustrationContext.build_for_kind(
+        kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+        stage=IllustrationScopeStage.DESIGN,
+        input_payload=bounded_tight,
+        book_id=harness.book_id,
+        conditions_id=None,
+        policy=tight_policy,
+    )
+    assert sizer.measure(bounded_req).size_bytes <= tight_budget
+    assert len(bounded_tight.get("glossary_terms_ru", {})) < len(many_terms)
+
+

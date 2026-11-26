@@ -21,12 +21,14 @@ from linguary.application.ports.llm import (
     LLMResponseKind,
     LLMTransportError,
 )
+from linguary.domain import AnalysisPassKind, TermStatus, glossary_key
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
 from linguary.domain.document import DocumentBlock
 from linguary.domain.illustrations import (
     TIMELESS_POSITION_KEY,
     IllustrationPolicy,
+    IllustrationRegistryKind,
     IllustrationScope,
     IllustrationScopeStage,
     IllustrationSettings,
@@ -504,7 +506,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "(контраст, светлые/средние/тёмные тона, плотность штриховки, чёткие силуэты) и НЕ используй названия хроматических цветов и оттенков "
         "(зелёный, красный, синий, бежевый, коричневый, жёлтый и т. п.) ни в palette_value, ни в любых других чертах дизайна. "
         "В assumption_ru записывай только реальное допущение дизайнера; если допущения нет, оставляй assumption_ru: \"\" "
-        "(никогда не пиши заглушки вроде «Допущений нет»). Описания давай на русском (description_ru) и английском (description_en)."
+        "(никогда не пиши заглушки вроде «Допущений нет»). Описания давай на русском (description_ru) и английском (description_en). "
+        "В русскоязычных полях используй переводы имён и терминов из glossary_terms_ru (если термин там присутствует)."
     ),
     IllustrationScopeStage.FACT_SCOPE: (
         "Ты отбираешь факты сущности, применимые на момент конкретного события книги (учитывая хронологию и постоянные черты). "
@@ -514,7 +517,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Если style == \"monochrome_ink\", переводи цветовые признаки исходных фактов в светотень, тональность и фактуру "
         "(например, светлый/тёмный/насыщенно-тёмный тон, контраст, металлический блеск, яркое свечение) и НЕ используй названия хроматических цветов "
         "(blue, purple, emerald, orange, red, green и т. п.) в compact_description_en и compact_description_ru. "
-        "Не пиши заглушки в assumptions_ru (оставляй [], если допущений нет)."
+        "Не пиши заглушки в assumptions_ru (оставляй [], если допущений нет). "
+        "В русскоязычных полях используй переводы имён и терминов из glossary_terms_ru (если термин там присутствует)."
     ),
     IllustrationScopeStage.CANDIDATES: (
         "Ты выделяешь до двух сильных визуальных сюжетных событий из переданной сцены главы. "
@@ -528,7 +532,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "При совпадении используй точные имена из переданных списков known_characters и known_locations. "
         "Обязательно заполняй location_names, если место действия известно из текста сцены. "
         "Если подходящих событий нет, верни пустой список и непустую причину zero_reason_ru. "
-        "При complete=true перечисли все source_unit_id в covered_source_unit_ids."
+        "При complete=true перечисли все source_unit_id в covered_source_unit_ids. "
+        "В русскоязычных полях используй переводы имён и терминов из glossary_terms_ru (если термин там присутствует)."
     ),
     IllustrationScopeStage.SELECTION: (
         "Ты отбираешь наиболее сильные и визуально разнообразные моменты для иллюстраций главы в пределах указанного лимита group_cap. "
@@ -551,7 +556,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Точно соблюдай позу, действие и физически возможную точку зрения камеры из event_ru: "
         "для комнатных сцен не показывай снаружи фасад здания без выхода наружу; "
         "для уличных и наружных сцен (улица, крыльцо, двор, сад, дорога) изображай именно наружную обстановку, а не интерьер; "
-        "не меняй положение тела персонажа вопреки описанию события."
+        "не меняй положение тела персонажа вопреки описанию события. "
+        "В русскоязычных полях используй переводы имён и терминов из glossary_terms_ru (если термин там присутствует)."
     ),
 }
 
@@ -565,6 +571,214 @@ def normalize_name_token(value: str) -> str:
     """Normalize an entity name for deterministic alias blocking."""
     cleaned = re.sub(r"[^\w\s-]+", " ", value.casefold())
     return " ".join(cleaned.split())
+
+
+_GLOSSARY_STATUS_PRIORITY: Mapping[TermStatus, int] = {
+    TermStatus.LOCKED: 0,
+    TermStatus.APPROVED: 1,
+    TermStatus.SUGGESTED: 2,
+}
+
+
+def _collect_book_glossary_terms_ru(
+    tx: Any,
+    book_id: str,
+    *,
+    generation_id: str | None = None,
+    max_section_order: int | None = None,
+    allowed_keys: frozenset[str] | None = None,
+    limit: int = 40,
+) -> dict[str, str]:
+    """Collect a compact, deterministic, spoiler-free Russian glossary map for illustration prompts."""
+    if limit <= 0:
+        return {}
+    glossary_repo = getattr(tx, "glossary", None)
+    if glossary_repo is None:
+        return {}
+    list_glossary = getattr(glossary_repo, "list_for_book", None)
+    if not callable(list_glossary):
+        return {}
+    concepts = list_glossary(book_id)
+    if not concepts:
+        return {}
+
+    seen_keys: set[str] | None = None
+    if max_section_order is not None:
+        seen_keys = set()
+        section_order_by_id: dict[str, int] = {}
+        docs_repo = getattr(tx, "documents", None)
+        get_doc = getattr(docs_repo, "get", None) if docs_repo is not None else None
+        if callable(get_doc):
+            document = get_doc(book_id)
+            if document is not None:
+                for sec in getattr(document, "ordered_sections", ()):
+                    section_order_by_id[str(sec.id)] = int(sec.order)
+
+        analyses_repo = getattr(tx, "analyses", None)
+        if analyses_repo is not None:
+            list_analyses = getattr(analyses_repo, "list_for_book", None)
+            if callable(list_analyses):
+                for analysis in list_analyses(book_id):
+                    sec_ord = section_order_by_id.get(str(analysis.section_id))
+                    if sec_ord is None or sec_ord > max_section_order:
+                        continue
+                    for cand in getattr(analysis, "glossary_candidates", ()):
+                        src = str(getattr(cand, "source_text", "") or "").strip()
+                        if src:
+                            seen_keys.add(glossary_key(src))
+                    for scene in getattr(analysis, "scenes", ()):
+                        for part in getattr(scene, "participants", ()):
+                            if part and str(part).strip():
+                                seen_keys.add(glossary_key(str(part)))
+                        loc = getattr(scene, "location", None)
+                        if loc and str(loc).strip():
+                            seen_keys.add(glossary_key(str(loc)))
+
+            list_passes = getattr(analyses_repo, "list_passes_for_book", None)
+            if callable(list_passes):
+                for saved_pass in list_passes(
+                    book_id, pass_kind=AnalysisPassKind.NARRATIVE, scope_key=""
+                ):
+                    sec_ord = section_order_by_id.get(str(saved_pass.section_id))
+                    if sec_ord is None or sec_ord > max_section_order:
+                        continue
+                    raw_payload = getattr(saved_pass, "payload", None)
+                    raw_resp = (
+                        raw_payload.get("response") if isinstance(raw_payload, Mapping) else None
+                    )
+                    if not isinstance(raw_resp, Mapping):
+                        continue
+                    for cand in raw_resp.get("glossary_candidates", ()):
+                        if isinstance(cand, Mapping):
+                            src = str(cand.get("source_text") or "").strip()
+                            if src:
+                                seen_keys.add(glossary_key(src))
+                    for scene in raw_resp.get("scenes", ()):
+                        if isinstance(scene, Mapping):
+                            for part in scene.get("participants", ()):
+                                if part and str(part).strip():
+                                    seen_keys.add(glossary_key(str(part)))
+                            loc = scene.get("location")
+                            if loc and str(loc).strip():
+                                seen_keys.add(glossary_key(str(loc)))
+
+        illustrations_repo = getattr(tx, "illustrations", None)
+        if illustrations_repo is not None:
+            eff_gen_id = generation_id
+            if eff_gen_id is None:
+                get_head = getattr(illustrations_repo, "get_head", None)
+                if callable(get_head):
+                    head = get_head(book_id)
+                    eff_gen_id = getattr(head, "active_generation_id", None) if head is not None else None
+            query_items = getattr(illustrations_repo, "query_registry_items", None)
+            if eff_gen_id and callable(query_items):
+                chapter_end_pos = format_position_key(max_section_order, 999_999, 99_999_999)
+                offset = 0
+                while True:
+                    page, total = query_items(
+                        eff_gen_id,
+                        kind=IllustrationRegistryKind.ENTITY,
+                        offset=offset,
+                        limit=200,
+                    )
+                    for item in page:
+                        pay = item.raw_payload()
+                        raw_positions = pay.get("alias_first_positions")
+                        if isinstance(raw_positions, Mapping) and raw_positions:
+                            for alias_name, pos in raw_positions.items():
+                                if (
+                                    alias_name is not None
+                                    and str(alias_name).strip()
+                                    and isinstance(pos, str)
+                                    and pos
+                                    and pos <= chapter_end_pos
+                                ):
+                                    seen_keys.add(glossary_key(str(alias_name)))
+                        else:
+                            first_pos = str(pay.get("first_position_key") or "")
+                            raw_orders = pay.get("section_orders")
+                            visible = bool(first_pos and first_pos <= chapter_end_pos) or (
+                                not first_pos
+                                and isinstance(raw_orders, (list, tuple))
+                                and any(type(o) is int and o <= max_section_order for o in raw_orders)
+                            )
+                            if visible:
+                                canon = str(pay.get("canonical_name") or "").strip()
+                                if canon:
+                                    seen_keys.add(glossary_key(canon))
+                                raw_aliases = pay.get("aliases")
+                                if isinstance(raw_aliases, (list, tuple)):
+                                    for a in raw_aliases:
+                                        if a is not None and str(a).strip():
+                                            seen_keys.add(glossary_key(str(a)))
+                    offset += len(page)
+                    if offset >= total or not page:
+                        break
+
+    candidates: list[tuple[int, str, str, str, str]] = []
+    for concept in concepts:
+        src_text = str(getattr(concept, "canonical_source_text", "") or "").strip()
+        if not src_text:
+            continue
+        ckey = glossary_key(src_text)
+        if not ckey:
+            continue
+        if allowed_keys is not None and ckey not in allowed_keys:
+            continue
+        if seen_keys is not None and ckey not in seen_keys:
+            continue
+        ru_var = concept.variant_for("ru")
+        if ru_var is None or not ru_var.text.strip():
+            continue
+        status = getattr(concept, "status", TermStatus.SUGGESTED)
+        priority = _GLOSSARY_STATUS_PRIORITY.get(status, 2)
+        candidates.append((priority, src_text.casefold(), src_text, ckey, ru_var.text.strip()))
+
+    candidates.sort(key=lambda row: (row[0], row[1], row[2]))
+    result: dict[str, str] = {}
+    used_keys: set[str] = set()
+    for _, _, src_text, ckey, ru_text in candidates:
+        if ckey in used_keys:
+            continue
+        used_keys.add(ckey)
+        result[src_text] = ru_text
+        if len(result) >= limit:
+            break
+    return result
+
+
+def fit_glossary_terms_to_wire_budget(
+    glossary_terms_ru: Mapping[str, str],
+    *,
+    build_request: Callable[[dict[str, str]], LLMRequest[Any]],
+    sizer: RequestWireSizer,
+    target_bytes: int,
+) -> dict[str, str]:
+    """Return the longest prefix of `glossary_terms_ru` whose request fits `target_bytes` (down to `{}`)."""
+    items = [
+        (str(k).strip(), str(v).strip())
+        for k, v in glossary_terms_ru.items()
+        if k is not None and str(k).strip() and v is not None and str(v).strip()
+    ]
+    if not items:
+        return {}
+    full = dict(items)
+    if sizer.measure(build_request(full)).size_bytes <= target_bytes:
+        return full
+    if sizer.measure(build_request({})).size_bytes > target_bytes:
+        return {}
+    lo = 0
+    hi = len(items)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if sizer.measure(build_request(dict(items[:mid]))).size_bytes <= target_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    return dict(items[:lo])
+
+
+collect_book_glossary_terms_ru = _collect_book_glossary_terms_ru
 
 
 class IllustrationContext:
@@ -683,10 +897,13 @@ __all__ = [
     "TIMELESS_POSITION_KEY",
     "IllustrationContext",
     "QuoteResolutionResult",
+    "_collect_book_glossary_terms_ru",
     "closed_traits_for_kind",
+    "collect_book_glossary_terms_ru",
     "compact_json",
     "compact_repair_summary",
     "compact_safe_detail",
+    "fit_glossary_terms_to_wire_budget",
     "format_position_key",
     "is_context_limit_error",
     "is_incompatible_route_error",

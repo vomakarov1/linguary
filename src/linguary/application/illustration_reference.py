@@ -13,8 +13,10 @@ from uuid import uuid4
 from linguary.application.context_builder import source_text_for_model, textual_blocks
 from linguary.application.illustration_context import (
     IllustrationContext,
+    _collect_book_glossary_terms_ru,
     closed_traits_for_kind,
     compact_safe_detail,
+    fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
     is_transient_error,
@@ -294,6 +296,33 @@ def _blocking_keys_for_mention(
     return keys
 
 
+MAX_CONTEXT_ALIAS_NEIGHBORS = 8
+
+
+def _parse_section_block_order(position_key: Any) -> tuple[int, int] | None:
+    """Parse canonical `SSSSSS:BBBBBB:CCCCCCCC` position key into `(section_order, block_order)`."""
+    if not isinstance(position_key, str) or not position_key:
+        return None
+    parts = position_key.split(":")
+    if len(parts) != 3 or not all(p.isascii() and p.isdigit() for p in parts):
+        return None
+    return (int(parts[0]), int(parts[1]))
+
+
+def _is_anonymous_person_descriptor(name: str) -> bool:
+    """Return True if `name` is a tier-0 generic person descriptor without proper names."""
+    words = _NAME_WORD_RE.findall(name)
+    if not words:
+        return False
+    if _score_canonical_name(name)[0] != 0:
+        return False
+    if any(w[0].isupper() for w in words[1:]):
+        return False
+    if words[0][0].isupper() and words[0].lower() not in _LEADING_GENERIC_WORDS:
+        return False
+    return True
+
+
 def build_alias_candidate_pairs(
     mentions: Sequence[Mapping[str, Any]],
     *,
@@ -307,7 +336,8 @@ def build_alias_candidate_pairs(
     links = glossary_links or {}
     buckets: dict[str, list[str]] = defaultdict(list)
     kind_by_key: dict[str, str] = {}
-    for mention in sorted(mentions, key=lambda m: str(m["mention_key"])):
+    sorted_mentions = sorted(mentions, key=lambda m: str(m["mention_key"]))
+    for mention in sorted_mentions:
         mkey = str(mention["mention_key"])
         kind_by_key[mkey] = str(mention["entity_kind"])
         for bkey in sorted(_blocking_keys_for_mention(mention, glossary_links=links)):
@@ -324,6 +354,43 @@ def build_alias_candidate_pairs(
                 b = unique[j]
                 if kind_by_key[a] == kind_by_key[b]:
                     pairs.add((a, b))
+
+    # Contextual blocking for anonymous tier-0 person descriptors with valid position_key.
+    persons_by_section: dict[int, list[tuple[str, int, int, str]]] = defaultdict(list)
+    for mention in sorted_mentions:
+        if str(mention.get("entity_kind", "")) != "person":
+            continue
+        parsed = _parse_section_block_order(mention.get("position_key"))
+        if parsed is None:
+            continue
+        sec_ord, blk_ord = parsed
+        mkey = str(mention["mention_key"])
+        mname = str(mention.get("name", ""))
+        tier = _score_canonical_name(mname)[0]
+        mnorm = normalize_name_token(mname)
+        persons_by_section[sec_ord].append((mkey, blk_ord, tier, mnorm))
+
+    for mention in sorted_mentions:
+        if str(mention.get("entity_kind", "")) != "person":
+            continue
+        parsed = _parse_section_block_order(mention.get("position_key"))
+        if parsed is None:
+            continue
+        mname = str(mention.get("name", ""))
+        if not _is_anonymous_person_descriptor(mname):
+            continue
+        sec_ord, blk_ord = parsed
+        mkey = str(mention["mention_key"])
+        mnorm = normalize_name_token(mname)
+        others = [
+            (0 if o_tier >= 1 else 1, abs(o_blk - blk_ord), okey)
+            for okey, o_blk, o_tier, o_norm in persons_by_section[sec_ord]
+            if okey != mkey and (o_tier >= 1 or o_norm != mnorm)
+        ]
+        others.sort()
+        for _, _, okey in others[:MAX_CONTEXT_ALIAS_NEIGHBORS]:
+            pairs.add((mkey, okey) if mkey < okey else (okey, mkey))
+
     return tuple(sorted(pairs))
 
 
@@ -337,7 +404,7 @@ def resolve_verdict_graph_clusters(
 
     Guarantees:
     - No two endpoints of any `diff_edge` are ever merged into the same cluster.
-    - Bridge nodes having `same_edges` to mutually different nodes stay separate.
+    - Ambiguous bridge edges connecting a node to mutually different nodes are pruned.
     - Output is 100% invariant to input edge order.
     """
     nodes = sorted(set(node_ids))
@@ -354,14 +421,14 @@ def resolve_verdict_graph_clusters(
             if edge not in diff_set:
                 active_same.add(edge)
 
-    # Step 1 (symmetric): remove all same_edges incident to any direct bridge node
-    # (a node connected via same_edges to both endpoints of some diff_edge).
+    # Step 1 (symmetric, edge-level): prune only the ambiguous bridge edges (x, a) and (x, b)
+    # whenever node x has same_edges to both endpoints of some diff_edge (a, b).
     adj: dict[str, set[str]] = {n: set() for n in nodes}
     for u, v in active_same:
         adj[u].add(v)
         adj[v].add(u)
 
-    bridge_nodes: set[str] = set()
+    bridge_edges: set[tuple[str, str]] = set()
     for x in nodes:
         neighbors = sorted(adj[x])
         for i in range(len(neighbors)):
@@ -370,15 +437,11 @@ def resolve_verdict_graph_clusters(
                 b = neighbors[j]
                 pair = (a, b) if a < b else (b, a)
                 if pair in diff_set:
-                    bridge_nodes.add(x)
-                    break
-            if x in bridge_nodes:
-                break
+                    bridge_edges.add((x, a) if x < a else (a, x))
+                    bridge_edges.add((x, b) if x < b else (b, x))
 
-    if bridge_nodes:
-        active_same = {
-            (u, v) for (u, v) in active_same if u not in bridge_nodes and v not in bridge_nodes
-        }
+    if bridge_edges:
+        active_same = active_same - bridge_edges
 
     # Step 2 (symmetric): compute connected components; if any component still contains
     # a diff_edge (e.g. a longer conflict chain A-B-D-C with A!=C), simultaneously drop
@@ -626,6 +689,7 @@ def _build_bounded_design_input(
     conditions_id: str | None,
     policy: IllustrationPolicy,
     style: str = ILLUSTRATION_STYLE_MONOCHROME_INK,
+    glossary_terms_ru: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deterministically bound entity facts for DESIGN to `policy.initial_target_bytes`.
 
@@ -687,6 +751,7 @@ def _build_bounded_design_input(
         cur_facts: Sequence[Mapping[str, Any]],
         omit_ep: int,
         omit_all: int,
+        cur_glossary: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         raw_aliases = entity.get("aliases") or ()
         bounded_aliases = [
@@ -694,7 +759,7 @@ def _build_bounded_design_input(
             for a in raw_aliases
             if a is not None and str(a).strip()
         ][:8]
-        return {
+        payload: dict[str, Any] = {
             "entity_id": str(entity["entity_id"]),
             "canonical_name": str(entity["canonical_name"]),
             "aliases": bounded_aliases,
@@ -706,13 +771,20 @@ def _build_bounded_design_input(
             "omitted_episodic_count": omit_ep,
             "omitted_fact_count": omit_all,
         }
+        if cur_glossary:
+            payload["glossary_terms_ru"] = {str(k): str(v) for k, v in cur_glossary.items()}
+        return payload
 
     target_bytes = policy.initial_target_bytes
     for idx, fact in enumerate(ordered):
         candidate_fact = _compact_fact(fact)
         remaining = ordered[idx + 1 :]
         rem_ep = sum(1 for r in remaining if r["temporal_scope"] != "permanent")
-        payload = _make_payload([*included, candidate_fact], omitted_episodic + rem_ep, omitted_total + len(remaining))
+        payload = _make_payload(
+            [*included, candidate_fact],
+            omitted_episodic + rem_ep,
+            omitted_total + len(remaining),
+        )
         req = IllustrationContext.build_for_kind(
             kind=LLMResponseKind.ILLUSTRATION_DESIGN,
             stage=IllustrationScopeStage.DESIGN,
@@ -728,7 +800,28 @@ def _build_bounded_design_input(
             if fact["temporal_scope"] != "permanent":
                 omitted_episodic += 1
 
-    return _make_payload(included, omitted_episodic, omitted_total)
+    bounded_glossary: dict[str, str] = {}
+    if glossary_terms_ru:
+        def _build_gloss_req(cur_glossary: dict[str, str]) -> LLMRequest[Any]:
+            return IllustrationContext.build_for_kind(
+                kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+                stage=IllustrationScopeStage.DESIGN,
+                input_payload=_make_payload(
+                    included, omitted_episodic, omitted_total, cur_glossary
+                ),
+                book_id=book_id,
+                conditions_id=conditions_id,
+                policy=policy,
+            )
+
+        bounded_glossary = fit_glossary_terms_to_wire_budget(
+            glossary_terms_ru,
+            build_request=_build_gloss_req,
+            sizer=sizer,
+            target_bytes=target_bytes,
+        )
+
+    return _make_payload(included, omitted_episodic, omitted_total, bounded_glossary)
 
 
 def _build_design_scope_spec(
@@ -747,10 +840,19 @@ def _build_design_scope_spec(
         if isinstance(raw_aliases, (list, tuple, set))
         else []
     )
+    raw_alias_tr = entity.get("alias_translations_ru")
+    alias_tr_values = (
+        list(raw_alias_tr.values()) if isinstance(raw_alias_tr, Mapping) else []
+    )
     entity_names = list(
         dict.fromkeys(
             str(n).strip()
-            for n in [entity.get("canonical_name"), *alias_items]
+            for n in [
+                entity.get("canonical_name"),
+                *alias_items,
+                entity.get("glossary_translation_ru"),
+                *alias_tr_values,
+            ]
             if n is not None and str(n).strip()
         )
     )
@@ -2206,8 +2308,21 @@ class IllustrationReference:
         alias_leaves = [s for s in alias_scopes if s.state is not IllustrationScopeState.SPLIT]
 
         glossary_links: dict[str, str] = {}
-        for concept in tx.glossary.list_for_book(generation.book_id):
-            glossary_links[glossary_key(concept.canonical_source_text)] = concept.id
+        glossary_source_keys: set[str] = set()
+        glossary_ru_by_key: dict[str, str] = {}
+        glossary_repo = getattr(tx, "glossary", None)
+        list_glossary = getattr(glossary_repo, "list_for_book", None) if glossary_repo is not None else None
+        if callable(list_glossary):
+            for concept in list_glossary(generation.book_id):
+                ckey = glossary_key(concept.canonical_source_text)
+                if not ckey:
+                    continue
+                glossary_links[ckey] = concept.id
+                glossary_source_keys.add(ckey)
+                ru_var = concept.variant_for("ru")
+                if ru_var is not None and ru_var.text.strip():
+                    glossary_ru_by_key[ckey] = ru_var.text.strip()
+        glossary_source_keys_frozen = frozenset(glossary_source_keys)
 
         candidate_pairs = build_alias_candidate_pairs(mentions, glossary_links=glossary_links)
         if candidate_pairs and not alias_scopes:
@@ -2404,7 +2519,12 @@ class IllustrationReference:
             entity_id = f"ent-{canonical_sha({'kind': kind, 'members': list(cluster)})[:12]}"
             for k in cluster:
                 mention_to_entity[k] = entity_id
-            canonical_name = _choose_canonical_name(members) or str(first["name"]).strip()
+            canonical_name = (
+                _choose_canonical_name(
+                    members, glossary_source_keys=glossary_source_keys_frozen
+                )
+                or str(first["name"]).strip()
+            )
             alias_first_positions: dict[str, str] = {}
             section_orders_set: set[int] = set()
             for m in members:
@@ -2422,7 +2542,13 @@ class IllustrationReference:
                 key=lambda n: (alias_first_positions[n], n.casefold()),
             )
             section_orders = sorted(section_orders_set)
-            entity_payload = {
+            glossary_translation_ru = glossary_ru_by_key.get(glossary_key(canonical_name))
+            alias_translations_ru = {
+                n: tr
+                for n in alias_first_positions
+                if (tr := glossary_ru_by_key.get(glossary_key(n)))
+            }
+            entity_payload: dict[str, Any] = {
                 "entity_id": entity_id,
                 "entity_kind": kind,
                 "canonical_name": canonical_name,
@@ -2432,6 +2558,10 @@ class IllustrationReference:
                 "mention_count": len(members),
                 "first_position_key": str(first["position_key"]),
             }
+            if glossary_translation_ru:
+                entity_payload["glossary_translation_ru"] = glossary_translation_ru
+            if alias_translations_ru:
+                entity_payload["alias_translations_ru"] = alias_translations_ru
             entities.append(entity_payload)
             entity_items.append(
                 RegistryItem(
@@ -2500,14 +2630,45 @@ class IllustrationReference:
             design_specs: list[IllustrationScopeSpec] = []
             for ent in sorted(design_entities, key=lambda e: str(e["entity_id"])):
                 eid = str(ent["entity_id"])
+                ent_facts = facts_by_entity.get(eid, ())
+                design_glossary: dict[str, str] = {}
+                if glossary_ru_by_key:
+                    allowed_keys: set[str] = set()
+                    for n in [ent.get("canonical_name"), *(ent.get("aliases") or ())]:
+                        if n is not None and str(n).strip():
+                            k = glossary_key(str(n))
+                            if k:
+                                allowed_keys.add(k)
+                    relevant_facts = [
+                        f for f in ent_facts if str(f.get("temporal_scope", "")) == "permanent"
+                    ] or list(ent_facts)
+                    facts_blob = glossary_key(
+                        " ".join(
+                            f"{f.get('description_en', '')} {f.get('description_ru', '')} {f.get('quote', '')}"
+                            for f in relevant_facts
+                        )
+                    )
+                    if facts_blob:
+                        for ckey in glossary_ru_by_key:
+                            if ckey not in allowed_keys and re.search(
+                                rf"(?<!\w){re.escape(ckey)}(?!\w)", facts_blob
+                            ):
+                                allowed_keys.add(ckey)
+                    if allowed_keys:
+                        design_glossary = _collect_book_glossary_terms_ru(
+                            tx,
+                            generation.book_id,
+                            allowed_keys=frozenset(allowed_keys),
+                        )
                 req_in = _build_bounded_design_input(
                     entity=ent,
-                    facts=facts_by_entity.get(eid, ()),
+                    facts=ent_facts,
                     sizer=sizer,
                     book_id=snapshot.book_id,
                     conditions_id=snapshot.conditions_id,
                     policy=policy,
                     style=revision.settings.style,
+                    glossary_terms_ru=design_glossary,
                 )
                 draft = _build_design_scope_spec(
                     entity=ent,
@@ -2778,7 +2939,11 @@ def _score_canonical_name(name: str) -> tuple[int, int, int]:
     return (tier, short_len, proper_word_count)
 
 
-def _choose_canonical_name(members: Sequence[Mapping[str, Any]]) -> str:
+def _choose_canonical_name(
+    members: Sequence[Mapping[str, Any]],
+    *,
+    glossary_source_keys: frozenset[str] = frozenset(),
+) -> str:
     """Deterministically choose the best book-neutral canonical name from cluster members."""
     if not members:
         return ""
@@ -2793,7 +2958,7 @@ def _choose_canonical_name(members: Sequence[Mapping[str, Any]]) -> str:
     if not grouped:
         return str(members[0].get("name", "")).strip()
 
-    candidates: list[tuple[tuple[int, int, int, int, str, str], str]] = []
+    candidates: list[tuple[tuple[int, int, int, int, int, str, str], str]] = []
     for entries in grouped.values():
         spelling_counts: dict[str, int] = defaultdict(int)
         spelling_min_pos: dict[str, str] = {}
@@ -2812,12 +2977,14 @@ def _choose_canonical_name(members: Sequence[Mapping[str, Any]]) -> str:
             ),
         )
         tier, short_len, proper_word_count = _score_canonical_name(rep_name)
+        in_glossary = 1 if glossary_key(rep_name) in glossary_source_keys else 0
         total_count = len(entries)
         sort_key = (
             -tier,
+            -in_glossary,
+            -total_count,
             -short_len,
             -min(proper_word_count, 3),
-            -total_count,
             group_min_pos,
             rep_name.casefold(),
         )
@@ -2840,6 +3007,14 @@ def _display_name_at_position(entity: Mapping[str, Any], event_position_key: str
             and pos <= event_position_key
         }
         if eligible:
+            canonical = str(entity.get("canonical_name") or "").strip()
+            if canonical:
+                canonical_norm = normalize_name_token(canonical)
+                if canonical in eligible or (
+                    canonical_norm
+                    and any(normalize_name_token(n) == canonical_norm for n in eligible)
+                ):
+                    return canonical
             chosen = _choose_canonical_name(
                 [{"name": n, "position_key": p} for n, p in eligible.items()]
             )
