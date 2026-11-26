@@ -1265,10 +1265,16 @@ async def test_wp4_end_to_end_state_change_locations_depicted_filter_and_punctua
 
     # Anatomical `build` trait ("Small tabby cat silhouette") was suppressed by state_change before PROMPT!
     assert len(prompt_inputs) == 1
+    mc_entity_ids = {
+        c["entity_id"]
+        for c in prompt_inputs[0]["characters"]
+        if c["name_ru"] == "Professor McGonagall"
+    }
+    assert len(mc_entity_ids) == 1
     mc_design_traits = [
         t["trait"]
         for t in prompt_inputs[0]["available_design_traits"]
-        if t["entity_kind"] == "person"
+        if t["entity_id"] in mc_entity_ids
     ]
     assert "build" not in mc_design_traits
     assert "palette_value" in mc_design_traits

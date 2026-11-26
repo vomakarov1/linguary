@@ -1287,4 +1287,41 @@ async def test_recovery_implicit_escalation_with_low_effort_and_none_max_output_
         )
     assert seen2 == [6144, 12048]
 
+    # 3. Multi-block unit with observed_reasoning == 0 (no reasoning_tokens reported)
+    # and max_output_tokens=None must NOT blindly escalate in recovery -> immediate RecoverySplit.
+    _blocks3, unit3 = _multi_block_unit(2)
+    seen3: list[int | None] = []
+
+    async def gen_trunc_no_reasoning(
+        req: LLMRequest[TranslationResultResponse],
+    ) -> LLMResponse[TranslationResultResponse]:
+        seen3.append(req.max_completion_tokens)
+        raise LLMResponseFormatError(
+            "truncated",
+            truncated=True,
+            violation=Violation(
+                rule_code="provider_truncated",
+                stage=LLMCallStage.TRANSLATION_UNIT.value,
+                scope="global",
+                safe_message="truncated",
+            ),
+        )
+
+    call3 = TranslationCall(
+        unit_of_work=_make_recovery_uow(unit3),  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(generate=gen_trunc_no_reasoning),  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=SimpleNamespace(validate=lambda payload, **kwargs: ()),  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    with pytest.raises(RecoverySplit):
+        await call3.request(
+            _translation_context(req1),  # type: ignore[arg-type]
+            unit=unit3,
+            target_language="ru",
+            note_ids=lambda: "n1",
+            recovery=(root_id, "scope-1"),
+        )
+    assert seen3 == [6144]
+
 

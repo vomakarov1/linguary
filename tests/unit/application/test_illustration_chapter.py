@@ -2177,6 +2177,16 @@ async def test_depicted_entity_ids_filters_prompt_and_moment_and_validates_owner
         IllustrationPromptResponse("m1", "A plump boy.", (), ("ent-harry:hair",), (), ("ent-dudley",)),
         rev,
     ).ok is False
+    # Empty depicted_entity_ids=() -> valid still-life/object prompt with no Visual details block
+    empty_ok = chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "A narrow mantelpiece lined with framed photographs.", (), (), (), ()),
+        rev,
+    )
+    assert empty_ok.ok is True and empty_ok.payload is not None
+    assert empty_ok.payload["depicted_entity_ids"] == []
+    assert "Visual details:" not in empty_ok.payload["prompt_en"]
+
     # Legacy depicted_entity_ids=None -> backward compatible (keeps both characters)
     legacy_ok = chapter._validate_render_response(
         scope,
@@ -2186,6 +2196,39 @@ async def test_depicted_entity_ids_filters_prompt_and_moment_and_validates_owner
     assert legacy_ok.ok is True and legacy_ok.payload is not None
     assert "depicted_entity_ids" not in legacy_ok.payload
     assert "scar on forehead" in legacy_ok.payload["prompt_en"]
+
+
+def test_select_english_name_at_position_edge_cases() -> None:
+    from linguary.application.illustration_chapter import _select_english_name_at_position
+
+    # Trimmed key with surrounding whitespace + proper name preferred over earlier generic alias
+    entity_with_spaces = {
+        "canonical_name": "Прайвет-драйв",
+        "aliases": ["the street", "Privet Drive"],
+        "alias_first_positions": {
+            " the street ": "0001:000001:00000001",
+            " Privet Drive ": "0001:000002:00000001",
+            "Hogwarts": "0002:000001:00000001",
+        },
+    }
+    assert (
+        _select_english_name_at_position(
+            entity_with_spaces, "0001:000005:00000001", "Прайвет-драйв"
+        )
+        == "Privet Drive"
+    )
+    # Empty alias_first_positions falls back to _select_english_name(entity)
+    entity_empty_map = {
+        "canonical_name": "Прайвет-драйв",
+        "aliases": ["Privet Drive"],
+        "alias_first_positions": {},
+    }
+    assert (
+        _select_english_name_at_position(
+            entity_empty_map, "0001:000005:00000001", "Прайвет-драйв"
+        )
+        == "Privet Drive"
+    )
 
 
 def test_punctuation_cleanup_and_single_word_clause_with_trailing_dot(tmp_path: Path) -> None:

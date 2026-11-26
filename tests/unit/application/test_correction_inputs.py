@@ -2610,6 +2610,10 @@ def test_segment_evidence_resolution_and_validation_on_mixed_block() -> None:
             is True
         )
 
+    # Boolean index must never match integer segment index 1 (`isinstance(True, int)` guard).
+    bool_segments = {"segments": [{"index": True, "translated_text": "Ложный первый"}]}
+    assert _evidence_value(bool_segments, "segments.1.translated_text") is None
+
     # Protected / non-reader paths stay rejected.
     for bad_path in (
         "segments.1.index",

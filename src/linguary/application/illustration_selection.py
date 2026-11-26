@@ -24,7 +24,9 @@ from linguary.application.illustration_dto import (
     IllustrationCandidatesResponse,
     IllustrationSelectionResponse,
 )
-from linguary.application.illustration_reference import _display_name_at_position
+from linguary.application.illustration_reference import (
+    display_name_at_position as _display_name_at_position,
+)
 from linguary.application.illustration_source import (
     IllustrationSource,
     IllustrationSourceSnapshot,
@@ -113,13 +115,15 @@ def _known_entity_names_for_chapter(
     for ent in entities:
         raw_orders = ent.get("section_orders")
         has_orders = isinstance(raw_orders, (list, tuple))
-        in_current = has_orders and section_order in raw_orders
+        in_current = has_orders and any(
+            type(o) is int and o == section_order for o in raw_orders
+        )
         first_pos = str(ent.get("first_position_key") or "")
         if not in_current:
             if first_pos and first_pos > chapter_end_pos:
                 continue
             if not first_pos and has_orders and not any(
-                isinstance(o, int) and o <= section_order for o in raw_orders
+                type(o) is int and o <= section_order for o in raw_orders
             ):
                 continue
         display_name = _display_name_at_position(ent, chapter_end_pos).strip()
@@ -134,7 +138,7 @@ def _known_entity_names_for_chapter(
             locations.append(row)
 
     def _finalize(rows: list[tuple[int, str, str, str]]) -> tuple[str, ...]:
-        rows.sort(key=lambda r: (r[0], r[1], r[2]))
+        rows.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
         seen: set[str] = set()
         out: list[str] = []
         for _, _, key, name in rows:

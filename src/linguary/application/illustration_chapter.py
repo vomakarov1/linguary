@@ -24,7 +24,8 @@ from linguary.application.illustration_dto import (
     IllustrationPromptResponse,
 )
 from linguary.application.illustration_reference import (
-    _display_name_at_position,
+    choose_canonical_name,
+    display_name_at_position as _display_name_at_position,
     resolve_appearance_with_design_fallback,
 )
 from linguary.application.illustration_selection import (
@@ -135,23 +136,18 @@ def _select_english_name_at_position(
     if cleaned_display and not has_cyrillic(cleaned_display):
         return cleaned_display
     raw_positions = entity.get("alias_first_positions")
-    if isinstance(raw_positions, Mapping) and event_position_key:
-        eligible = sorted(
-            (
-                str(name).strip()
-                for name, pos in raw_positions.items()
-                if name is not None
-                and str(name).strip()
-                and isinstance(pos, str)
-                and pos
-                and pos <= event_position_key
-            ),
-            key=lambda n: (str(raw_positions[n]), n.casefold()),
-        )
-        for name in eligible:
-            if not has_cyrillic(name):
-                return name
-        return None
+    if isinstance(raw_positions, Mapping) and raw_positions and event_position_key:
+        eligible_en = [
+            {"name": clean, "position_key": pos}
+            for name, pos in raw_positions.items()
+            if name is not None
+            and (clean := str(name).strip())
+            and not has_cyrillic(clean)
+            and isinstance(pos, str)
+            and pos
+            and pos <= event_position_key
+        ]
+        return choose_canonical_name(eligible_en) or None
     return _select_english_name(entity)
 
 

@@ -2323,7 +2323,7 @@ class IllustrationReference:
                 ):
                     alias_first_positions[m_name] = m_pos
                 sec_part = m_pos.split(":", 1)[0]
-                if sec_part.isdigit():
+                if sec_part.isascii() and sec_part.isdigit():
                     section_orders_set.add(int(sec_part))
             aliases = sorted(
                 (name for name in alias_first_positions if name != canonical_name),
@@ -2989,12 +2989,18 @@ def resolve_appearance_with_design_fallback(
     return tuple(explicit_list), tuple(kept_design)
 
 
+choose_canonical_name = _choose_canonical_name
+display_name_at_position = _display_name_at_position
+
+
 __all__ = [
     "TIMELESS_POSITION_KEY",
     "IllustrationReference",
     "_choose_canonical_name",
     "_display_name_at_position",
     "build_alias_candidate_pairs",
+    "choose_canonical_name",
+    "display_name_at_position",
     "format_position_key",
     "resolve_appearance_with_design_fallback",
     "resolve_verdict_graph_clusters",
