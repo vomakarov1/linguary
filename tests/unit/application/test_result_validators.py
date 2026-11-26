@@ -3722,4 +3722,63 @@ def test_mixed_block_glossary_only_violations_name_exact_segment_indices() -> No
     assert "GLOSSARY_ONLY: 2, 4" in str(rejection(missing_multi, unit=unit_multi))
 
 
+def test_result_validator_v3_allows_embedded_quote_in_narrative_and_rejects_line_initial() -> None:
+    """WP4: v3 result validation accepts single- and two-line embedded narrative quotes while rejecting line-initial guillemets."""
+    b35_single_source = (
+        "“We were on a mountain road…” Only this wasn’t a mountain road, "
+        "and the trees weren’t even gray. “A dead forest,” Dad had said, pointing. “It happens.”"
+    )
+    single_block = make_block(order=0, text=b35_single_source)
+    single_unit = make_unit((single_block,))
 
+    for valid_single in (
+        "— Мы ехали по горной дороге… — сказала она. Но это была не горная дорога, "
+        "и деревья даже не были серыми. «Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»",
+        "«Мы ехали по горной дороге…» Но это была не горная дорога, "
+        "и деревья даже не были серыми. «Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»",
+    ):
+        payload = make_response(
+            (make_block_result(single_block, translated_text=valid_single),)
+        )
+        results = validate(payload, unit=single_unit, validation_policy="v3")
+        assert results[0].translated_text == valid_single
+
+    b35_two_line_source = (
+        "“We were on a mountain road…”\n"
+        "Only this wasn’t a mountain road, and the trees weren’t even gray. "
+        "“A dead forest,” Dad had said, pointing. “It happens.”"
+    )
+    two_line_block = make_block(order=0, text=b35_two_line_source)
+    two_line_unit = make_unit((two_line_block,))
+    valid_two_line = (
+        "— Мы ехали по горной дороге…\n"
+        "Но это была не горная дорога, и деревья даже не были серыми. "
+        "«Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»"
+    )
+    two_line_results = validate(
+        make_response((make_block_result(two_line_block, translated_text=valid_two_line),)),
+        unit=two_line_unit,
+        validation_policy="v3",
+    )
+    assert two_line_results[0].translated_text == valid_two_line
+
+    # Line-initial spoken dialogue inside `«…»` is still rejected under v3.
+    bad_initial = make_response(
+        (make_block_result(single_block, translated_text="«Привет, — сказал он.»"),)
+    )
+    err_initial = rejection(bad_initial, unit=single_unit, validation_policy="v3")
+    assert err_initial.violation is not None
+    assert err_initial.violation.rule_code == "dialogue_punctuation"
+
+    # Non-embedded inline dash after period is still rejected under v3.
+    bad_dash = make_response(
+        (
+            make_block_result(
+                single_block,
+                translated_text="Но это была не горная дорога. — Так бывает.",
+            ),
+        )
+    )
+    err_dash = rejection(bad_dash, unit=single_unit, validation_policy="v3")
+    assert err_dash.violation is not None
+    assert err_dash.violation.rule_code == "dialogue_punctuation"

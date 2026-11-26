@@ -170,7 +170,7 @@ def _text_dialogue_violation(
             f"в переводе блока {block_id} непарное число кавычек « и »: "
             "проверь оформление прямой речи и цитат"
         )
-    if _has_author_speech_inside_guillemets(text):
+    if _has_author_speech_inside_guillemets(text, source_text=source_text):
         return (
             f"в переводе блока {block_id} слова автора с глаголом речи оказались внутри кавычек «…»: "
             "оформляй прямую речь с ремаркой автора через тире без ёлочек"
@@ -268,9 +268,60 @@ def _source_leaves_opening_quote_unclosed(source: str) -> bool:
     return False
 
 
-def _has_author_speech_inside_guillemets(text: str) -> bool:
+_QUOTE_CHARS = frozenset({"“", "”", "‘", "’", "«", "»", '"', "'"})
+
+
+def _source_has_multiple_separated_quotes(source_text: str) -> bool:
+    """Whether `source_text` has at least two top-level quotes separated by author narration."""
+    spans: list[tuple[int, int]] = []
+    current_open: tuple[str, int] | None = None
+    for idx, ch in enumerate(source_text):
+        if ch not in _QUOTE_CHARS:
+            continue
+        state_after = _outer_unclosed_open(source_text, idx + 1)
+        if current_open is None and state_after is not None:
+            current_open = state_after
+        elif current_open is not None and state_after is None:
+            spans.append((current_open[1], idx + 1))
+            current_open = None
+    if current_open is not None and source_text[current_open[1] + 1 :].strip():
+        spans.append((current_open[1], len(source_text)))
+    if len(spans) < 2:
+        return False
+    return any(
+        any(ch.isalnum() for ch in source_text[prev_end:next_start])
+        for (_, prev_end), (next_start, _) in pairwise(spans)
+    )
+
+
+def _is_allowed_embedded_quote_span(
+    text: str,
+    span_start: int,
+    span_end: int,
+    *,
+    source_text: str | None,
+) -> bool:
+    """Whether `text[span_start:span_end]` is an allowed embedded `«…»` quote inside narration."""
+    if source_text is None or span_start <= 0 or span_end > len(text) or span_start >= span_end:
+        return False
+    if text[span_start] != "«" or text[span_end - 1] != "»":
+        return False
+    line_start = text.rfind("\n", 0, span_start) + 1
+    prefix_on_line = text[line_start:span_start].strip()
+    if not prefix_on_line or not any(ch.isalnum() for ch in prefix_on_line):
+        return False
+    return _source_has_multiple_separated_quotes(source_text)
+
+
+def _has_author_speech_inside_guillemets(
+    text: str, *, source_text: str | None = None
+) -> bool:
     """Rule (c): detects author narration / spoken verb inside `«…»`."""
     for match in _GUILLEMET_SPAN.finditer(text):
+        if _is_allowed_embedded_quote_span(
+            text, match.start(), match.end(), source_text=source_text
+        ):
+            continue
         inner = match.group(1)
         if _INNER_AUTHOR_SPEECH.search(inner):
             return True
@@ -319,11 +370,20 @@ def _has_inline_dialogue_dash(text: str, *, source_text: str | None) -> bool:
         line = raw_line.strip()
         if not line or line.startswith(("—", "–")):
             continue
+        allowed_spans = [
+            (span.start(), span.end())
+            for span in _GUILLEMET_SPAN.finditer(line)
+            if _is_allowed_embedded_quote_span(
+                line, span.start(), span.end(), source_text=source_text
+            )
+        ]
         for match in _STRAY_INLINE_DASH.finditer(line):
             if (
                 line[match.start()] == "."
                 and _ABBREVIATION_BEFORE_DASH.search(line[: match.start() + 1]) is not None
             ):
+                continue
+            if any(start < match.start() and match.end() < end for start, end in allowed_spans):
                 continue
             return True
     return False

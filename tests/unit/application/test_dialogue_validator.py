@@ -569,3 +569,86 @@ def test_dialogue_validator_strict_v3_checks_inline_dash_per_segment_without_joi
             )
         )
         assert dialogue_violation(bad_payload, target_language="ru", unit=unit, strict_v3=True) is not None
+
+
+def test_dialogue_validator_allows_embedded_quote_in_narrative_and_rejects_line_initial_guillemet() -> None:
+    """WP4: embedded `«…»` with author speech/dash inside mixed narrative passes strict_v3, line-initial fails."""
+    b35_source = (
+        "“We were on a mountain road…” Only this wasn’t a mountain road, "
+        "and the trees weren’t even gray. “A dead forest,” Dad had said, pointing. “It happens.”"
+    )
+    b35_single_leading_dash = (
+        "— Мы ехали по горной дороге… — сказала она. "
+        "Но это была не горная дорога, и деревья даже не были серыми. "
+        "«Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»"
+    )
+    b35_single_narrative_line = (
+        "«Мы ехали по горной дороге…» "
+        "Но это была не горная дорога, и деревья даже не были серыми. "
+        "«Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»"
+    )
+    b35_two_line = (
+        "— Мы ехали по горной дороге…\n"
+        "Но это была не горная дорога, и деревья даже не были серыми. "
+        "«Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»"
+    )
+
+    assert _check(b35_single_leading_dash, source_text=b35_source, strict_v3=True) is None
+    assert _check(b35_single_narrative_line, source_text=b35_source, strict_v3=True) is None
+    assert _check(b35_two_line, source_text=b35_source, strict_v3=True) is None
+
+    # British single quotes with contractions in source also work universally.
+    b35_british_source = (
+        "‘We were on a mountain road…’ Only this wasn’t a mountain road, "
+        "and the trees weren’t even gray. ‘A dead forest,’ Dad had said, pointing. ‘It happens.’"
+    )
+    assert _check(b35_two_line, source_text=b35_british_source, strict_v3=True) is None
+
+    # Line-initial spoken dialogue inside `«…»` is still rejected even with multi-quote source.
+    assert _check("«Привет, — сказал он.»", source_text=b35_source, strict_v3=True) is not None
+    assert _check("   «Привет, — сказал он.»", source_text=b35_source, strict_v3=True) is not None
+    assert (
+        _check(
+            "— Мы ехали по горной дороге…\n«Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»",
+            source_text=b35_source,
+            strict_v3=True,
+        )
+        is not None
+    )
+
+    # Without >= 2 author-separated quotes in source (or without source), embedded author speech is rejected.
+    assert (
+        _check(
+            "Он вошёл. «Привет, — сказал он.»",
+            source_text='He walked in. "Hello," he said.',
+            strict_v3=True,
+        )
+        is not None
+    )
+    assert (
+        _check(
+            "Он вспомнил. «Привет, — сказал он. — Пока!»",
+            source_text='"Hi!" "Bye!"',
+            strict_v3=True,
+        )
+        is not None
+    )
+    assert _check(b35_single_leading_dash, pass_unit=False, strict_v3=True) is not None
+
+    # Inline dialogue dash outside the embedded `«…»` span is still rejected under strict_v3.
+    assert (
+        _check(
+            "Но это была не горная дорога. — Так бывает.",
+            source_text=b35_source,
+            strict_v3=True,
+        )
+        is not None
+    )
+    assert (
+        _check(
+            "Но это была не горная дорога. — Пошли! «Мёртвый лес, — сказал папа, показывая рукой. — Так бывает.»",
+            source_text=b35_source,
+            strict_v3=True,
+        )
+        is not None
+    )
