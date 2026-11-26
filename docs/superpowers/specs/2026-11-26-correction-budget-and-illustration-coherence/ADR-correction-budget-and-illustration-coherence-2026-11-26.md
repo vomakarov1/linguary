@@ -27,7 +27,7 @@
 - **Решение:**
   1. В `recommended_unit_max_completion_tokens()` при активном `effort` (`effort is not None and effort != "none"`) вычислять `total = max(effort_total, implicit_total)` при `implicit_reasoning_tokens > 0` (с сохранением финального `min(max_output_tokens, total)`).
   2. Явные режимы `reasoning_effort="none"` и `reasoning_max_tokens=<N>` не переопределяются `implicit_reasoning_tokens`.
-  3. В `block_processing.py` разрешить implicit-эскалацию при `configured_max_output_tokens is None` для активного или незаданного `reasoning_effort` (не `"none"` и при `configured_reasoning_max_tokens is None`), и убрать `and not used_implicit_escalation` из `can_escalate_recovery`, сохранив однократность через уже существующий флаг `implicit_token_escalated`.
+  3. В `block_processing.py` разрешить implicit-эскалацию при `configured_max_output_tokens is None` для активного или незаданного `reasoning_effort` (не `"none"` и при `configured_reasoning_max_tokens is None`), и разрешить `can_escalate_recovery` при `used_implicit_escalation` только когда `observed_reasoning > 0` (сохраняя немедленный сплит / `output_truncated` при обычном усечении без `reasoning_tokens` и однократность через флаг `implicit_token_escalated`).
 - **Последствия:** Первый вызов последующих юнитов сразу учитывает реально наблюдаемый расход рассуждений текущей модели; существующие инварианты для `"none"` и `reasoning_max_tokens` не меняются.
 
 ---

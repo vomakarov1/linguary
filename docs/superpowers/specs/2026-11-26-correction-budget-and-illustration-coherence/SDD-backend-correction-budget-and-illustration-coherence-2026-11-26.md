@@ -96,7 +96,7 @@ else:
    - При `observed_reasoning > 0`: сохраняется `self._raise_implicit_reasoning_floor(observed_reasoning)`.
    - При `observed_reasoning == 0`: fallback-повышение floor по `request.max_completion_tokens or IMPLICIT_REASONING_MIN_TOKENS` сохраняется только при `configured_reasoning_effort is None and configured_reasoning_max_tokens is None`.
    - В ветке `elif not implicit_token_escalated and unit is not None and effort_allows_implicit:` (когда `configured_max_output_tokens is None`): вызывать `recommended_unit_max_completion_tokens(..., reasoning_effort=configured_reasoning_effort, reasoning_max_tokens=None, implicit_reasoning_tokens=self._get_implicit_reasoning_floor())` и ставить `used_implicit_escalation = True`.
-2. На L592 заменить `can_escalate_recovery = can_escalate_tokens and not used_implicit_escalation` на `can_escalate_recovery = can_escalate_tokens`. Флаг `implicit_token_escalated = True` внутри `if within_budget:` (L638–639) становится достижимым и ограничивает implicit-эскалацию ровно одной попыткой на recovery-цикл.
+2. На L592 заменить `can_escalate_recovery = can_escalate_tokens and not used_implicit_escalation` на `can_escalate_recovery = can_escalate_tokens and (not used_implicit_escalation or observed_reasoning > 0)`. Флаг `implicit_token_escalated = True` внутри `if within_budget:` (L638–639) становится достижимым при реально наблюдаемых `reasoning_tokens > 0` и ограничивает implicit-эскалацию ровно одной попыткой на recovery-цикл, не нарушая немедленный сплит / `output_truncated` при обычном усечении без `reasoning_tokens`.
 
 ### 2.3 `src/linguary/adapters/llm/schemas.py`, `payloads.py`, `validators/treatment.py`, `context_builder.py`
 
