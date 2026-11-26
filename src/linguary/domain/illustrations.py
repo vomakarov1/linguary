@@ -225,7 +225,7 @@ class IllustrationPolicy:
     max_calls_per_generation: int = 2048
     max_scopes_per_generation: int = 8192
     max_calls_per_scope_activation: int = 3
-    max_repair_turns: int = 1
+    max_repair_turns: int = 2
     identity_candidate_page_size: int = 16
     max_candidates_per_scene: int = 2
     selection_fan_in: int = 8
@@ -308,7 +308,7 @@ class IllustrationPolicy:
             max_calls_per_generation=payload.get("max_calls_per_generation", 2048),
             max_scopes_per_generation=payload.get("max_scopes_per_generation", 8192),
             max_calls_per_scope_activation=payload.get("max_calls_per_scope_activation", 3),
-            max_repair_turns=payload.get("max_repair_turns", 1),
+            max_repair_turns=payload.get("max_repair_turns", 2),
             identity_candidate_page_size=payload.get("identity_candidate_page_size", 16),
             max_candidates_per_scene=payload.get("max_candidates_per_scene", 2),
             selection_fan_in=payload.get("selection_fan_in", 8),

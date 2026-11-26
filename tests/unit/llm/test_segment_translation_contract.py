@@ -164,11 +164,23 @@ def test_segments_with_translated_text_rejected() -> None:
             segments=segments,
         )
 
-    with pytest.raises(ValidationError, match="переводами сегментов"):
+    with pytest.raises(
+        ValidationError,
+        match="нельзя одновременно заполнять translated_text и segments",
+    ) as err_nonempty:
         BlockResultSchema.model_validate(
             _segment_block(translated_text="Лишний перевод.")
         )
-    with pytest.raises(ValidationError, match="переводами сегментов"):
+    assert "для блока без меток сегментов верни перевод в translated_text и segments: []" in str(
+        err_nonempty.value
+    )
+    assert "для блока с метками сегментов верни translated_text: null и заполни segments" in str(
+        err_nonempty.value
+    )
+    with pytest.raises(
+        ValidationError,
+        match="нельзя одновременно заполнять translated_text и segments",
+    ):
         BlockResultSchema.model_validate(_segment_block(translated_text="   "))
 
 

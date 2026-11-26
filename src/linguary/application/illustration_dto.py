@@ -128,6 +128,7 @@ class IllustrationPromptResponse:
     used_fact_ids: tuple[str, ...] = ()
     used_design_keys: tuple[str, ...] = ()
     assumptions_ru: tuple[str, ...] = ()
+    depicted_entity_ids: tuple[str, ...] | None = None
     contract_version: int = 1
 
 

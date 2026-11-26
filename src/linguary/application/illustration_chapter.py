@@ -24,6 +24,8 @@ from linguary.application.illustration_dto import (
     IllustrationPromptResponse,
 )
 from linguary.application.illustration_reference import (
+    choose_canonical_name,
+    display_name_at_position as _display_name_at_position,
     resolve_appearance_with_design_fallback,
 )
 from linguary.application.illustration_selection import (
@@ -35,6 +37,7 @@ from linguary.application.illustration_selection import (
 from linguary.application.illustration_source import (
     IllustrationSource,
     IllustrationSourceSnapshot,
+    SectionManifestEntry,
     compute_chapter_fingerprint,
 )
 from linguary.application.illustration_validation import (
@@ -123,6 +126,46 @@ def _select_english_name(entity: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _select_english_name_at_position(
+    entity: Mapping[str, Any],
+    event_position_key: str,
+    display_name: str,
+) -> str | None:
+    """Select a spoiler-free non-Cyrillic display name visible at `event_position_key`."""
+    cleaned_display = display_name.strip()
+    if cleaned_display and not has_cyrillic(cleaned_display):
+        return cleaned_display
+    raw_positions = entity.get("alias_first_positions")
+    if isinstance(raw_positions, Mapping) and raw_positions and event_position_key:
+        eligible_en = [
+            {"name": clean, "position_key": pos}
+            for name, pos in raw_positions.items()
+            if name is not None
+            and (clean := str(name).strip())
+            and not has_cyrillic(clean)
+            and isinstance(pos, str)
+            and pos
+            and pos <= event_position_key
+        ]
+        return choose_canonical_name(eligible_en) or None
+    return _select_english_name(entity)
+
+
+def _resolve_scene_location_ru(
+    entry: SectionManifestEntry,
+    section_id: str,
+    scene_id: str,
+    *,
+    max_chars: int = 240,
+) -> str | None:
+    """Lookup reference `scene.location` from `entry.scenes` when no registry location bound."""
+    for idx, scene in enumerate(entry.scenes):
+        if scene.id == scene_id or f"{section_id}:scene:{idx}" == scene_id:
+            loc = " ".join(str(scene.location or "").split()).strip()
+            return loc[:max_chars] if loc else None
+    return None
+
+
 def _entity_names(entity: Mapping[str, Any]) -> list[str]:
     names: list[str] = []
     raw_canonical = entity.get("canonical_name")
@@ -146,7 +189,7 @@ def _dedupe_semicolon_parts(items: Iterable[str]) -> list[str]:
     parts: list[str] = []
     for item in items:
         for piece in str(item).split(";"):
-            cleaned = " ".join(piece.split()).strip()
+            cleaned = " ".join(piece.split()).strip().rstrip(".;").strip()
             if cleaned:
                 parts.append(cleaned)
     return list(_dedupe_texts(parts))
@@ -176,11 +219,13 @@ def _materialize_appearances_for_prompt(
     def _materialize_one(app: IllustrationAppearance) -> IllustrationAppearance:
         selected = traits_by_entity.get(app.entity_id, [])
         if not selected:
+            clean_ru = "; ".join(_dedupe_semicolon_parts([app.description_ru]))
+            clean_en = "; ".join(_dedupe_semicolon_parts([app.description_en]))
             return IllustrationAppearance(
                 entity_id=app.entity_id,
                 name_ru=app.name_ru,
-                description_ru=app.description_ru,
-                description_en=app.description_en,
+                description_ru=clean_ru or app.description_ru.strip().rstrip(".;").strip(),
+                description_en=clean_en or app.description_en.strip().rstrip(".;").strip(),
                 fact_ids=app.fact_ids,
                 assumptions_ru=filter_non_assumption_placeholders(app.assumptions_ru),
                 name_en=app.name_en,
@@ -194,8 +239,8 @@ def _materialize_appearances_for_prompt(
         )
         assumps: list[str] = list(app.assumptions_ru)
         for t in selected:
-            d_ru = str(t.get("description_ru", "")).strip()
-            d_en = str(t.get("description_en", "")).strip()
+            d_ru = str(t.get("description_ru", "")).strip().rstrip(".;").strip()
+            d_en = str(t.get("description_en", "")).strip().rstrip(".;").strip()
             a_ru = str(t.get("assumption_ru", "")).strip()
             if d_ru:
                 ru_parts.append(d_ru)
@@ -208,8 +253,10 @@ def _materialize_appearances_for_prompt(
         return IllustrationAppearance(
             entity_id=app.entity_id,
             name_ru=app.name_ru,
-            description_ru="; ".join(desc_ru_clean) or app.description_ru,
-            description_en="; ".join(desc_en_clean) or app.description_en,
+            description_ru="; ".join(desc_ru_clean)
+            or app.description_ru.strip().rstrip(".;").strip(),
+            description_en="; ".join(desc_en_clean)
+            or app.description_en.strip().rstrip(".;").strip(),
             fact_ids=app.fact_ids,
             assumptions_ru=filter_non_assumption_placeholders(assumps),
             name_en=app.name_en,
@@ -257,6 +304,10 @@ def _resolve_entity_name(
 ) -> tuple[str, Mapping[str, Any] | None]:
     """Resolve a participant/location name against registry entities without guessing.
 
+    Two-pass deterministic matching via `normalize_name_token`:
+      1. Match `canonical_name` first; if unique -> resolved, if >=2 -> ambiguous.
+      2. Only if Pass 1 had 0 matches, match `aliases`; if unique -> resolved, if >=2 -> ambiguous.
+
     Returns:
       - `("resolved", entity_payload)` when uniquely matched
       - `("ambiguous", None)` when 2+ distinct entities match (never merged or guessed!)
@@ -265,18 +316,29 @@ def _resolve_entity_name(
     norm = normalize_name_token(name)
     if not norm:
         return "unmatched", None
-    matches: list[Mapping[str, Any]] = []
+
+    canonical_matches: list[Mapping[str, Any]] = []
     for ent in entities:
         if str(ent.get("entity_kind", "")) != expected_kind:
             continue
-        names = [str(ent.get("canonical_name", ""))] + [
-            str(a) for a in ent.get("aliases", ())
-        ]
-        if any(normalize_name_token(n) == norm for n in names if n):
-            matches.append(ent)
-    if len(matches) == 1:
-        return "resolved", matches[0]
-    if len(matches) > 1:
+        canonical = str(ent.get("canonical_name", ""))
+        if canonical and normalize_name_token(canonical) == norm:
+            canonical_matches.append(ent)
+    if len(canonical_matches) == 1:
+        return "resolved", canonical_matches[0]
+    if len(canonical_matches) > 1:
+        return "ambiguous", None
+
+    alias_matches: list[Mapping[str, Any]] = []
+    for ent in entities:
+        if str(ent.get("entity_kind", "")) != expected_kind:
+            continue
+        aliases = [str(a) for a in ent.get("aliases", ()) if a is not None]
+        if any(a and normalize_name_token(a) == norm for a in aliases):
+            alias_matches.append(ent)
+    if len(alias_matches) == 1:
+        return "resolved", alias_matches[0]
+    if len(alias_matches) > 1:
         return "ambiguous", None
     return "unmatched", None
 
@@ -410,12 +472,17 @@ def _build_fact_scope_spec(
         }
         for f in facts_page
     ]
+    event_pos = max(
+        (a.position_key for a in moment_card.anchors),
+        default=moment_card.event_position_key,
+    )
+    display_name = _display_name_at_position(entity, event_pos)
     request_input = {
         "event_id": moment_card.candidate_id,
         "event_position_key": moment_card.event_position_key,
         "event_ru": moment_card.event_ru,
         "entity_id": str(entity["entity_id"]),
-        "entity_name": str(entity["canonical_name"]),
+        "entity_name": display_name,
         "entity_kind": str(entity["entity_kind"]),
         "style": revision.settings.style,
         "page_index": page_index,
@@ -442,7 +509,7 @@ def _build_fact_scope_spec(
         "moment_id": moment_card.candidate_id,
         "entity_id": str(entity["entity_id"]),
         "entity_kind": str(entity["entity_kind"]),
-        "entity_name": str(entity["canonical_name"]),
+        "entity_name": display_name,
         "entity_names": _entity_names(entity),
         "page_index": page_index,
         "total_pages": total_pages,
@@ -492,13 +559,14 @@ def _build_prompt_scope_spec(
     available_design_traits: Sequence[Mapping[str, Any]] = (),
     base_fallback_entity_ids: Sequence[str] = (),
     entity_names: Sequence[str] = (),
+    scene_location_ru: str | None = None,
     revision: IllustrationSettingsRevision,
     route_id: str,
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
     thawed_design_traits = [thaw(t) for t in available_design_traits]
-    request_input = {
+    request_input: dict[str, Any] = {
         "moment_id": moment_card.candidate_id,
         "scene_id": moment_card.scene_id,
         "title_ru": moment_card.title_ru,
@@ -511,6 +579,8 @@ def _build_prompt_scope_spec(
         "allowed_design_keys": list(allowed_design_keys),
         "available_design_traits": thawed_design_traits,
     }
+    if not locations and scene_location_ru and scene_location_ru.strip():
+        request_input["scene_location_ru"] = scene_location_ru.strip()[:240]
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.PROMPT.value,
@@ -927,7 +997,8 @@ class IllustrationChapter:
                     )
                     design_payloads = [di.raw_payload() for di in design_items]
 
-                    eng_name = _select_english_name(ent)
+                    display_name = _display_name_at_position(ent, event_pos)
+                    eng_name = _select_english_name_at_position(ent, event_pos, display_name)
                     fallback_en = eng_name or (
                         "character" if kind_bucket == "person" else "location"
                     )
@@ -954,8 +1025,8 @@ class IllustrationChapter:
                             )
                         app = IllustrationAppearance(
                             entity_id=eid,
-                            name_ru=str(ent["canonical_name"]),
-                            description_ru=str(ent["canonical_name"]),
+                            name_ru=display_name,
+                            description_ru=display_name,
                             description_en=fallback_en,
                             fact_ids=(),
                             assumptions_ru=(),
@@ -969,6 +1040,7 @@ class IllustrationChapter:
                         f_page: Sequence[Mapping[str, Any]],
                         _card: SelectedMomentCard = card,
                         _ent: Mapping[str, Any] = ent,
+                        _display_name: str = display_name,
                     ) -> LLMRequest[Any]:
                         return IllustrationContext.build_for_kind(
                             kind=LLMResponseKind.ILLUSTRATION_FACT_SCOPE,
@@ -978,7 +1050,7 @@ class IllustrationChapter:
                                 "event_position_key": _card.event_position_key,
                                 "event_ru": _card.event_ru,
                                 "entity_id": str(_ent["entity_id"]),
-                                "entity_name": str(_ent["canonical_name"]),
+                                "entity_name": _display_name,
                                 "entity_kind": str(_ent["entity_kind"]),
                                 "style": revision.settings.style,
                                 "page_index": 0,
@@ -1120,6 +1192,7 @@ class IllustrationChapter:
                             _card: SelectedMomentCard = card,
                             _eid: str = eid,
                             _ent: Mapping[str, Any] = ent,
+                            _display_name: str = display_name,
                         ) -> LLMRequest[Any]:
                             return IllustrationContext.build_for_kind(
                                 kind=LLMResponseKind.ILLUSTRATION_FACT_SCOPE,
@@ -1129,7 +1202,7 @@ class IllustrationChapter:
                                     "event_position_key": _card.event_position_key,
                                     "event_ru": _card.event_ru,
                                     "entity_id": _eid,
-                                    "entity_name": str(_ent["canonical_name"]),
+                                    "entity_name": _display_name,
                                     "entity_kind": str(_ent["entity_kind"]),
                                     "style": revision.settings.style,
                                     "page_index": 0,
@@ -1320,9 +1393,8 @@ class IllustrationChapter:
                         base_fallback_eids.append(eid)
                     app = IllustrationAppearance(
                         entity_id=eid,
-                        name_ru=str(ent["canonical_name"]),
-                        description_ru="; ".join(desc_ru_clean)
-                        or str(ent["canonical_name"]),
+                        name_ru=display_name,
+                        description_ru="; ".join(desc_ru_clean) or display_name,
                         description_en="; ".join(desc_en_clean) or fallback_en,
                         fact_ids=tuple(accumulated_app_ids),
                         assumptions_ru=filter_non_assumption_placeholders(accumulated_assumps),
@@ -1364,6 +1436,11 @@ class IllustrationChapter:
             pkey = f"prompt:{section_id}:{card.candidate_id}"
             existing_p = prompt_by_key.get(pkey)
             if existing_p is None:
+                scene_loc_ru = (
+                    None
+                    if loc_apps
+                    else _resolve_scene_location_ru(entry, section_id, card.scene_id)
+                )
                 draft = _build_prompt_scope_spec(
                     section_id=section_id,
                     section_order=entry.order,
@@ -1377,6 +1454,7 @@ class IllustrationChapter:
                     available_design_traits=avail_design_traits,
                     base_fallback_entity_ids=base_fallback_eids,
                     entity_names=moment_entity_names,
+                    scene_location_ru=scene_loc_ru,
                     revision=revision,
                     route_id=route_id,
                 )
@@ -1399,6 +1477,7 @@ class IllustrationChapter:
                         available_design_traits=avail_design_traits,
                         base_fallback_entity_ids=base_fallback_eids,
                         entity_names=moment_entity_names,
+                        scene_location_ru=scene_loc_ru,
                         revision=revision,
                         route_id=route_id,
                         reusable=reusable,
@@ -1444,6 +1523,12 @@ class IllustrationChapter:
                 )
 
             used_design_keys = [str(k) for k in p_pay.get("used_design_keys", ())]
+            depicted_raw = p_pay.get("depicted_entity_ids")
+            depicted_set = (
+                {str(x) for x in depicted_raw}
+                if isinstance(depicted_raw, (list, tuple))
+                else None
+            )
             raw_traits_by_key = existing_p.summary.get("design_traits_by_key")
             design_traits_by_key = (
                 raw_traits_by_key if isinstance(raw_traits_by_key, Mapping) else None
@@ -1458,17 +1543,35 @@ class IllustrationChapter:
                 "characters" in existing_p.summary or "locations" in existing_p.summary
             ):
                 final_chars = tuple(
-                    IllustrationAppearance.from_dict(c)
-                    for c in existing_p.summary.get("characters", ())
+                    app
+                    for app in (
+                        IllustrationAppearance.from_dict(c)
+                        for c in existing_p.summary.get("characters", ())
+                    )
+                    if depicted_set is None or app.entity_id in depicted_set
                 )
                 final_locs = tuple(
-                    IllustrationAppearance.from_dict(loc)
-                    for loc in existing_p.summary.get("locations", ())
+                    app
+                    for app in (
+                        IllustrationAppearance.from_dict(loc)
+                        for loc in existing_p.summary.get("locations", ())
+                    )
+                    if depicted_set is None or app.entity_id in depicted_set
                 )
             else:
+                filtered_chars = (
+                    [c for c in char_apps if c.entity_id in depicted_set]
+                    if depicted_set is not None
+                    else char_apps
+                )
+                filtered_locs = (
+                    [loc for loc in loc_apps if loc.entity_id in depicted_set]
+                    if depicted_set is not None
+                    else loc_apps
+                )
                 final_chars, final_locs = _materialize_appearances_for_prompt(
-                    char_apps,
-                    loc_apps,
+                    filtered_chars,
+                    filtered_locs,
                     design_traits_by_key,
                     used_design_keys,
                     base_fallback_entity_ids=summary_fallback_eids,
@@ -2133,6 +2236,61 @@ class IllustrationChapter:
                 if isinstance(raw_fallback_eids, (list, tuple))
                 else ()
             )
+            depicted = payload.depicted_entity_ids
+            if depicted is not None:
+                if len(depicted) != len(set(depicted)):
+                    return _ValidationOutcome(
+                        ok=False,
+                        repair_reason="depicted_entity_ids содержит дублирующиеся entity_id",
+                    )
+                allowed_entity_ids = {
+                    app.entity_id for app in (*base_characters, *base_locations)
+                }
+                depicted_set = set(depicted)
+                unknown_depicted = [eid for eid in depicted if eid not in allowed_entity_ids]
+                if unknown_depicted:
+                    return _ValidationOutcome(
+                        ok=False,
+                        repair_reason=(
+                            "depicted_entity_ids содержит неизвестный entity_id: "
+                            f"{', '.join(unknown_depicted)}"
+                        ),
+                    )
+                fact_owners: dict[str, set[str]] = {}
+                for app in (*base_characters, *base_locations):
+                    for fid in app.fact_ids:
+                        fact_owners.setdefault(fid, set()).add(app.entity_id)
+                for fid in payload.used_fact_ids:
+                    owners = fact_owners.get(fid)
+                    if owners and not (owners & depicted_set):
+                        return _ValidationOutcome(
+                            ok=False,
+                            repair_reason=(
+                                f"used_fact_ids содержит факт {fid} сущности, "
+                                "не указанной в depicted_entity_ids"
+                            ),
+                        )
+                for dk in payload.used_design_keys:
+                    owner_eid: str | None = None
+                    if design_traits_by_key is not None and isinstance(
+                        design_traits_by_key.get(dk), Mapping
+                    ):
+                        owner_eid = (
+                            str(design_traits_by_key[dk].get("entity_id", "")).strip() or None
+                        )
+                    if owner_eid is None and ":" in dk:
+                        owner_eid = dk.split(":", 1)[0].strip() or None
+                    if owner_eid and owner_eid not in depicted_set:
+                        return _ValidationOutcome(
+                            ok=False,
+                            repair_reason=(
+                                f"used_design_keys содержит ключ {dk} сущности, "
+                                "не указанной в depicted_entity_ids"
+                            ),
+                        )
+                base_characters = [c for c in base_characters if c.entity_id in depicted_set]
+                base_locations = [loc for loc in base_locations if loc.entity_id in depicted_set]
+
             characters, locations = _materialize_appearances_for_prompt(
                 base_characters,
                 base_locations,
@@ -2148,20 +2306,20 @@ class IllustrationChapter:
                 )
             except IllustrationValidationError as err:
                 return _ValidationOutcome(ok=False, repair_reason=str(err))
-            return _ValidationOutcome(
-                ok=True,
-                payload={
-                    "schema_version": 1,
-                    "moment_id": payload.moment_id,
-                    "scene_composition_en": payload.scene_composition_en.strip(),
-                    "prompt_en": prompt_en,
-                    "used_fact_ids": list(dict.fromkeys(payload.used_fact_ids)),
-                    "used_design_keys": list(dict.fromkeys(payload.used_design_keys)),
-                    "assumptions_ru": list(
-                        filter_non_assumption_placeholders(payload.assumptions_ru)
-                    ),
-                },
-            )
+            accepted_payload: dict[str, Any] = {
+                "schema_version": 1,
+                "moment_id": payload.moment_id,
+                "scene_composition_en": payload.scene_composition_en.strip(),
+                "prompt_en": prompt_en,
+                "used_fact_ids": list(dict.fromkeys(payload.used_fact_ids)),
+                "used_design_keys": list(dict.fromkeys(payload.used_design_keys)),
+                "assumptions_ru": list(
+                    filter_non_assumption_placeholders(payload.assumptions_ru)
+                ),
+            }
+            if depicted is not None:
+                accepted_payload["depicted_entity_ids"] = list(depicted)
+            return _ValidationOutcome(ok=True, payload=accepted_payload)
 
         return _ValidationOutcome(ok=False, repair_reason="неподдерживаемый этап рендера")
 

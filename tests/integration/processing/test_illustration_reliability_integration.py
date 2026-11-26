@@ -23,11 +23,19 @@ from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.illustration_chapter import IllustrationChapter
 from linguary.application.illustration_coordinator import IllustrationCoordinator
 from linguary.application.illustration_dto import (
+    IllustrationAliasDecisionDTO,
+    IllustrationAliasResponse,
+    IllustrationCandidateEventDTO,
     IllustrationCandidatesResponse,
     IllustrationDesignResponse,
     IllustrationDesignTraitDTO,
     IllustrationExtractResponse,
+    IllustrationFactDTO,
+    IllustrationFactScopeResponse,
     IllustrationMentionDTO,
+    IllustrationPromptResponse,
+    IllustrationQuoteAnchorDTO,
+    IllustrationSelectionReasonDTO,
     IllustrationSelectionResponse,
 )
 from linguary.application.illustration_reference import IllustrationReference
@@ -833,3 +841,460 @@ async def test_wp6_diagnostics_rejected_accepted_stale_and_no_overwrite_after_tr
         rec_c = tx.llm_calls.diagnostic_record(attempt_id=calls_c[0].attempt_id)
         assert rec_c is not None
         assert rec_c["metadata"]["decision"] == "stale"
+
+
+# ── WP4 End-to-End Integration Scenario ─────────────────────────────────────
+
+
+async def test_wp4_end_to_end_state_change_locations_depicted_filter_and_punctuation(
+    tmp_path: Path,
+) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    db = tmp_path / "wp4.db"
+    apply_migrations(db)
+    engine = create_database_engine(db)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    Diagnostics(uow, policy=DiagnosticsPolicy())
+
+    book_id = "book-wp4"
+    sec_id = "sec-0"
+    blocks = (
+        DocumentBlock(
+            id="b-0",
+            section_id=sec_id,
+            type=BlockType.PARAGRAPH,
+            order=0,
+            text="A tabby cat sat stiffly on the brick wall along Privet Drive.",
+            source_reference=SourceReference("Text/ch1.xhtml", "p[0]"),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+        DocumentBlock(
+            id="b-1",
+            section_id=sec_id,
+            type=BlockType.PARAGRAPH,
+            order=1,
+            text="The tabby cat sprang down and became Professor McGonagall outside number four, Privet Drive.",
+            source_reference=SourceReference("Text/ch1.xhtml", "p[1]"),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+        DocumentBlock(
+            id="b-2",
+            section_id=sec_id,
+            type=BlockType.PARAGRAPH,
+            order=2,
+            text="Professor McGonagall stood sternly on Privet Drive while Harry was nowhere to be seen.",
+            source_reference=SourceReference("Text/ch1.xhtml", "p[2]"),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+    )
+    doc = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="WP4 Coherence Book"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id=sec_id,
+                document_id=book_id,
+                title="Chapter 1",
+                order=0,
+                source_resource_path="Text/ch1.xhtml",
+                blocks=blocks,
+            ),
+        ),
+    )
+    epub_file = tmp_path / "wp4.epub"
+    epub_file.write_bytes(b"fake-wp4-epub")
+    book = BookRecord(
+        id=book_id,
+        metadata=BookMetadata(title="WP4 Coherence Book"),
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.GLOSSARY_REVIEW,
+        source_epub_path=str(epub_file),
+        created_at=datetime(2026, 11, 26, tzinfo=UTC),
+    )
+    app_settings = AppSettings(
+        llm=LLMSettings(
+            provider="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5-mini",
+            api_key="test-key",
+            max_output_tokens=16384,
+            staged_analysis=True,
+        ),
+        checks=CheckSettings(sequential_analysis=False),
+        reading=ReadingSettings(reader_level="b1", name_translation_strategy="sound"),
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+    )
+    conditions_id = str(uuid4())
+    cond_payload = conditions_payload(book, app_settings, revision=1, profile="content-plan-v3")
+    cond_payload["source_sha256"] = "a" * 64
+    prompts_version = int(cond_payload["versions"]["prompts"])
+    ctx_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        name_translation_policy=NameTranslationPolicy(
+            version=1, strategy=NameTranslationStrategy.SOUND
+        ),
+        reader_level="b1",
+    )
+    model_deps = _pass_model_dependencies(cond_payload)
+    max_frag_blocks = narrative_max_fragment_blocks_for(cond_payload["llm_parameters"])
+
+    with uow.transaction() as tx:
+        tx.books.add(book)
+        tx.documents.save(doc)
+        tx.work.add_conditions(
+            BookConditions(
+                id=conditions_id,
+                book_id=book_id,
+                revision=1,
+                payload=cond_payload,
+                created_at=datetime(2026, 11, 26, tzinfo=UTC),
+            )
+        )
+        narr = NarrativeAnalysisResponse(
+            translation_instructions="Сохраняй стиль.",
+            chapter_summary="A tabby cat transforms into Professor McGonagall on Privet Drive.",
+            glossary_candidates=(),
+            context_facts=(),
+            scenes=(
+                QuotedSceneResponse(
+                    start_block_id="b-0",
+                    end_block_id="b-2",
+                    summary="Превращение на улице.",
+                    location="Тисовая улица",
+                    participants=("Professor McGonagall", "Harry"),
+                    visual_facts=(),
+                    visual_assumptions=(),
+                    continues_previous_scene=False,
+                ),
+            ),
+        )
+        encoded = encode_pass(narr)
+        encoded["input_suggestions"] = []
+        encoded["input_context"] = {
+            "schema_version": 1,
+            "sequential_analysis": False,
+            "parallel_batch": False,
+            "seed_active": False,
+            "user_decisions": [],
+            "nonbinding_suggestions": [],
+            "prompts_version": prompts_version,
+        }
+        sec = doc.ordered_sections[0]
+        input_sha = ctx_builder.narrative_input_sha256(
+            doc,
+            sec,
+            (),
+            (),
+            (),
+            model_dependencies=model_deps,
+            max_fragment_blocks=max_frag_blocks,
+        )
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id="pass-sec-0",
+                book_id=book_id,
+                section_id=sec_id,
+                pass_kind=AnalysisPassKind.NARRATIVE,
+                scope_key="",
+                input_sha256=input_sha,
+                output_sha256=canonical_sha(encoded),
+                conditions_id=conditions_id,
+                attempt_id=None,
+                payload=encoded,
+            )
+        )
+
+    candidates_inputs: list[dict[str, Any]] = []
+    prompt_inputs: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            units = data["units"]
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(
+                        mention_id="m-cat",
+                        name="tabby cat",
+                        entity_kind="person",
+                        alias_of_hint="Professor McGonagall",
+                        quote_block_id="b-0",
+                        quote="A tabby cat sat stiffly",
+                    ),
+                    IllustrationMentionDTO(
+                        mention_id="m-mc",
+                        name="Professor McGonagall",
+                        entity_kind="person",
+                        alias_of_hint="tabby cat",
+                        quote_block_id="b-1",
+                        quote="became Professor McGonagall",
+                    ),
+                    IllustrationMentionDTO(
+                        mention_id="m-harry",
+                        name="Harry",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id="b-2",
+                        quote="Harry was nowhere",
+                    ),
+                    IllustrationMentionDTO(
+                        mention_id="m-street",
+                        name="Privet Drive",
+                        entity_kind="location",
+                        alias_of_hint=None,
+                        quote_block_id="b-0",
+                        quote="along Privet Drive.",
+                    ),
+                    IllustrationMentionDTO(
+                        mention_id="m-house",
+                        name="number four, Privet Drive",
+                        entity_kind="location",
+                        alias_of_hint=None,
+                        quote_block_id="b-1",
+                        quote="outside number four, Privet Drive.",
+                    ),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        fact_id="f-cat-form",
+                        subject_mention_id="m-cat",
+                        temporal_scope="episodic",
+                        back_applicable=False,
+                        reveals_future_spoiler=False,
+                        description_ru="Полосатая кошка на кирпичной стене.",
+                        description_en="Tabby cat on a brick wall.",
+                        quote_block_id="b-0",
+                        quote="A tabby cat sat stiffly on the brick wall",
+                    ),
+                    IllustrationFactDTO(
+                        fact_id="f-transform",
+                        subject_mention_id="m-mc",
+                        temporal_scope="state_change",
+                        back_applicable=False,
+                        reveals_future_spoiler=False,
+                        description_ru="Строгая женщина в шерстяном плаще.",
+                        description_en="Severe woman in a wool cloak.",
+                        quote_block_id="b-1",
+                        quote="became Professor McGonagall",
+                    ),
+                    IllustrationFactDTO(
+                        fact_id="f-harry-scar",
+                        subject_mention_id="m-harry",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Мальчик со шрамом.",
+                        description_en="Boy with a lightning scar.",
+                        quote_block_id="b-2",
+                        quote="Harry was nowhere to be seen",
+                    ),
+                    IllustrationFactDTO(
+                        fact_id="f-street-wall",
+                        subject_mention_id="m-street",
+                        temporal_scope="permanent",
+                        back_applicable=True,
+                        reveals_future_spoiler=False,
+                        description_ru="Тихая пригородная улица с кирпичной стеной.",
+                        description_en="Quiet suburban street with a brick garden wall.",
+                        quote_block_id="b-0",
+                        quote="brick wall along Privet Drive",
+                    ),
+                ),
+                covered_source_unit_ids=tuple(u["source_unit_id"] for u in units),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            decisions = []
+            for p in data["pairs"]:
+                names = {p["left"]["name"], p["right"]["name"]}
+                if names == {"tabby cat", "Professor McGonagall"}:
+                    verdict = "same_entity"
+                else:
+                    verdict = "different"
+                decisions.append(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict=verdict, evidence_fact_ids=()
+                    )
+                )
+            return IllustrationAliasResponse(decisions=tuple(decisions))
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            if data["entity_kind"] == "person":
+                return IllustrationDesignResponse(
+                    entity_id=data["entity_id"],
+                    traits=(
+                        IllustrationDesignTraitDTO(
+                            trait="build",
+                            description_ru="build: Небольшой кошачий силуэт.",
+                            description_en="build: Small tabby cat silhouette.",
+                            assumption_ru="Из ранней формы",
+                        ),
+                        IllustrationDesignTraitDTO(
+                            trait="palette_value",
+                            description_ru="palette_value: Чёткая контрастная тушь.",
+                            description_en="palette_value: Crisp high-contrast ink linework.",
+                            assumption_ru="",
+                        ),
+                    ),
+                )
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="palette_value: Контрастная ночная штриховка.",
+                        description_en="palette_value: High-contrast nocturnal ink hatching.",
+                        assumption_ru="",
+                    ),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            candidates_inputs.append(data)
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-street",
+                        title_ru="Профессор на Тисовой улице",
+                        event_ru="Профессор Макгонагалл строго стоит на Тисовой улице; Гарри рядом нет.",
+                        significance_ru="Ключевая встреча на улице",
+                        event_kind="encounter",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id="b-2", quote="Professor McGonagall stood sternly"
+                            ),
+                        ),
+                        # Absent Harry erroneously listed -> must be filtered out by depicted_entity_ids!
+                        participant_names=("Professor McGonagall", "Harry"),
+                        location_names=("Privet Drive",),
+                    ),
+                ),
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевой кадр"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            facts = data["facts"]
+            if data["entity_name"] == "Professor McGonagall":
+                keep = [f for f in facts if f["temporal_scope"] == "state_change"]
+                excl = [f["fact_id"] for f in facts if f["temporal_scope"] != "state_change"]
+                return IllustrationFactScopeResponse(
+                    event_id=data["event_id"],
+                    applicable_fact_ids=tuple(f["fact_id"] for f in keep),
+                    excluded_fact_ids=tuple(excl),
+                    compact_description_ru="Строгая женщина в шерстяном плаще.",
+                    compact_description_en="Severe woman in a wool cloak.",
+                    complete=True,
+                )
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=tuple(f["fact_id"] for f in facts),
+                excluded_fact_ids=(),
+                compact_description_ru="; ".join(f["description_ru"] for f in facts),
+                compact_description_en="; ".join(f["description_en"] for f in facts),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            prompt_inputs.append(data)
+            mc = next(c for c in data["characters"] if c["name_ru"] == "Professor McGonagall")
+            street = data["locations"][0]
+            mc_palette = f"{mc['entity_id']}:palette_value"
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Professor McGonagall stands sternly on the quiet suburban street..",
+                depicted_entity_ids=(mc["entity_id"], street["entity_id"]),
+                used_fact_ids=tuple(mc["fact_ids"]) + tuple(street["fact_ids"]),
+                used_design_keys=(mc_palette,),
+                assumptions_ru=(),
+            )
+        raise AssertionError(f"unexpected {req.kind}")
+
+    source = IllustrationSource(
+        language_detector=Py3LangidDetector(),
+        source_digest_fn=lambda _p: "a" * 64,
+    )
+    runtime = _LoggedStubRuntime(uow, _handler, debug_payloads=False)
+    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=lambda _: None)
+    reference = IllustrationReference(
+        uow,
+        source=source,
+        runtime=runtime,
+        sleep_fn=lambda _: None,
+        plan_chapter_scopes=chapter.plan_chapter_scopes,
+    )
+    coordinator = IllustrationCoordinator(
+        uow,
+        source=source,
+        plan_reference_scopes=reference.plan_scopes,
+        plan_chapter_scopes=chapter.plan_chapter_scopes,
+    )
+    service = IllustrationService(
+        uow,
+        provider_ready_fn=runtime.is_provider_ready,
+        default_model_fn=runtime.default_model,
+        source_snapshot_fn=source.snapshot,
+        reconcile_in_tx_fn=coordinator.reconcile_in_transaction,
+    )
+    rev = service.save_settings(
+        book_id,
+        expected_revision=0,
+        settings=IllustrationSettings(
+            enabled=True,
+            max_per_chapter=2,
+            model_reference="gpt-5-mini",
+            model_prompts="gpt-5-mini",
+        ),
+    )
+    view0 = await service.prepare(book_id, expected_revision=rev.revision)
+    assert view0.active_generation_id is not None
+    await _drain(uow, book_id, reference, chapter)
+
+    assert len(candidates_inputs) == 1
+    assert "Professor McGonagall" in candidates_inputs[0]["known_characters"]
+    assert "Privet Drive" in candidates_inputs[0]["known_locations"]
+    assert "number four, Privet Drive" in candidates_inputs[0]["known_locations"]
+
+    # Anatomical `build` trait ("Small tabby cat silhouette") was suppressed by state_change before PROMPT!
+    assert len(prompt_inputs) == 1
+    mc_entity_ids = {
+        c["entity_id"]
+        for c in prompt_inputs[0]["characters"]
+        if c["name_ru"] == "Professor McGonagall"
+    }
+    assert len(mc_entity_ids) == 1
+    mc_design_traits = [
+        t["trait"]
+        for t in prompt_inputs[0]["available_design_traits"]
+        if t["entity_id"] in mc_entity_ids
+    ]
+    assert "build" not in mc_design_traits
+    assert "palette_value" in mc_design_traits
+
+    final_view = service.get(book_id, section_id=sec_id)
+    assert final_view.state == "ready"
+    assert final_view.selected_chapter is not None
+    assert len(final_view.selected_chapter.moments) == 1
+    moment = final_view.selected_chapter.moments[0]
+
+    # Locations non-empty and bound to Privet Drive
+    assert [loc.name_ru for loc in moment.location_descriptions] == ["Privet Drive"]
+    # Absent Harry filtered out from BOTH character_descriptions and prompt_en
+    assert [c.name_ru for c in moment.character_descriptions] == ["Professor McGonagall"]
+    assert "Harry" not in moment.prompt_en
+    assert "scar" not in moment.prompt_en.casefold()
+    # Old tabby cat silhouette suppressed and trait prefix stripped
+    assert "tabby cat" not in moment.prompt_en.casefold()
+    assert "palette_value:" not in moment.prompt_en.casefold()
+    assert "Crisp high-contrast ink linework" in moment.prompt_en
+    # Clean punctuation
+    assert ".;" not in moment.prompt_en
+    assert ".." not in moment.prompt_en

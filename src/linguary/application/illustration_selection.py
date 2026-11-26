@@ -24,6 +24,9 @@ from linguary.application.illustration_dto import (
     IllustrationCandidatesResponse,
     IllustrationSelectionResponse,
 )
+from linguary.application.illustration_reference import (
+    display_name_at_position as _display_name_at_position,
+)
 from linguary.application.illustration_source import (
     IllustrationSource,
     IllustrationSourceSnapshot,
@@ -63,17 +66,91 @@ from linguary.domain.illustrations import (
     IllustrationOwnershipError,
     IllustrationPolicy,
     IllustrationReasonCode,
+    IllustrationRegistryKind,
     IllustrationScope,
     IllustrationScopeSpec,
     IllustrationScopeStage,
     IllustrationScopeState,
     IllustrationSettingsRevision,
+    format_position_key,
 )
 from linguary.domain.llm_log import LLMCallStage
 
 _MAX_SHORTLIST = 24
 _MAX_CANDIDATE_BLOCKS_PER_CHUNK = 24
+_MAX_KNOWN_ENTITIES_PER_KIND = 40
 _DEFAULT_ZERO_REASON_RU = "В этой главе не нашлось выразительных визуальных моментов для иллюстрации."
+
+
+def _load_entity_payloads(tx: UnitOfWork, generation_id: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        page, total = tx.illustrations.query_registry_items(
+            generation_id,
+            kind=IllustrationRegistryKind.ENTITY,
+            offset=offset,
+            limit=200,
+        )
+        for item in page:
+            items.append(item.raw_payload())
+        offset += len(page)
+        if offset >= total or not page:
+            break
+    return items
+
+
+def _known_entity_names_for_chapter(
+    tx: UnitOfWork,
+    generation_id: str,
+    *,
+    section_order: int,
+    limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Collect spoiler-free known character and location names visible by the end of `section_order`."""
+    chapter_end_pos = format_position_key(section_order, 999_999, 99_999_999)
+    entities = _load_entity_payloads(tx, generation_id)
+    persons: list[tuple[int, str, str, str]] = []
+    locations: list[tuple[int, str, str, str]] = []
+    for ent in entities:
+        raw_orders = ent.get("section_orders")
+        has_orders = isinstance(raw_orders, (list, tuple))
+        in_current = has_orders and any(
+            type(o) is int and o == section_order for o in raw_orders
+        )
+        first_pos = str(ent.get("first_position_key") or "")
+        if not in_current:
+            if first_pos and first_pos > chapter_end_pos:
+                continue
+            if not first_pos and has_orders and not any(
+                type(o) is int and o <= section_order for o in raw_orders
+            ):
+                continue
+        display_name = _display_name_at_position(ent, chapter_end_pos).strip()
+        if not display_name:
+            continue
+        priority = 0 if in_current else 1
+        row = (priority, first_pos, display_name.casefold(), display_name)
+        kind = str(ent.get("entity_kind", ""))
+        if kind == "person":
+            persons.append(row)
+        elif kind == "location":
+            locations.append(row)
+
+    def _finalize(rows: list[tuple[int, str, str, str]]) -> tuple[str, ...]:
+        rows.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
+        seen: set[str] = set()
+        out: list[str] = []
+        for _, _, key, name in rows:
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(name)
+            if len(out) >= limit_per_kind:
+                break
+        return tuple(out)
+
+    return _finalize(persons), _finalize(locations)
 
 
 def _default_id() -> str:
@@ -411,6 +488,8 @@ def _build_candidate_scope_spec(
     depth: int,
     revision: IllustrationSettingsRevision,
     route_id: str,
+    known_characters: Sequence[str] = (),
+    known_locations: Sequence[str] = (),
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
@@ -423,6 +502,8 @@ def _build_candidate_scope_spec(
         "scene_summary": str(scene_meta.get("scene_summary", "")),
         "location": str(scene_meta.get("location", "")),
         "participants": list(scene_meta.get("participants", ())),
+        "known_characters": list(known_characters),
+        "known_locations": list(known_locations),
         "max_candidates": policy.max_candidates_per_scene,
         "blocks": [thaw(b) for b in blocks_chunk],
     }
@@ -665,6 +746,9 @@ class IllustrationSelection:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
+        known_characters, known_locations = _known_entity_names_for_chapter(
+            tx, generation.id, section_order=entry.order
+        )
 
         specs: list[IllustrationScopeSpec] = []
         for s_idx, scene_meta in enumerate(scene_units):
@@ -684,6 +768,8 @@ class IllustrationSelection:
                         "scene_summary": str(_meta.get("scene_summary", "")),
                         "location": str(_meta.get("location", "")),
                         "participants": list(_meta.get("participants", ())),
+                        "known_characters": list(known_characters),
+                        "known_locations": list(known_locations),
                         "max_candidates": policy.max_candidates_per_scene,
                         "blocks": list(chunk),
                     },
@@ -711,6 +797,8 @@ class IllustrationSelection:
                     depth=0,
                     revision=revision,
                     route_id=route_id,
+                    known_characters=known_characters,
+                    known_locations=known_locations,
                 )
                 reusable = tx.illustrations.find_reusable_scope(
                     generation.book_id,
@@ -728,6 +816,8 @@ class IllustrationSelection:
                         depth=0,
                         revision=revision,
                         route_id=route_id,
+                        known_characters=known_characters,
+                        known_locations=known_locations,
                         reusable=reusable,
                     )
                 specs.append(draft)
@@ -2099,6 +2189,8 @@ class IllustrationSelection:
                 "scene_start_block_id": scope.summary.get("scene_start_block_id", ""),
                 "scene_end_block_id": scope.summary.get("scene_end_block_id", ""),
             }
+            known_characters = [str(n) for n in req_input.get("known_characters", ())]
+            known_locations = [str(n) for n in req_input.get("known_locations", ())]
             return [
                 _build_candidate_scope_spec(
                     section_id=section_id,
@@ -2110,6 +2202,8 @@ class IllustrationSelection:
                     depth=depth + 1,
                     revision=revision,
                     route_id=route_id,
+                    known_characters=known_characters,
+                    known_locations=known_locations,
                 )
                 for idx, half in enumerate((blocks[:mid], blocks[mid:]))
             ]

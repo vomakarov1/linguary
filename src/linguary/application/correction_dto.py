@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 import re
-from typing import Literal
+from typing import Any, Literal
 
 from linguary.application.analysis_merge import find_quote_span
 from linguary.application.llm_dto import (
@@ -258,19 +258,56 @@ def parse_correction_snapshot(payload):
     return CorrectionSnapshotV2(**payload)
 
 
+def _resolve_segment_entries(current: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    """Return canonical 1-based translated segment entries from either LLM or domain shape."""
+    if not isinstance(current, Mapping):
+        return None
+    if 'segments' in current and isinstance(current['segments'], (list, tuple)):
+        return [dict(item) for item in current['segments'] if isinstance(item, Mapping)]
+    if 'segment_translations' in current and isinstance(current['segment_translations'], (list, tuple)):
+        return [
+            {'index': idx, 'translated_text': text}
+            for idx, text in enumerate(current['segment_translations'], start=1)
+            if isinstance(text, str) and text.strip()
+        ]
+    return None
+
+
 def _evidence_value(current, path):
     if not isinstance(path, str) or not re.fullmatch(r'[a-z_]+(?:\.[a-z_0-9]+|\[\d+\])*', path):
         raise LLMPayloadError('неверный путь доказательства исправления')
     parts = path.replace('[', '.').replace(']', '').split('.')
-    if parts[0] not in {'translated_text', 'glossary_hints', 'language_notes'}:
+    if parts[0] not in {'translated_text', 'segments', 'glossary_hints', 'language_notes'}:
         raise LLMPayloadError('доказательство указывает на защищённое поле')
-    allowed = {'glossary_hints': {'original', 'translation', 'note'},
-               'language_notes': {'original_excerpt', 'translated_excerpt', 'note'}}
+    allowed = {
+        'glossary_hints': {'original', 'translation', 'note'},
+        'language_notes': {'original_excerpt', 'translated_excerpt', 'note'},
+        'segments': {'translated_text'},
+    }
     if ((parts[0] == 'translated_text' and len(parts) != 1)
             or len(parts) > 3
             or (len(parts) > 1 and not parts[1].isdigit())
             or (len(parts) == 3 and parts[2] not in allowed.get(parts[0], set()))):
         raise LLMPayloadError('путь доказательства не является читательским полем')
+    if parts[0] == 'segments':
+        entries = _resolve_segment_entries(current)
+        if entries is None:
+            return None
+        if len(parts) == 1:
+            return entries
+        req_idx = int(parts[1])
+        entry = next(
+            (
+                item for item in entries
+                if type(item.get('index')) is int and item.get('index') == req_idx
+            ),
+            None,
+        )
+        if entry is None and req_idx == 0 and entries:
+            entry = entries[0]
+        if entry is None:
+            return None
+        return entry if len(parts) == 2 else entry.get(parts[2])
     value = current
     for part in parts:
         if isinstance(value, Mapping):
@@ -300,12 +337,28 @@ class CurrentQuoteEvidence:
                 yield item
             elif isinstance(item, Mapping):
                 for key, child in item.items():
-                    if key not in {'id', 'block_id', 'source_block_id'}:
+                    if key not in {'id', 'block_id', 'source_block_id', 'index'}:
                         yield from texts(child)
             elif isinstance(item, (tuple, list)):
                 for child in item:
                     yield from texts(child)
-        return any(find_quote_span(text, self.quote) is not None for text in texts(value))
+        if any(find_quote_span(text, self.quote) is not None for text in texts(value)):
+            return True
+        parts = self.field_path.replace('[', '.').replace(']', '').split('.')
+        if parts[0] == 'segments' and len(parts) >= 2:
+            req_idx = int(parts[1])
+            if req_idx >= 1:
+                entries = _resolve_segment_entries(current)
+                if entries is not None and req_idx < len(entries):
+                    fallback_entry = entries[req_idx]
+                    fallback_value = (
+                        fallback_entry if len(parts) == 2 else fallback_entry.get(parts[2])
+                    )
+                    return any(
+                        find_quote_span(text, self.quote) is not None
+                        for text in texts(fallback_value)
+                    )
+        return False
 
 
 @dataclass(frozen=True, slots=True)

@@ -145,6 +145,7 @@ def _valid_json_for(kind: LLMResponseKind) -> dict[str, Any]:
         "contract_version": 1,
         "moment_id": "m1",
         "scene_composition_en": "Wide ink composition of Alice entering the dark hall.",
+        "depicted_entity_ids": ["e1"],
         "used_fact_ids": ["f1"],
         "used_design_keys": ["hair"],
         "assumptions_ru": [],
@@ -607,3 +608,38 @@ def test_illustration_design_trait_allows_empty_assumption_ru_and_keeps_required
     strict = strict_json_schema(schema_for(LLMResponseKind.ILLUSTRATION_DESIGN, contract_version=1))
     trait_def = strict["$defs"]["IllustrationDesignTraitSchema"]
     assert "assumption_ru" in trait_def["required"]
+
+
+def test_selection_candidates_and_prompt_strict_schema_descriptions_and_depicted_entity_ids() -> None:
+    sel_strict = strict_json_schema(
+        schema_for(LLMResponseKind.ILLUSTRATION_SELECTION, contract_version=1)
+    )
+    for field in (
+        "selected_candidate_ids",
+        "selection_reasons_ru",
+        "rejected_reasons_ru",
+        "zero_reason_ru",
+    ):
+        assert sel_strict["properties"][field].get("description")
+    assert "selected_candidate_ids" in sel_strict["properties"]["selection_reasons_ru"]["description"]
+
+    cand_strict = strict_json_schema(
+        schema_for(LLMResponseKind.ILLUSTRATION_CANDIDATES, contract_version=1)
+    )
+    ev_props = cand_strict["$defs"]["IllustrationCandidateEventSchema"]["properties"]
+    assert ev_props["participant_names"].get("description")
+    assert ev_props["location_names"].get("description")
+
+    prompt_strict = strict_json_schema(
+        schema_for(LLMResponseKind.ILLUSTRATION_PROMPT, contract_version=1)
+    )
+    assert "depicted_entity_ids" in prompt_strict["required"]
+    assert prompt_strict["properties"]["depicted_entity_ids"].get("description")
+
+    valid_prompt = _valid_json_for(LLMResponseKind.ILLUSTRATION_PROMPT)
+    dto = parse_payload(LLMResponseKind.ILLUSTRATION_PROMPT, json.dumps(valid_prompt))
+    assert dto.depicted_entity_ids == ("e1",)
+
+    missing_depicted = {k: v for k, v in valid_prompt.items() if k != "depicted_entity_ids"}
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.ILLUSTRATION_PROMPT, json.dumps(missing_depicted))

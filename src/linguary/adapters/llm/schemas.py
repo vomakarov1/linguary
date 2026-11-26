@@ -241,8 +241,9 @@ class BlockResultSchema(_ResponseModel):
         if self.segments:
             if self.translated_text is not None:
                 raise ValueError(
-                    f"для блока {self.source_block_id} с переводами сегментов "
-                    "полный перевод блока недопустим"
+                    "нельзя одновременно заполнять translated_text и segments: "
+                    "для блока без меток сегментов верни перевод в translated_text и segments: []; "
+                    "для блока с метками сегментов верни translated_text: null и заполни segments"
                 )
             return self
         treatment = BlockTreatment(self.treatment)

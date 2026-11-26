@@ -118,15 +118,22 @@ def recommended_unit_max_completion_tokens(
         if isinstance(reasoning_effort, str) and reasoning_effort.strip()
         else None
     )
+    implicit_total = (
+        visible + max(IMPLICIT_REASONING_MIN_TOKENS, implicit_reasoning_tokens * 2)
+        if implicit_reasoning_tokens > 0
+        else visible
+    )
     if effort is not None:
         reserve = REASONING_EFFORT_RESERVE_PCT.get(effort, 0)
         min_reasoning = REASONING_EFFORT_MIN_TOKENS.get(effort, 0)
         pct_total = (visible * 100 + (99 - reserve)) // (100 - reserve) if reserve > 0 else visible
         total = max(pct_total, visible + min_reasoning)
+        if effort != "none" and implicit_reasoning_tokens > 0:
+            total = max(total, implicit_total)
     elif reasoning_max_tokens is not None:
         total = visible + reasoning_max_tokens
     elif implicit_reasoning_tokens > 0:
-        total = visible + max(IMPLICIT_REASONING_MIN_TOKENS, implicit_reasoning_tokens * 2)
+        total = implicit_total
     else:
         total = visible
     if max_output_tokens is not None:

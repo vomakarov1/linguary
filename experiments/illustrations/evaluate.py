@@ -805,7 +805,7 @@ def run_fake_evaluation(fixture_path: Path, output_dir: Path) -> dict[str, Any]:
                         [
                             e
                             for e in entity_items
-                            if "john" in json.dumps(dict(e.payload), ensure_ascii=False).lower()
+                            if "john" in json.dumps(e.raw_payload(), ensure_ascii=False).lower()
                         ]
                     )
                     >= 2,

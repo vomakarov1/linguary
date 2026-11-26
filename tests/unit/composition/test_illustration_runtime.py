@@ -157,6 +157,7 @@ async def test_illustration_runtime_sizer_without_key_route_unavailable_injected
                         "contract_version": 1,
                         "moment_id": "m1",
                         "scene_composition_en": "Ink drawing.",
+                        "depicted_entity_ids": [],
                         "used_fact_ids": [],
                         "used_design_keys": [],
                         "assumptions_ru": [],
@@ -188,14 +189,20 @@ def test_illustration_policy_defaults_backward_compat_and_temperature_validation
     default_policy = IllustrationPolicy()
     assert default_policy.temperature is None
     assert default_policy.max_completion_tokens == 16384
+    assert default_policy.max_repair_turns == 2
     assert default_policy.to_payload()["temperature"] is None
     assert default_policy.to_payload()["max_completion_tokens"] == 16384
+    assert default_policy.to_payload()["max_repair_turns"] == 2
 
     legacy = IllustrationPolicy.from_payload(
         {"temperature": 0.2, "max_completion_tokens": 4096}
     )
     assert legacy.temperature == 0.2
     assert legacy.max_completion_tokens == 4096
+    assert legacy.max_repair_turns == 2
+
+    explicit_one = IllustrationPolicy.from_payload({"max_repair_turns": 1})
+    assert explicit_one.max_repair_turns == 1
 
     zero_temp = IllustrationPolicy.from_payload({"temperature": 0.0})
     assert zero_temp.temperature == 0.0

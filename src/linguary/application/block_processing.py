@@ -507,6 +507,7 @@ class TranslationCall:
                         and getattr(err_violation, "rule_code", None) == "provider_truncated"
                     )
                 )
+                observed_reasoning = 0
                 if is_truncated:
                     err_reasoning = getattr(getattr(error, "usage", None), "reasoning_tokens", None)
                     observed_reasoning = (
@@ -521,6 +522,13 @@ class TranslationCall:
                                 request.max_completion_tokens or IMPLICIT_REASONING_MIN_TOKENS,
                             )
                         )
+                effort_allows_implicit = (
+                    configured_reasoning_max_tokens is None
+                    and (
+                        configured_reasoning_effort is None
+                        or configured_reasoning_effort.strip().lower() != "none"
+                    )
+                )
                 escalated_limit: int | None = None
                 used_implicit_escalation = False
                 if is_truncated and request.max_completion_tokens is not None:
@@ -529,13 +537,12 @@ class TranslationCall:
                     elif (
                         not implicit_token_escalated
                         and unit is not None
-                        and configured_reasoning_effort is None
-                        and configured_reasoning_max_tokens is None
+                        and effort_allows_implicit
                     ):
                         escalated_limit = recommended_unit_max_completion_tokens(
                             sum(len(item.block.text) for item in unit.items),
                             max_output_tokens=None,
-                            reasoning_effort=None,
+                            reasoning_effort=configured_reasoning_effort,
                             reasoning_max_tokens=None,
                             implicit_reasoning_tokens=self._get_implicit_reasoning_floor(),
                         )
@@ -589,7 +596,9 @@ class TranslationCall:
                         if was_stale_gen and existing_reason != 'unknown_outcome':
                             raise RecoveryError('interrupted', recovery[0], original_error=error) from error
                         raise RecoveryError('unknown_outcome', recovery[0], original_error=error) from error
-                    can_escalate_recovery = can_escalate_tokens and not used_implicit_escalation
+                    can_escalate_recovery = can_escalate_tokens and (
+                        not used_implicit_escalation or observed_reasoning > 0
+                    )
                     if can_escalate_recovery:
                         stale_reason = None
                         within_budget = False

@@ -856,8 +856,8 @@ def test_dedupe_texts_and_semicolon_parts() -> None:
         ["Тёмные волосы.", "  тёмные   волосы ", "Серый плащ;", "серый плащ"]
     ) == ("Тёмные волосы.", "Серый плащ;")
     assert _dedupe_semicolon_parts(
-        ["Dark hair; grey cloak.", "dark hair; lantern in hand"]
-    ) == ["Dark hair", "grey cloak.", "lantern in hand"]
+        ["Dark hair; grey cloak.", "dark hair; lantern in hand.;"]
+    ) == ["Dark hair", "grey cloak", "lantern in hand"]
 
 
 async def test_alias_pair_payload_includes_alias_of_hint_and_glossary_concept_id(
@@ -1469,6 +1469,14 @@ def test_filter_non_assumption_placeholders_and_stage_instructions_contracts() -
     )
 
     assert "alias_of_hint" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
+    assert 'entity_kind="location"' in _STAGE_INSTRUCTIONS[IllustrationScopeStage.EXTRACT]
+    assert 'entity_kind="location"' in _STAGE_INSTRUCTIONS[IllustrationScopeStage.ALIAS]
     assert "monochrome_ink" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.FACT_SCOPE]
     assert "monochrome_ink" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.PROMPT]
+    assert "depicted_entity_ids" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.PROMPT]
+    assert "characters[].description_en" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.PROMPT]
     assert "non_permanent_context_only" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.DESIGN]
+    assert "state_change" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.DESIGN]
+    assert "known_characters" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.CANDIDATES]
+    assert "known_locations" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.CANDIDATES]
+    assert "selection_reasons_ru" in _STAGE_INSTRUCTIONS[IllustrationScopeStage.SELECTION]
