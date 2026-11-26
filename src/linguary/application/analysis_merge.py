@@ -5885,7 +5885,8 @@ def normalize_pedagogical_response(
 
     1. `normalize_difficulty_kinds` (all reader levels)
     2. A2 treatment promotion/demotion (only `reader_level == "a2"` and `not english_help`)
-    3. `unify_verse_stanza_treatments` (all reader levels except `english_help`)
+    3. `unify_verse_stanza_treatments` / `unify_homogeneous_list_treatments` + Step 3b demotion
+       of vacuous elementary `GLOSSARY_ONLY` segments in mixed blocks (all levels except `english_help`)
     4. Switch `help_kind` on promoted/demoted model difficulties + A2 forward pruning
     5. Materialize `auto-vocab` difficulties strictly on final `GLOSSARY_ONLY` spans (A2)
     """

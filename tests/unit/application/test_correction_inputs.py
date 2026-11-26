@@ -2747,6 +2747,11 @@ def test_correction_verdict_allows_empty_reason_only_when_confirmed() -> None:
     assert v_legacy.proposal_sha256 is None
     assert v_legacy.reason == ""
 
+    v_legacy_ws = CorrectionVerdict("cand-1", "confirmed", True, True, True, True, "   ")
+    assert v_legacy_ws.confirmed is True
+    assert v_legacy_ws.proposal_sha256 is None
+    assert v_legacy_ws.reason == ""
+
     with pytest.raises(LLMPayloadError):
         CorrectionVerdict("cand-1", "needs_human", True, True, True, True, "")
 

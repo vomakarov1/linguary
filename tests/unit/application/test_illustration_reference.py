@@ -1732,6 +1732,12 @@ async def test_composite_extract_auto_splits_after_validation_repairs_exhausted(
     assert states_by_key["extract:p0000.d1.1"] is IllustrationScopeState.ACCEPTED
     # Parent attempted initial + 1 repair (2 calls with 2 blocks), then children ran with 1 block each.
     assert seen_unit_counts == [2, 2, 1, 1]
+    # Repair prompt after unknown subject_mention_id explicitly instructs using mentions from the same response.
+    repair_req = harness.client.requests[1]
+    assert any(
+        "укажи mention_id из массива mentions этого же ответа" in instr
+        for instr in repair_req.repair_instructions
+    )
 
 
 async def test_composite_extract_auto_splits_after_format_error_repairs_exhausted(

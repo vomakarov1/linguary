@@ -1322,21 +1322,46 @@ async def test_failed_per_section_extract_blocks_prepare_for_other_section(tmp_p
     import pytest
     from linguary.application.illustrations import IllustrationConflictError
 
+    fail_sec1 = True
+
     def _fail_sec1_extract(req: LLMRequest[Any], _call_no: int) -> Any:
         data = json.loads(req.input_text)
-        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT and fail_sec1:
             units = data["units"]
             if any(u["section_id"] == "sec-1" for u in units):
                 raise LLMProviderError("boom", status_code=500)
-        return _ok_extract_and_design(req)
+        base = _ok_extract_and_design(req)
+        if base is not None:
+            return base
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(),
+                zero_reason_ru="Нет яркого кадра.",
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        raise AssertionError(f"unexpected {req.kind}")
 
     _eng, uow, _src, _rt, reference, chapter, _coord, service, book_id, rev = (
         _setup_two_chapter_app(tmp_path, _fail_sec1_extract)
     )
-    await service.prepare(book_id, expected_revision=rev.revision)
+    view0 = await service.prepare(book_id, expected_revision=rev.revision)
+    assert view0.active_generation_id is not None
     await _drain(uow, book_id, reference, chapter)
 
     with pytest.raises(IllustrationConflictError) as exc_info:
         await service.prepare(book_id, expected_revision=rev.revision, section_id="sec-0")
     assert exc_info.value.reason_code == IllustrationReasonCode.GENERATION_CONFLICT.value
+
+    # Book-wide retry requeues the failed per-section EXTRACT and finishes cleanly.
+    fail_sec1 = False
+    await service.retry(
+        book_id,
+        expected_revision=rev.revision,
+        expected_generation_id=view0.active_generation_id,
+    )
+    await _drain(uow, book_id, reference, chapter)
+    recovered = service.get(book_id)
+    assert recovered.state == "ready"
 

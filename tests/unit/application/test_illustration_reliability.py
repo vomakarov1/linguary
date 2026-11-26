@@ -1530,3 +1530,29 @@ def test_resolve_quote_anchor_typographic_and_whitespace_fallback() -> None:
     res_dup = resolve_quote_anchor(blk_dup, '"Wait,"', section_order=0, block_order=1)
     assert res_dup.status == "ambiguous"
 
+    # 4. Combined stripped footnote marker (`origins` gap) + typographic quote/dash folding.
+    from linguary.domain import InlineAnnotation, InlineAnnotationType
+
+    fn_text = "“Strange—very1 strange,” he muttered."
+    blk_fn = DocumentBlock(
+        id="blk-fn",
+        section_id="sec-1",
+        order=2,
+        type=BlockType.PARAGRAPH,
+        text=fn_text,
+        source_reference=SourceReference("ch1.xhtml", "p[2]"),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=fn_text.index("1"),
+                end=fn_text.index("1") + 1,
+                target="ch1.xhtml#fn1",
+            ),
+        ),
+    )
+    res_fn = resolve_quote_anchor(blk_fn, '"Strange-very strange,"', section_order=0, block_order=2)
+    assert res_fn.status == "resolved"
+    assert res_fn.anchor is not None
+    assert res_fn.anchor.quote == "“Strange—very1 strange,”"
+    assert blk_fn.text[res_fn.anchor.start : res_fn.anchor.end] == res_fn.anchor.quote
+

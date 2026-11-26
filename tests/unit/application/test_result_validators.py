@@ -3703,5 +3703,23 @@ def test_mixed_block_glossary_only_violations_name_exact_segment_indices() -> No
     assert f"для блока {block.id} словарная подсказка «First» без note не относится к сегменту GLOSSARY_ONLY" in msg_extra
     assert "(3)" in msg_extra
 
+    # 4. Multiple GLOSSARY_ONLY segments -> lists all indices (2, 4).
+    unit_multi, block_multi = _segmented(
+        ("One.", " Two.", " Three.", " Four."),
+        (
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.GLOSSARY_ONLY,
+        ),
+    )
+    missing_multi = _segmented_response(
+        block_multi,
+        ((1, "Один."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(),
+    )
+    assert "GLOSSARY_ONLY: 2, 4" in str(rejection(missing_multi, unit=unit_multi))
+
 
 
