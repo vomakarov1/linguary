@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from linguary.adapters.llm.schemas import (
     _ResponseModel, GlossaryHintSchema, LanguageNoteSchema,
@@ -128,7 +128,22 @@ class CorrectionVerdictSchema(CorrectionModel):
     evidence_valid: bool
     minimal: bool
     no_semantic_loss: bool
-    reason: str = Field(min_length=1)
+    reason: str
+
+    @model_validator(mode='after')
+    def _require_reason_unless_confirmed(self) -> 'CorrectionVerdictSchema':
+        confirmed = (
+            self.verdict == 'confirmed'
+            and self.error_supported
+            and self.evidence_valid
+            and self.minimal
+            and self.no_semantic_loss
+        )
+        if not confirmed and not self.reason.strip():
+            raise ValueError('для вердикта needs_human нужна непустая причина')
+        if confirmed and not self.reason.strip():
+            self.reason = ''
+        return self
 
 
 class ChapterCorrectionReviewSchema(CorrectionModel):

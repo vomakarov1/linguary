@@ -584,13 +584,15 @@ class CorrectionVerdict:
             or (self.proposal_sha256 is not None and (not isinstance(self.proposal_sha256, str) or len(self.proposal_sha256) != 64))
             or self.verdict not in {'confirmed', 'needs_human'}
             or not isinstance(self.reason, str)
-            or not self.reason.strip()
             or any(
                 type(getattr(self, n)) is not bool
                 for n in ('error_supported', 'evidence_valid', 'minimal', 'no_semantic_loss')
             )
+            or (not self.confirmed and not self.reason.strip())
         ):
             raise LLMPayloadError('неполный вердикт проверки кандидата')
+        if self.confirmed and not self.reason.strip() and self.reason != '':
+            object.__setattr__(self, 'reason', '')
 
     @property
     def confirmed(self):

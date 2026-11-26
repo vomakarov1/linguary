@@ -5343,3 +5343,180 @@ def test_edge_apostrophe_dialect_regex_in_stoplist_and_dialogue_needs_translatio
         BlockTreatment.READ_AS_IS,
     ]
 
+
+def test_normalize_demotes_vacuous_mixed_glossary_segments_across_levels_and_preserves_valid_ones() -> None:
+    """WP2: vacuous elementary GLOSSARY_ONLY segments in mixed blocks demote to READ_AS_IS without breaking valid ones."""
+    from linguary.application.analysis_merge import normalize_pedagogical_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment, BlockType
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить слово."),)
+
+    # b1: Exact Round 4 b#5 failure case — elementary sentence marked GLOSSARY_ONLY with no difficulties.
+    s1 = "Mrs Potter was Mrs Dursley's sister, but they hadn't met for several years. "
+    s2 = "The Dursleys knew that the Potters had a small son, too, but they had never even seen him."
+    b1 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=s1 + s2),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(s1) + len(s2), 1),
+        ),
+    )
+
+    # b2: Mixed block where GLOSSARY_ONLY segment has genuinely non-core A2 vocabulary ("doorstep", "cloak").
+    t1 = "He turned away in the dim corridor. "
+    t2 = "A cloak lay on the doorstep."
+    b2 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=1, text=t1 + t2),
+        segments=(
+            BlockSegment(0, len(t1), 0),
+            BlockSegment(len(t1), len(t1) + len(t2), 1),
+        ),
+    )
+
+    # b3: Mixed block where GLOSSARY_ONLY segment is elementary EXCEPT it owns an explicit model difficulty.
+    u1 = "They walked home quickly. "
+    u2 = "He had never even seen him."
+    b3 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=2, text=u1 + u2),
+        segments=(
+            BlockSegment(0, len(u1), 0),
+            BlockSegment(len(u1), len(u1) + len(u2), 1),
+        ),
+    )
+
+    # b4: Mixed block where GLOSSARY_ONLY segment is non-Latin (must NOT be demoted).
+    v1 = "He read the inscription aloud. "
+    v2 = "Привет мир."
+    b4 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=3, text=v1 + v2),
+        segments=(
+            BlockSegment(0, len(v1), 0),
+            BlockSegment(len(v1), len(v1) + len(v2), 1),
+        ),
+    )
+
+    # b5: Unsegmented GLOSSARY_ONLY block (must NOT be demoted by mixed-block rule).
+    b5 = make_analysis_block(section_id=SECTION_ID, order=4, text="He had a small son, too.")
+
+    # b6: POEM block (untouched by mixed-block demotion, stays unified).
+    p1 = "He had a small son.\n"
+    p2 = "They never saw him."
+    b6 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=5, text=p1 + p2),
+        type=BlockType.POEM,
+        segments=(
+            BlockSegment(0, len(p1), 0),
+            BlockSegment(len(p1), len(p1) + len(p2), 1),
+        ),
+    )
+
+    blocks = (b1, b2, b3, b4, b5, b6)
+    aliases = {f"b{i + 1}": blk.id for i, blk in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse(
+                "b2",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse(
+                "b3",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse(
+                "b4",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse("b5", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse(
+                "b6",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-b3",
+                (QuotedSourceAnchorResponse("b3", "never even"),),
+                "b3",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+        ),
+    )
+
+    for level in ("a2", "b2"):
+        normalized = normalize_pedagogical_response(
+            payload, blocks, aliases, reader_level=level, english_help=False
+        )
+        # b1: vacuous elementary segment 2 demoted to READ_AS_IS; block stays TRANSLATE.
+        assert normalized.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+        assert [s.treatment for s in normalized.treatment_plan[0].segments] == [
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+        ]
+        # b2: non-core vocabulary keeps segment 2 GLOSSARY_ONLY.
+        assert [s.treatment for s in normalized.treatment_plan[1].segments] == [
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+        ]
+        # b3: anchored difficulty keeps segment 2 GLOSSARY_ONLY.
+        assert [s.treatment for s in normalized.treatment_plan[2].segments] == [
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+        ]
+        # b4: non-Latin segment 2 stays GLOSSARY_ONLY.
+        assert [s.treatment for s in normalized.treatment_plan[3].segments] == [
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+        ]
+        # b5: unsegmented block untouched.
+        assert normalized.treatment_plan[4].treatment is BlockTreatment.GLOSSARY_ONLY
+        # b6: poem stanza unified to TRANSLATE by Step 3 and untouched by Step 3b.
+        assert normalized.treatment_plan[5].treatment is BlockTreatment.TRANSLATE
+        assert [s.treatment for s in normalized.treatment_plan[5].segments] == [
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+        ]
+
+    # english_help=True skips Step 3b completely.
+    en_help = normalize_pedagogical_response(
+        payload, blocks, aliases, reader_level="a2", english_help=True
+    )
+    assert [s.treatment for s in en_help.treatment_plan[0].segments] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+
+

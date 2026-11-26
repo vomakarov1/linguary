@@ -5802,6 +5802,76 @@ def _materialize_a2_glossary_difficulties(
     return (*difficulties, *appended)
 
 
+def _demote_vacuous_mixed_glossary_segments(
+    item: TreatmentPlanItemResponse,
+    block: DocumentBlock,
+    difficulties,
+    owners: frozenset[str],
+    *,
+    known_names: Sequence[str] = (),
+) -> TreatmentPlanItemResponse:
+    """Demote elementary GLOSSARY_ONLY sentences in mixed segmented blocks to READ_AS_IS.
+
+    Prevents translation retry loops on mixed TRANSLATE+GLOSSARY_ONLY blocks where a
+    GLOSSARY_ONLY sentence has zero anchored difficulties and purely core A1–A2 vocabulary.
+    """
+    if block.type is BlockType.POEM or not item.segments:
+        return item
+    seg_modes = tuple(seg.treatment for seg in item.segments)
+    if (
+        BlockTreatment.TRANSLATE not in seg_modes
+        or BlockTreatment.GLOSSARY_ONLY not in seg_modes
+    ):
+        return item
+    spans = block.segment_spans
+    sentence_bounds = _sentence_bounds_by_index(block)
+    sentence_segments: dict[int, list[SegmentTreatmentResponse]] = {}
+    for segment in item.segments:
+        if 1 <= segment.index <= len(spans):
+            sentence_segments.setdefault(
+                spans[segment.index - 1].sentence_index, []
+            ).append(segment)
+    nonbasic_reporting = _NONBASIC_REPORTING - _BASIC_REPORTING
+    demoted_sentences: set[int] = set()
+    for sentence_index, segs in sentence_segments.items():
+        if sentence_index not in sentence_bounds:
+            continue
+        if strongest_treatment(seg.treatment for seg in segs) is not BlockTreatment.GLOSSARY_ONLY:
+            continue
+        s_start, s_end = sentence_bounds[sentence_index]
+        s_text = block.text[s_start:s_end]
+        if dominant_script(s_text) != "LATIN":
+            continue
+        if _has_difficulty_in_range(
+            difficulties, owners, block.text, s_start, s_end, whole_block=False
+        ):
+            continue
+        if _has_a2_nonlexical_stoplist(s_text):
+            continue
+        words = expression_words(s_text)
+        if any(word in _SHORT_B1_WORDS or word in nonbasic_reporting for word in words):
+            continue
+        if any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES):
+            continue
+        if _A2_B1_PHRASAL_VERB_RE.search(s_text) is not None:
+            continue
+        if non_core_a2_word_spans(s_text, known_names=known_names):
+            continue
+        demoted_sentences.add(sentence_index)
+    if not demoted_sentences:
+        return item
+    new_segments = tuple(
+        SegmentTreatmentResponse(segment.index, BlockTreatment.READ_AS_IS)
+        if 1 <= segment.index <= len(spans)
+        and spans[segment.index - 1].sentence_index in demoted_sentences
+        and segment.treatment is BlockTreatment.GLOSSARY_ONLY
+        else segment
+        for segment in item.segments
+    )
+    strongest = strongest_treatment(segment.treatment for segment in new_segments)
+    return replace(item, treatment=strongest, segments=new_segments)
+
+
 def normalize_pedagogical_response(
     payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
     blocks: Sequence[DocumentBlock],
@@ -5914,6 +5984,18 @@ def normalize_pedagogical_response(
                     owners for owners in demoted_blocks
                     if not (owners & promoted_full_translate_owners)
                 ]
+        # Step 3b: Demote vacuous elementary GLOSSARY_ONLY segments in mixed segmented blocks.
+        for idx, item in enumerate(items):
+            block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+            if block is None:
+                continue
+            owners = frozenset(part for part in (item.source_block_id, block.id) if part)
+            updated = _demote_vacuous_mixed_glossary_segments(
+                item, block, difficulties, owners, known_names=known_names
+            )
+            if updated is not item:
+                items[idx] = updated
+                changed = True
 
     # Step 4: Compute promoted blocks (from original -> post-step-3 items) and update model difficulties.
     promoted_blocks: list[_PromotedBlock] = []

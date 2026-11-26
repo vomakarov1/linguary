@@ -4107,3 +4107,19 @@ def test_translation_prompts_specify_segment_index_and_a2_glossary_hint_rules() 
     ) in a2_instructions
     assert "отдельные трудные слова и устойчивые словосочетания" in a2_instructions
 
+
+def test_mixed_block_glossary_only_prompt_rules_present() -> None:
+    """WP2: non-frozen analysis and translation prompts explicitly guide GLOSSARY_ONLY segments."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _SEGMENT_TRANSLATION_RULE,
+        _reader_level_treatment_guidance,
+    )
+
+    assert "В смешанном блоке с сегментом GLOSSARY_ONLY" in _CONTENT_PLAN_PROCESSING_V3
+    assert "GLOSSARY_ONLY" in _SEGMENT_TRANSLATION_RULE
+    assert "glossary_hints" in _SEGMENT_TRANSLATION_RULE
+    a2_guidance = _reader_level_treatment_guidance("a2")
+    assert "хотя бы 1 незнакомого слова или выражения выше A2" in a2_guidance
+
+

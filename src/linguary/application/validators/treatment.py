@@ -307,8 +307,14 @@ def _segmented_content(
                 "с режимом TRANSLATE нет перевода"
             )
     if any(mode is BlockTreatment.GLOSSARY_ONLY for mode in modes):
+        glossary_indices = ", ".join(
+            str(i) for i, mode in enumerate(modes, start=1) if mode is BlockTreatment.GLOSSARY_ONLY
+        )
         if not block.glossary_hints:
-            return f"для блока {block.source_block_id} обязательны словарные подсказки"
+            return (
+                f"для блока {block.source_block_id} обязательны словарные подсказки "
+                f"(для сегмента GLOSSARY_ONLY: {glossary_indices})"
+            )
         glossary_texts = tuple(
             item.block.text[spans[i].start : spans[i].end]
             for i, mode in enumerate(modes)
@@ -320,7 +326,7 @@ def _segmented_content(
         ):
             return (
                 f"для блока {block.source_block_id} ни одна словарная подсказка "
-                "не относится к сегменту GLOSSARY_ONLY"
+                f"не относится к сегменту GLOSSARY_ONLY ({glossary_indices})"
             )
         if strict_v3 and any(mode is not BlockTreatment.GLOSSARY_ONLY for mode in modes):
             for hint in block.glossary_hints:
@@ -329,7 +335,8 @@ def _segmented_content(
                 ):
                     return (
                         f"для блока {block.source_block_id} словарная подсказка "
-                        f"«{hint.original}» без note не относится к сегменту GLOSSARY_ONLY"
+                        f"«{hint.original}» без note не относится к сегменту GLOSSARY_ONLY "
+                        f"({glossary_indices})"
                     )
     elif (
         all(mode is BlockTreatment.READ_AS_IS for mode in modes)

@@ -351,12 +351,15 @@ def _setup_two_chapter_app(
         source_digest_fn=lambda _p: "a" * 64,
     )
     runtime = _LoggedStubRuntime(uow, handler, debug_payloads=debug_payloads)
-    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=lambda _: None)
+    async def _noop_sleep(_: float) -> None:
+        return None
+
+    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=_noop_sleep)
     reference = IllustrationReference(
         uow,
         source=source,
         runtime=runtime,
-        sleep_fn=lambda _: None,
+        sleep_fn=_noop_sleep,
         plan_chapter_scopes=chapter.plan_chapter_scopes,
     )
     coordinator = IllustrationCoordinator(
@@ -422,6 +425,17 @@ def _ok_extract_and_design(req: LLMRequest[Any]) -> Any | None:
             facts=(),
             covered_source_unit_ids=tuple(u["source_unit_id"] for u in units),
             complete=True,
+        )
+    if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+        return IllustrationAliasResponse(
+            decisions=tuple(
+                IllustrationAliasDecisionDTO(
+                    pair_id=p["pair_id"],
+                    verdict="same_entity",
+                    evidence_fact_ids=(),
+                )
+                for p in data.get("pairs", ())
+            )
         )
     if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
         return IllustrationDesignResponse(
@@ -1223,12 +1237,15 @@ async def test_wp4_end_to_end_state_change_locations_depicted_filter_and_punctua
         source_digest_fn=lambda _p: "a" * 64,
     )
     runtime = _LoggedStubRuntime(uow, _handler, debug_payloads=False)
-    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=lambda _: None)
+    async def _noop_sleep(_: float) -> None:
+        return None
+
+    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=_noop_sleep)
     reference = IllustrationReference(
         uow,
         source=source,
         runtime=runtime,
-        sleep_fn=lambda _: None,
+        sleep_fn=_noop_sleep,
         plan_chapter_scopes=chapter.plan_chapter_scopes,
     )
     coordinator = IllustrationCoordinator(
@@ -1298,3 +1315,28 @@ async def test_wp4_end_to_end_state_change_locations_depicted_filter_and_punctua
     # Clean punctuation
     assert ".;" not in moment.prompt_en
     assert ".." not in moment.prompt_en
+
+
+async def test_failed_per_section_extract_blocks_prepare_for_other_section(tmp_path: Path) -> None:
+    """WP3: failed per-section EXTRACT (sec-1) blocks prepare(section_id='sec-0') with GENERATION_CONFLICT."""
+    import pytest
+    from linguary.application.illustrations import IllustrationConflictError
+
+    def _fail_sec1_extract(req: LLMRequest[Any], _call_no: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            units = data["units"]
+            if any(u["section_id"] == "sec-1" for u in units):
+                raise LLMProviderError("boom", status_code=500)
+        return _ok_extract_and_design(req)
+
+    _eng, uow, _src, _rt, reference, chapter, _coord, service, book_id, rev = (
+        _setup_two_chapter_app(tmp_path, _fail_sec1_extract)
+    )
+    await service.prepare(book_id, expected_revision=rev.revision)
+    await _drain(uow, book_id, reference, chapter)
+
+    with pytest.raises(IllustrationConflictError) as exc_info:
+        await service.prepare(book_id, expected_revision=rev.revision, section_id="sec-0")
+    assert exc_info.value.reason_code == IllustrationReasonCode.GENERATION_CONFLICT.value
+
