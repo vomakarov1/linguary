@@ -2910,3 +2910,321 @@ def test_book_layout_deduplicates_cultural_reference_and_short_term_notes_withou
     assert _deduplicate_grammar_notes(
         results[b2_sent.id], dropped_difficulty_ids=frozenset(), chapter_num=2, history=history, plan=None
     ) == frozenset()
+
+
+def test_mixed_segment_hint_anchor_consistent_between_dedup_and_layout_units() -> None:
+    """`_hint_segment_index`, `_hint_is_glossary_only`, `_glossary_only_bucket`, and `block_notes` agree."""
+    from linguary.application.layout.book import (
+        _glossary_only_bucket,
+        _hint_is_glossary_only,
+        _hint_segment_index,
+    )
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    def _hint_ev(diff: Difficulty, block_id: str, hint: GlossaryHint) -> HelpEvidence:
+        key = artifact_key(
+            "glossary_hint.translation",
+            block_id,
+            {"original": hint.original, "translation": hint.translation, "note": hint.note},
+        )
+        return HelpEvidence(
+            diff.id, diff.required_points[0].id, "glossary_hint.translation", block_id, key, hint.translation
+        )
+
+    # Prior block puts `cliff` into local dedup window so rescue depends on GLOSSARY_ONLY classification.
+    prior_block = _block("c1", 0, "They saw a cliff ahead.")
+    seg0 = "They fell from the base of the cliff. "
+    seg1 = "Now they lay at the base of the cliff."
+    mixed_text = seg0 + seg1
+    mixed_block = _block(
+        "c1",
+        1,
+        mixed_text,
+        segments=(
+            BlockSegment(0, len(seg0), 0),
+            BlockSegment(len(seg0), len(mixed_text), 1),
+        ),
+    )
+
+    # Unanchored hint `cliff` must bind to GLOSSARY_ONLY segment 1 (and be rescued compactly).
+    cliff_hint = GlossaryHint("cliff", "обрыв", "Крутой склон.")
+    mixed_res = BlockProcessingResult(
+        mixed_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Они упали со скалы.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Они упали со скалы.", None),
+        glossary_hints=(cliff_hint,),
+    )
+    prior_res = BlockProcessingResult(
+        prior_block.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("cliff", "обрыв", "Первое пояснение."),),
+    )
+
+    assert _hint_segment_index(mixed_block, mixed_res, cliff_hint, plan=None) == 1
+    assert _hint_is_glossary_only(mixed_block, mixed_res, cliff_hint, requires_hints=True, plan=None) is True
+
+    doc = _document((_section("c1", 0, "Chapter 1", (prior_block, mixed_block)),))
+    layout = build_book_layout(
+        _inputs(doc, {prior_block.id: prior_res, mixed_block.id: mixed_res}, reader_level="a2")
+    )
+    units = layout.chapters["c1"].units[mixed_block.id]
+    assert len(units) == 2
+    assert units[0].notes == ()
+    assert len(units[1].notes) == 1
+    assert units[1].notes[0].note.term == "cliff"
+    assert units[1].notes[0].note.body == ("обрыв",)
+    assert units[1].notes[0].note.marker_end == mixed_text.rfind("cliff") + len("cliff")
+
+    # Explicit Difficulty anchor in segment 0 keeps hint on segment 0 (TRANSLATE) in both dedup and notes.
+    seg0_anchor = SourceAnchor(
+        mixed_block.id,
+        mixed_text.index("base of the cliff"),
+        mixed_text.index("base of the cliff") + len("base of the cliff"),
+        "base of the cliff",
+    )
+    diff_seg0 = Difficulty(
+        "d-cliff-0",
+        (seg0_anchor,),
+        mixed_block.id,
+        "vocabulary",
+        "useful",
+        "lexical_hint",
+        (RequiredPoint("p-cliff-0", "Explain cliff"),),
+    )
+    plan_seg0 = _plan(diff_seg0)
+    anchored_hint = GlossaryHint("cliff", "обрыв", "Важный образ.")
+    anchored_res = BlockProcessingResult(
+        mixed_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Они упали со скалы.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Они упали со скалы.", None),
+        glossary_hints=(anchored_hint,),
+        content_evidence=ContentEvidence(
+            plan_seg0.sha256,
+            (_hint_ev(diff_seg0, mixed_block.id, anchored_hint),),
+        ),
+    )
+    assert _hint_segment_index(mixed_block, anchored_res, anchored_hint, plan=plan_seg0) == 0
+    assert (
+        _hint_is_glossary_only(mixed_block, anchored_res, anchored_hint, requires_hints=True, plan=plan_seg0)
+        is False
+    )
+    anchored_doc = _document((_section("c1", 0, "Chapter 1", (mixed_block,)),))
+    anchored_layout = build_book_layout(
+        _inputs(
+            anchored_doc,
+            {mixed_block.id: anchored_res},
+            (_analysis("a-c1", "c1", plan=plan_seg0),),
+            reader_level="a2",
+        )
+    )
+    anchored_units = anchored_layout.chapters["c1"].units[mixed_block.id]
+    assert len(anchored_units[0].notes) == 1
+    assert anchored_units[0].notes[0].note.marker_end == mixed_text.index("cliff") + len("cliff")
+    assert anchored_units[1].notes == ()
+
+    # Multi-GLOSSARY_ONLY bucket honors explicit anchor via `_glossary_only_bucket(..., plan=...)`.
+    s0 = "He stared at the cliff. "
+    s1 = "The cliff rose high. "
+    s2 = "The cliff felt cold."
+    tri_text = s0 + s1 + s2
+    tri_block = _block(
+        "c1",
+        2,
+        tri_text,
+        segments=(
+            BlockSegment(0, len(s0), 0),
+            BlockSegment(len(s0), len(s0) + len(s1), 1),
+            BlockSegment(len(s0) + len(s1), len(tri_text), 2),
+        ),
+    )
+    s2_start = tri_text.rfind("cliff")
+    diff_s2 = Difficulty(
+        "d-cliff-2",
+        (SourceAnchor(tri_block.id, s2_start, s2_start + len("cliff"), "cliff"),),
+        tri_block.id,
+        "vocabulary",
+        "useful",
+        "lexical_hint",
+        (RequiredPoint("p-cliff-2", "Explain cliff"),),
+    )
+    plan_s2 = _plan(diff_s2)
+    tri_hint = GlossaryHint("cliff", "обрыв")
+    tri_res = BlockProcessingResult(
+        tri_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Он смотрел на обрыв.",
+        segment_treatments=(
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.GLOSSARY_ONLY,
+            BlockTreatment.GLOSSARY_ONLY,
+        ),
+        segment_translations=("Он смотрел на обрыв.", None, None),
+        glossary_hints=(tri_hint,),
+        content_evidence=ContentEvidence(
+            plan_s2.sha256,
+            (_hint_ev(diff_s2, tri_block.id, tri_hint),),
+        ),
+    )
+    assert _glossary_only_bucket(tri_block, tri_res, tri_hint, plan=plan_s2) == 2
+
+
+def test_common_short_speaker_name_non_spoiler_and_preserves_titled_names() -> None:
+    """Common short names switch only once dominant in `<= section.order`; titled names never shorten."""
+    from linguary.application.layout.book import _extract_short_name_pair
+
+    ch1_nar = _block("c1", 0, "Alexandra looked around. Alexandra sighed. Alexandra stood up.")
+    ch1_dlg = _block("c1", 1, "“Wait for me.”")
+    ch2_nar = _block("c2", 0, "Allie ran fast. Allie jumped. Allie laughed. Allie waved. Allie stopped.")
+    ch2_dlg = _block("c2", 1, "“Over here!”")
+    ch2_vernon = _block(
+        "c2",
+        2,
+        "Vernon shouted. Vernon frowned. Vernon paced. Vernon yelled. Vernon glared.",
+    )
+    ch2_vernon_dlg = _block("c2", 3, "“Get inside!”")
+
+    f1 = _fact("f-ch1", ch1_dlg, "“Wait for me.”", "Alexandra", "inferred")
+    f2 = _fact("f-ch2", ch2_dlg, "“Over here!”", "Alexandra", "inferred")
+    f3 = _fact("f-vernon", ch2_vernon_dlg, "“Get inside!”", "Uncle Vernon", "inferred")
+
+    alex_concept = TermConcept(
+        id="c-alex",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Alexandra",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-alex", "ru", "Александра", TermStatus.APPROVED),),
+        note="Краткое обиходное имя: Allie (Элли).",
+    )
+    vernon_concept = TermConcept(
+        id="c-vernon",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Uncle Vernon",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-vernon", "ru", "дядя Вернон", TermStatus.APPROVED),),
+        note="Кратко: Vernon (Вернон).",
+    )
+
+    sections = (
+        _section("c1", 0, "Chapter 1", (ch1_nar, ch1_dlg)),
+        _section("c2", 1, "Chapter 2", (ch2_nar, ch2_dlg, ch2_vernon, ch2_vernon_dlg)),
+    )
+    doc = _document(sections)
+    analyses = (
+        _analysis("a1", "c1", plan=_plan(facts=(f1,))),
+        _analysis("a2", "c2", plan=_plan(facts=(f2, f3))),
+    )
+    layout = build_book_layout(_inputs(doc, {}, analyses, (alex_concept, vernon_concept)))
+
+    # Chapter 1: Allie has NOT appeared yet -> no spoiler! Must show Александра.
+    ch1_unit = layout.chapters["c1"].units[ch1_dlg.id][0]
+    assert ch1_unit.speaker == "Александра"
+    assert ch1_unit.notes[0].note.body == ("Говорит Александра",)
+
+    # Chapter 2: cumulative count(Allie)=5 > count(Alexandra)=3 -> switches to Элли.
+    ch2_unit = layout.chapters["c2"].units[ch2_dlg.id][0]
+    assert ch2_unit.speaker == "Элли"
+    assert ch2_unit.notes[0].note.body == ("Говорит Элли",)
+
+    # Titled canonical form `Uncle Vernon` is NEVER shortened even when `Vernon` is more frequent.
+    vernon_unit = layout.chapters["c2"].units[ch2_vernon_dlg.id][0]
+    assert vernon_unit.speaker == "дядя Вернон"
+    assert vernon_unit.notes[0].note.body == ("Говорит дядя Вернон",)
+    assert _extract_short_name_pair(vernon_concept, analyses, "ru") is None
+
+    # Verify extraction from (a) parentheses in canonical_source_text and (c) candidate match in note.
+    paren_concept = TermConcept(
+        id="c-paren",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Alexandra (Allie)",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-paren", "ru", "Александра (Элли)", TermStatus.APPROVED),),
+    )
+    assert _extract_short_name_pair(paren_concept, (), "ru") == ("Allie", "Элли")
+
+    cand_concept = TermConcept(
+        id="c-cand",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Alexandra",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-cand", "ru", "Александра", TermStatus.APPROVED),),
+        note="В тексте обычно называют Allie.",
+    )
+    cand_analyses = (
+        _analysis("a-cand", "c1", candidates=(_candidate("a-cand", "cand-allie", "Allie", "Элли"),)),
+    )
+    assert _extract_short_name_pair(cand_concept, cand_analyses, "ru") == ("Allie", "Элли")
+
+    abbr_concept = TermConcept(
+        id="c-abbr",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Alexandra",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-abbr", "ru", "Александра", TermStatus.APPROVED),),
+        note="Allie (сокращ. Элли).",
+    )
+    assert _extract_short_name_pair(abbr_concept, (), "ru") == ("Allie", "Элли")
+
+    # Direct `fact.value == "Allie"` also resolves via the parent concept's short-name pair.
+    from linguary.application.layout.book import _speaker_name
+
+    assert _speaker_name("Allie", (alex_concept,), (), "ru", document=doc, section_order=1) == "Элли"
+
+
+def test_self_identifies_speaker_suppresses_intro_line_but_keeps_generic_phrase() -> None:
+    """Self-introduction lines suppress «Говорит …», including short names; generic nouns never suppress."""
+    from linguary.application.layout.book import _part_self_identifies_speaker
+
+    assert _part_self_identifies_speaker("“My name’s Nick.”", ("Nick",)) is True
+    assert _part_self_identifies_speaker("“My name's Allie.”", ("Alexandra", "Allie")) is True
+    assert _part_self_identifies_speaker("“Call me Allie.”", ("Alexandra", "Allie")) is True
+    assert _part_self_identifies_speaker("“I'm the boy who stayed behind.”", ("the", "boy", "Nick")) is False
+    assert _part_self_identifies_speaker("“I'm the boy who stayed behind.”", ("the boy",)) is False
+
+    nick_intro = _block("c1", 0, "“My name’s Nick.”")
+    allie_intro = _block("c1", 1, "“My name’s Allie.”")
+    generic_line = _block("c1", 2, "“I'm the boy who stayed behind.”")
+    nick_other = _block("c1", 3, "“Let’s go.”")
+
+    facts = (
+        _fact("f-nick-intro", nick_intro, "“My name’s Nick.”", "Nick", "inferred"),
+        _fact("f-allie-intro", allie_intro, "“My name’s Allie.”", "Alexandra", "inferred"),
+        _fact("f-generic", generic_line, "“I'm the boy who stayed behind.”", "Nick (the boy)", "inferred"),
+        _fact("f-nick-other", nick_other, "“Let’s go.”", "Nick", "inferred"),
+    )
+    concepts = (
+        _concept("c-nick", "Nick", "Ник", TermStatus.APPROVED),
+        TermConcept(
+            id="c-alex",
+            book_id=DOCUMENT_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Alexandra",
+            status=TermStatus.APPROVED,
+            variants=(TermVariant("c-alex", "ru", "Александра", TermStatus.APPROVED),),
+            note="Краткое имя: Allie (Элли).",
+        ),
+    )
+    section = _section("c1", 0, "Chapter 1", (nick_intro, allie_intro, generic_line, nick_other))
+    doc = _document((section,))
+    layout = build_book_layout(
+        _inputs(doc, {}, (_analysis("a1", "c1", plan=_plan(facts=facts)),), concepts)
+    )
+    units = layout.chapters["c1"].units
+
+    assert units[nick_intro.id][0].speaker is None
+    assert units[nick_intro.id][0].notes == ()
+    assert units[allie_intro.id][0].speaker is None
+    assert units[allie_intro.id][0].notes == ()
+    assert units[generic_line.id][0].speaker == "Ник"
+    assert units[generic_line.id][0].notes[0].note.body == ("Говорит Ник",)
+    assert units[nick_other.id][0].speaker == "Ник"
+    assert units[nick_other.id][0].notes[0].note.body == ("Говорит Ник",)
+

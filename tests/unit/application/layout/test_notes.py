@@ -1508,3 +1508,177 @@ def test_vocabulary_dedup_key_strips_sibilant_es_without_overstripping_silent_e(
     assert vocabulary_dedup_key("closes") == vocabulary_dedup_key("close") == "close"
     assert vocabulary_dedup_key("faces") == vocabulary_dedup_key("face") == "face"
     assert vocabulary_dedup_key("pages") == vocabulary_dedup_key("page") == "page"
+
+
+def test_mixed_segment_hint_anchor_prefers_glossary_only_segment_and_respects_explicit_anchor() -> None:
+    """`find_hint_marker_end` prioritizes explicit anchors, then `GLOSSARY_ONLY`/`READ_AS_IS` spans."""
+    from linguary.application.layout.notes import find_hint_marker_end
+    from linguary.domain import BlockSegment
+
+    seg0 = "They fell from the base of the cliff. "
+    seg1 = "Now they lay at the base of the cliff."
+    text = seg0 + seg1
+    seg0_span = (0, len(seg0))
+    seg1_span = (len(seg0), len(text))
+    seg0_cliff_end = text.index("cliff") + len("cliff")
+    seg1_cliff_end = text.rfind("cliff") + len("cliff")
+
+    # Priority 2: no explicit anchor -> prefers GLOSSARY_ONLY segment span.
+    assert (
+        find_hint_marker_end(text, "cliff", preferred_spans=(seg1_span,))
+        == seg1_cliff_end
+    )
+    # Priority 1: explicit anchor in segment 0 overrides preferred_spans and locates word inside anchor.
+    wide_anchor_start = text.index("base of the cliff")
+    wide_anchor_end = wide_anchor_start + len("base of the cliff")
+    assert (
+        find_hint_marker_end(
+            text,
+            "cliff",
+            anchor_spans=((wide_anchor_start, wide_anchor_end),),
+            preferred_spans=(seg1_span,),
+        )
+        == seg0_cliff_end
+    )
+    # Priority 1 fallback: when `original` is not verbatim inside anchor, fall back to anchor end.
+    assert (
+        find_hint_marker_end(
+            text,
+            "sheer drop",
+            anchor_spans=((wide_anchor_start, wide_anchor_end),),
+            preferred_spans=(seg1_span,),
+        )
+        == wide_anchor_end
+    )
+    # Fallback to full text when preferred span does not contain the word.
+    assert (
+        find_hint_marker_end(text, "fell", preferred_spans=(seg1_span,))
+        == text.index("fell") + len("fell")
+    )
+
+    # End-to-end via block_notes on a mixed [TRANSLATE, GLOSSARY_ONLY] block:
+    block = DocumentBlock.create(
+        document_id="book-1",
+        section_id="section-1",
+        type=BlockType.PARAGRAPH,
+        order=0,
+        text=text,
+        source_reference=SourceReference(resource_path="chapter.xhtml", structural_path="/body/p[1]"),
+        segments=(
+            BlockSegment(seg0_span[0], seg0_span[1], 0),
+            BlockSegment(seg1_span[0], seg1_span[1], 1),
+        ),
+    )
+    unanchored_hint = GlossaryHint("cliff", "обрыв")
+    unanchored_result = BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Они упали с обрыва.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Они упали с обрыва.", None),
+        glossary_hints=(unanchored_hint,),
+    )
+    unanchored_notes = block_notes(block, unanchored_result, None, ())
+    assert len(unanchored_notes) == 1
+    assert unanchored_notes[0].marker_end == seg1_cliff_end
+
+    # When linked to an explicit Difficulty in segment 0 (TRANSLATE), stays inside segment 0.
+    anchored_hint = GlossaryHint("cliff", "обрыв", "Сложный образ.")
+    diff = _difficulty(
+        block.id,
+        (SourceAnchor(block.id, wide_anchor_start, wide_anchor_end, "base of the cliff"),),
+        "vocabulary",
+        difficulty_id="d-cliff-seg0",
+    )
+    plan = _plan(diff)
+    anchored_result = BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Они упали с обрыва.",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Они упали с обрыва.", None),
+        glossary_hints=(anchored_hint,),
+        content_evidence=ContentEvidence(
+            plan.sha256,
+            (
+                HelpEvidence(
+                    diff.id,
+                    diff.required_points[0].id,
+                    "glossary_hint.translation",
+                    block.id,
+                    _hint_key("glossary_hint.translation", anchored_hint, block.id),
+                    anchored_hint.translation,
+                ),
+            ),
+        ),
+    )
+    anchored_notes = block_notes(block, anchored_result, plan, ())
+    assert len(anchored_notes) == 1
+    assert anchored_notes[0].marker_end == seg0_cliff_end
+
+
+def test_tautological_gloss_dropped_and_real_notes_kept() -> None:
+    """Tautological 1-3 word filler glosses are stripped after translation normalization."""
+    from linguary.application.layout.notes import _is_tautological_gloss
+
+    assert _is_tautological_gloss("взрослые", "взрослые люди") is True
+    assert _is_tautological_gloss("взрослого", "взрослого человека") is True
+    assert _is_tautological_gloss("взрослые", "взрослых людей.") is True
+    assert _is_tautological_gloss("исчезнуть", "исчезновение, действие") is True
+    assert _is_tautological_gloss("взрослые", "взрослые, обычно с точки зрения ребёнка") is False
+    assert _is_tautological_gloss("сказка", "история") is False
+    assert _is_tautological_gloss("вещь", "странная вещь") is False
+
+    text = "The grown-ups never understood the grown-up world and nodded."
+    block = _block(text)
+    h1 = GlossaryHint("grown-ups", "взрослые", "взрослые люди")
+    h2 = GlossaryHint("grown-up", "взрослого", "взрослого человека")
+    h3 = GlossaryHint(
+        "world",
+        "мир",
+        "мир — в книге так называют пограничье между жизнью и смертью",
+    )
+    # `hint.translation` carries a leading headword and past-tense form; tautology check runs after L779.
+    h4 = GlossaryHint("nodded", "to nod — кивнула", "кивнуть, действие")
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(h1, h2, h3, h4),
+    )
+    notes = block_notes(block, result, None, ())
+    by_term = {note.term: note.body for note in notes}
+    assert by_term["grown-ups"] == ("взрослые",)
+    assert by_term["grown-up"] == ("взрослого",)
+    assert by_term["world"] == (
+        "мир",
+        "в книге так называют пограничье между жизнью и смертью",
+    )
+    assert by_term["to nod"] == ("кивнуть",)
+
+    # Signaled difficulties (e.g. wordplay) preserve their note even if short.
+    wp_text = "The grown-ups laughed."
+    wp_block = _block(wp_text)
+    wp_hint = GlossaryHint("grown-ups", "взрослые", "взрослые люди")
+    wp_diff = _difficulty(wp_block.id, (_anchor(wp_block, "grown-ups"),), "wordplay", difficulty_id="d-wp")
+    wp_plan = _plan(wp_diff)
+    wp_result = _result(
+        wp_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(wp_hint,),
+        evidence=ContentEvidence(
+            wp_plan.sha256,
+            (
+                HelpEvidence(
+                    wp_diff.id,
+                    wp_diff.required_points[0].id,
+                    "glossary_hint.note",
+                    wp_block.id,
+                    _hint_key("glossary_hint.note", wp_hint, wp_block.id),
+                    wp_hint.note or "",
+                ),
+            ),
+        ),
+    )
+    wp_notes = block_notes(wp_block, wp_result, wp_plan, ())
+    assert wp_notes[0].body == ("взрослые", "взрослые люди")
+
