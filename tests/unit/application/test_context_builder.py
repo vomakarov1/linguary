@@ -3734,7 +3734,10 @@ def test_narrative_prompt_and_name_policy_p5_t2_rules() -> None:
         assert "said ..." in text
         assert "до конца фрагмента" in text
         assert "без подстановки имени из других глав" in text
-        assert "the freckled boy" in text
+        assert "Iron Hand" in text
+        assert "the freckled boy" not in text
+        assert "the younger boy" in text
+        assert "НЕ включай в `glossary_candidates`" in text
         assert "opaque_name=false" in text
         assert 'applied_method="meaning"' in text
 

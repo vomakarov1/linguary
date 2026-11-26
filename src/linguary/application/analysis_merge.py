@@ -2221,12 +2221,8 @@ def _collect_name_assessment_conflicts(
 _GENERIC_PERSON_CANDIDATE_PATTERNS = (
     re.compile(r"^(?:the|a|an)\s+[a-z]+$"),
     re.compile(r"^(?:the|a|an)\s+[a-z]+\s+of\s+(?:the|a|an|my|his|her|their)\s+[a-z]+$"),
-    re.compile(
-        r"^(?:the|a|an)\s+"
-        r"(?:old|young|little|small|big|tall|short|fat|thin|other|first|last|poor|rich)\s+"
-        r"(?:man|woman|boy|girl|goblin|person|child|stranger|owner|clerk|guard|driver|keeper|wizard|witch)$"
-    ),
 )
+_LOWERCASE_PERSON_TOKEN_RE = re.compile(r"[a-z]+(?:-[a-z]+)*")
 
 
 def _is_generic_person_candidate(source_text: str) -> bool:
@@ -2234,7 +2230,10 @@ def _is_generic_person_candidate(source_text: str) -> bool:
     stripped = source_text.strip()
     if not stripped or any(ch.isupper() for ch in stripped):
         return False
-    return any(pattern.match(stripped) is not None for pattern in _GENERIC_PERSON_CANDIDATE_PATTERNS)
+    if any(pattern.match(stripped) is not None for pattern in _GENERIC_PERSON_CANDIDATE_PATTERNS):
+        return True
+    tokens = _LOWERCASE_PERSON_TOKEN_RE.findall(stripped)
+    return 2 <= len(tokens) <= 4 and tokens[-1] in _GENERIC_PERSON_HEADS
 
 
 def _collect_generic_person_candidates(
@@ -2591,15 +2590,40 @@ _GENERIC_ROLE_PARTICIPANTS = frozenset(
         "сова",
     }
 )
+_GENERIC_PERSON_HEADS = _GENERIC_ROLE_PARTICIPANTS | frozenset(
+    {
+        "kid",
+        "kids",
+        "teen",
+        "teenager",
+        "youth",
+        "figure",
+        "voice",
+        "passenger",
+        "pedestrian",
+        "owner",
+        "clerk",
+        "guard",
+        "driver",
+        "keeper",
+        "stranger",
+        "goblin",
+        "wizard",
+        "witch",
+        "person",
+        "child",
+        "children",
+    }
+)
 
 
-def _matches_glossary_name(
+def _matching_glossary_candidates(
     name: str,
     glossary_candidates: Sequence[GlossaryCandidateResponse],
-) -> bool:
+) -> tuple[GlossaryCandidateResponse, ...]:
     key = glossary_key(name)
     if not key:
-        return False
+        return ()
     cleaned = re.sub(r"\([^)]*\)", " ", name).strip()
     tokens = _SPOILER_TOKEN_RE.findall(cleaned)
     has_any_upper = any(token[:1].isupper() for token in tokens)
@@ -2608,35 +2632,49 @@ def _matches_glossary_name(
     last_base = _strip_possessive_token(tokens[-1]) if tokens else ""
     name_stems = _spoiler_name_stems(name)
     generic_tokens = _GENERIC_ROLE_PARTICIPANTS | _ANONYMOUS_PARTICIPANT_MODIFIERS
+    matched: list[GlossaryCandidateResponse] = []
     for candidate in glossary_candidates:
+        is_match = False
         for form in (candidate.source_text, candidate.suggested_translation):
             if form and glossary_key(form) == key:
-                return True
-        if not name_stems:
-            continue
-        if candidate.type is ConceptType.PERSON:
-            for form in (candidate.source_text, candidate.suggested_translation):
-                if not form:
-                    continue
-                form_stems = _spoiler_name_stems(form)
-                if not form_stems:
-                    continue
-                if not (form_stems <= generic_tokens) and form_stems <= name_stems:
-                    return True
-                if (
-                    not (name_stems <= generic_tokens)
-                    and (has_proper_case or last_base not in _GENERIC_ROLE_PARTICIPANTS)
-                    and name_stems <= form_stems
-                ):
-                    return True
-        else:
-            for form in (candidate.source_text, candidate.suggested_translation):
-                if not form:
-                    continue
-                form_stems = _spoiler_name_stems(form)
-                if len(form_stems) >= 2 and form_stems == name_stems:
-                    return True
-    return False
+                is_match = True
+                break
+        if not is_match and name_stems:
+            if candidate.type is ConceptType.PERSON:
+                for form in (candidate.source_text, candidate.suggested_translation):
+                    if not form:
+                        continue
+                    form_stems = _spoiler_name_stems(form)
+                    if not form_stems:
+                        continue
+                    if not (form_stems <= generic_tokens) and form_stems <= name_stems:
+                        is_match = True
+                        break
+                    if (
+                        not (name_stems <= generic_tokens)
+                        and (has_proper_case or last_base not in _GENERIC_ROLE_PARTICIPANTS)
+                        and name_stems <= form_stems
+                    ):
+                        is_match = True
+                        break
+            else:
+                for form in (candidate.source_text, candidate.suggested_translation):
+                    if not form:
+                        continue
+                    form_stems = _spoiler_name_stems(form)
+                    if len(form_stems) >= 2 and form_stems == name_stems:
+                        is_match = True
+                        break
+        if is_match:
+            matched.append(candidate)
+    return tuple(matched)
+
+
+def _matches_glossary_name(
+    name: str,
+    glossary_candidates: Sequence[GlossaryCandidateResponse],
+) -> bool:
+    return bool(_matching_glossary_candidates(name, glossary_candidates))
 
 
 def _role_head_base(bases: Sequence[str]) -> str:
@@ -2740,7 +2778,12 @@ def _first_name_block_index(
     block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]],
     glossary_candidates: Sequence[GlossaryCandidateResponse],
 ) -> int | None:
-    matches_glossary = _matches_glossary_name(name, glossary_candidates)
+    matched_glossary = _matching_glossary_candidates(name, glossary_candidates)
+    matches_glossary = bool(matched_glossary)
+    matches_capitalized_glossary = any(
+        any(ch.isupper() for ch in candidate.source_text)
+        for candidate in matched_glossary
+    )
     if _is_non_name_role_label(name, matches_glossary=matches_glossary):
         return None
     name_key = glossary_key(name)
@@ -2764,17 +2807,21 @@ def _first_name_block_index(
     for form in forms:
         stems.update(_spoiler_name_stems(form))
         titles.update(_title_tokens(form))
-    non_anonymous_stems = stems - _ANONYMOUS_PARTICIPANT_MODIFIERS
-    if non_anonymous_stems:
-        stems = non_anonymous_stems
-    if not stems:
-        return None
-    name_titles = frozenset(titles)
     cleaned_name = re.sub(r"\([^)]*\)", " ", name).strip()
     name_tokens = _SPOILER_TOKEN_RE.findall(cleaned_name)
     all_lowercase = bool(name_tokens) and not any(
         token[:1].isupper() for token in name_tokens
     )
+    non_anonymous_stems = stems - _ANONYMOUS_PARTICIPANT_MODIFIERS
+    if non_anonymous_stems:
+        stems = non_anonymous_stems
+    if not all_lowercase and len(stems) >= 2:
+        distinctive = stems - _GENERIC_ROLE_PARTICIPANTS
+        if distinctive:
+            stems = distinctive
+    if not stems:
+        return None
+    name_titles = frozenset(titles)
     lowercase_non_glossary = all_lowercase and not matches_glossary
     single_capitalized_generic = (
         len(name_tokens) == 1
@@ -2782,9 +2829,11 @@ def _first_name_block_index(
         and _strip_possessive_token(name_tokens[0]) in _GENERIC_ROLE_PARTICIPANTS
         and not matches_glossary
     )
-    prefer_capitalized = (all_lowercase and matches_glossary) or any(
-        _prefers_capitalized_name_match(form) for form in forms
-    )
+    prefer_capitalized = (
+        all_lowercase
+        and matches_capitalized_glossary
+        and not _is_generic_person_candidate(name)
+    ) or any(_prefers_capitalized_name_match(form) for form in forms)
 
     def scan(*, require_capitalized: bool) -> int | None:
         for idx, tokens in enumerate(block_tokens):

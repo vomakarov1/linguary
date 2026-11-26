@@ -294,3 +294,166 @@ def test_retry_task_allows_complete_roots_and_rejects_in_flight_or_exhausted_sco
         _retry(unit_of_work, sent_task)
     with pytest.raises(RetryTaskError):
         _retry(unit_of_work, exhausted_task)
+
+
+def test_retry_task_analyze_chapter_fragment_cache_cleared_on_validation_preserved_on_transient(unit_of_work):
+    from linguary.domain import (
+        AnalysisPassKind,
+        AnalysisPassResult,
+        BlockType,
+        CanonicalDocument,
+        DocumentBlock,
+        DocumentSection,
+        SourceReference,
+        SupportStatus,
+    )
+
+    book_id = 'book-analyze-retry'
+    _open_book(unit_of_work, book_id)
+    with unit_of_work.transaction() as tx:
+        tx.documents.save(
+            CanonicalDocument(
+                id=book_id,
+                metadata=BookMetadata(title='Synthetic'),
+                source_language='en',
+                target_language='ru',
+                sections=tuple(
+                    DocumentSection(
+                        id=sec_id,
+                        document_id=book_id,
+                        title=sec_id,
+                        order=idx,
+                        source_resource_path=f'{sec_id}.xhtml',
+                        blocks=(
+                            DocumentBlock.create(
+                                document_id=book_id,
+                                section_id=sec_id,
+                                type=BlockType.PARAGRAPH,
+                                order=0,
+                                text='Sample text.',
+                                source_reference=SourceReference(f'{sec_id}.xhtml', '/body/p[1]'),
+                                support_status=SupportStatus.SUPPORTED,
+                            ),
+                        ),
+                    )
+                    for idx, sec_id in enumerate(
+                        ('section-transient', 'section-validation', 'section-other')
+                    )
+                ),
+            )
+        )
+
+    def _seed_passes(tx, book_id: str, section_id: str) -> None:
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=str(uuid4()),
+                book_id=book_id,
+                section_id=section_id,
+                pass_kind=AnalysisPassKind.NARRATIVE,
+                scope_key='',
+                input_sha256='1' * 64,
+                output_sha256='2' * 64,
+                conditions_id=None,
+                attempt_id=None,
+                payload={'schema_version': 1, 'pass_kind': 'narrative'},
+            )
+        )
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=str(uuid4()),
+                book_id=book_id,
+                section_id=section_id,
+                pass_kind=AnalysisPassKind.NARRATIVE,
+                scope_key='frag:0',
+                input_sha256='3' * 64,
+                output_sha256='4' * 64,
+                conditions_id=None,
+                attempt_id=None,
+                payload={'schema_version': 1, 'pass_kind': 'narrative'},
+            )
+        )
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=str(uuid4()),
+                book_id=book_id,
+                section_id=section_id,
+                pass_kind=AnalysisPassKind.PEDAGOGICAL,
+                scope_key='frag:0',
+                input_sha256='5' * 64,
+                output_sha256='6' * 64,
+                conditions_id=None,
+                attempt_id=None,
+                payload={'schema_version': 1, 'pass_kind': 'pedagogical'},
+            )
+        )
+
+    # 1. ErrorType.TRANSIENT on ANALYZE_CHAPTER preserves fragment cache.
+    with unit_of_work.transaction() as tx:
+        _seed_passes(tx, 'book-analyze-retry', 'section-transient')
+        transient_task = ProcessingTask(
+            str(uuid4()),
+            'book-analyze-retry',
+            TaskType.ANALYZE_CHAPTER,
+            'section-transient',
+            status=TaskStatus.FAILED,
+            attempts=1,
+            last_error=TaskError(ErrorType.TRANSIENT, 'сетевой сбой', 'timeout'),
+        )
+        tx.tasks.add(transient_task)
+
+    restarted_transient = _retry(unit_of_work, transient_task)
+    assert restarted_transient.status is TaskStatus.PENDING
+    with unit_of_work.transaction() as tx:
+        passes_transient = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-transient')
+        assert {(p.pass_kind, p.scope_key) for p in passes_transient} == {
+            (AnalysisPassKind.NARRATIVE, ''),
+            (AnalysisPassKind.NARRATIVE, 'frag:0'),
+            (AnalysisPassKind.PEDAGOGICAL, 'frag:0'),
+        }
+
+    # 2. ErrorType.VALIDATION on ANALYZE_CHAPTER clears fragment passes for both kinds, keeping whole-chapter NARRATIVE.
+    with unit_of_work.transaction() as tx:
+        _seed_passes(tx, 'book-analyze-retry', 'section-validation')
+        validation_task = ProcessingTask(
+            str(uuid4()),
+            'book-analyze-retry',
+            TaskType.ANALYZE_CHAPTER,
+            'section-validation',
+            status=TaskStatus.FAILED,
+            attempts=1,
+            last_error=TaskError(ErrorType.VALIDATION, 'ошибка слияния', 'spoiler_name_leak'),
+        )
+        tx.tasks.add(validation_task)
+
+    restarted_validation = _retry(unit_of_work, validation_task)
+    assert restarted_validation.status is TaskStatus.PENDING
+    with unit_of_work.transaction() as tx:
+        passes_validation = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-validation')
+        assert [(p.pass_kind, p.scope_key) for p in passes_validation] == [
+            (AnalysisPassKind.NARRATIVE, ''),
+        ]
+
+    # 3. Non-ANALYZE_CHAPTER task with VALIDATION error does not touch analysis fragment passes.
+    with unit_of_work.transaction() as tx:
+        _seed_passes(tx, 'book-analyze-retry', 'section-other')
+        other_task = ProcessingTask(
+            str(uuid4()),
+            'book-analyze-retry',
+            TaskType.PROCESS_TRANSLATION_UNIT,
+            'section-other',
+            status=TaskStatus.FAILED,
+            attempts=1,
+            last_error=TaskError(ErrorType.VALIDATION, 'ошибка перевода', 'detail'),
+        )
+        tx.tasks.add(other_task)
+
+    restarted_other = _retry(unit_of_work, other_task)
+    assert restarted_other.status is TaskStatus.PENDING
+    with unit_of_work.transaction() as tx:
+        passes_other = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-other')
+        assert {(p.pass_kind, p.scope_key) for p in passes_other} == {
+            (AnalysisPassKind.NARRATIVE, ''),
+            (AnalysisPassKind.NARRATIVE, 'frag:0'),
+            (AnalysisPassKind.PEDAGOGICAL, 'frag:0'),
+        }
+

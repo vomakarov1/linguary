@@ -1462,11 +1462,11 @@ def test_validate_narrative_name_assessment_conflicts_policy_meaning_descriptive
         assert desc_exc.value.violation.rule_code == 'name_assessment_conflict'
         assert all_seven in str(desc_exc.value)
 
-    # MEANING + opaque_name=False on 'the freckled boy' passes.
+    # MEANING + opaque_name=False on a capitalized descriptive nickname ('Iron Hand') passes.
     good_descriptive = GlossaryCandidateResponse(
-        source_text='the freckled boy',
+        source_text='Iron Hand',
         type=ConceptType.PERSON,
-        suggested_translation='веснушчатый мальчик',
+        suggested_translation='Железная Рука',
         confidence=0.9,
         model_flagged_review=False,
         name_translation_assessment=NameTranslationAssessment(
@@ -1482,6 +1482,30 @@ def test_validate_narrative_name_assessment_conflicts_policy_meaning_descriptive
         ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
         name_translation_policy=meaning_policy,
     )
+
+    # Lowercase generic person phrase ('the freckled boy') is rejected even with MEANING + opaque_name=False.
+    lowercase_descriptive = GlossaryCandidateResponse(
+        source_text='the freckled boy',
+        type=ConceptType.PERSON,
+        suggested_translation='веснушчатый мальчик',
+        confidence=0.9,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.MEANING, True, (), 'Описательное прозвище.', opaque_name=False,
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as generic_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                glossary_candidates=(lowercase_descriptive,),
+                scenes=(scene('b1', 'b3'),),
+            ),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            name_translation_policy=meaning_policy,
+        )
+    assert generic_exc.value.violation is not None
+    assert generic_exc.value.violation.rule_code == 'generic_person_candidate'
 
 
 def test_validate_narrative_speaker_subject_anchor_must_intersect_quoted_dialogue():
@@ -1749,12 +1773,17 @@ def test_validate_narrative_rejects_generic_lowercase_person_candidates():
 
     for generic in (
         'the boy',
+        'the baker',
+        'the giant',
         'the goblin',
         'a stranger',
         'the owner of the hotel',
         'a member of his family',
         'the old man',
         'an old wizard',
+        'younger boy',
+        'the freckled boy',
+        'the freckled kid',
     ):
         cand = GlossaryCandidateResponse(
             source_text=generic,
@@ -1775,7 +1804,7 @@ def test_validate_narrative_rejects_generic_lowercase_person_candidates():
         assert exc_info.value.violation is not None
         assert exc_info.value.violation.rule_code == 'generic_person_candidate'
 
-    # Allowed: capitalized particles/names, non-PERSON type, and 'the freckled boy' (MEANING + opaque_name=False).
+    # Allowed: capitalized particles/names, non-PERSON type, and capitalized descriptive nicknames ('Iron Hand', 'Chocolate Boy').
     allowed = (
         GlossaryCandidateResponse(
             source_text='van Helsing',
@@ -1806,9 +1835,19 @@ def test_validate_narrative_rejects_generic_lowercase_person_candidates():
             model_flagged_review=False,
         ),
         GlossaryCandidateResponse(
-            source_text='the freckled boy',
+            source_text='Iron Hand',
             type=ConceptType.PERSON,
-            suggested_translation='веснушчатый мальчик',
+            suggested_translation='Железная Рука',
+            confidence=0.9,
+            model_flagged_review=False,
+            name_translation_assessment=NameTranslationAssessment(
+                NameTranslationMethod.MEANING, True, (), 'Описательное прозвище.', opaque_name=False,
+            ),
+        ),
+        GlossaryCandidateResponse(
+            source_text='Chocolate Boy',
+            type=ConceptType.PERSON,
+            suggested_translation='Шоколадный Мальчик',
             confidence=0.9,
             model_flagged_review=False,
             name_translation_assessment=NameTranslationAssessment(
@@ -1872,6 +1911,114 @@ def test_find_quote_span_matches_ellipsis_and_three_dots_both_ways() -> None:
     assert find_quote_span("He paused.. then spoke.", "He paused… then spoke") is None
     assert find_quote_span("He paused--- then spoke.", "He paused... then spoke") is None
     assert find_quote_span("He pausedabc then spoke.", "He paused… then spoke") is None
+
+
+def test_generic_person_candidate_filter_broadens_lowercase_heads() -> None:
+    from linguary.application.analysis_merge import _is_generic_person_candidate
+
+    for generic in (
+        "younger boy",
+        "the freckled boy",
+        "the freckled kid",
+        "the baker",
+        "the giant",
+        "the red-haired younger boy",
+        "a nervous passenger",
+        "the silent figure",
+        "the owner of the hotel",
+    ):
+        assert _is_generic_person_candidate(generic) is True, generic
+
+    for allowed in (
+        "Chocolate Boy",
+        "Iron Hand",
+        "The boy",
+        "van Helsing",
+        "the dark voldemort",
+        "boy",
+    ):
+        assert _is_generic_person_candidate(allowed) is False, allowed
+
+
+def test_spoiler_monotonic_first_name_block_index_with_later_capitalized_nickname() -> None:
+    """Adding a later block with capitalized 'Chocolate Boy' must not shift lowercase generic match forward."""
+    from linguary.application.analysis_merge import (
+        _extract_block_spoiler_tokens,
+        _first_name_block_index,
+    )
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+
+    fragment_texts = {
+        "b0": "Chapter 2.",
+        "b1": "Fog covered the road.",
+        "b2": "The younger freckled boy looked down at the cracked asphalt.",
+        "b3": "He stepped carefully onto the gravel.",
+    }
+    full_texts = {
+        **fragment_texts,
+        **{f"b{i}": f"Filler line {i}." for i in range(4, 38)},
+        "b38": "Everyone in the forest called him Chocolate Boy.",
+    }
+    frag_tokens = _extract_block_spoiler_tokens(tuple(fragment_texts), fragment_texts)
+    full_tokens = _extract_block_spoiler_tokens(tuple(full_texts), full_texts)
+
+    glossary_with_lowercase = (
+        GlossaryCandidateResponse(
+            source_text="the freckled boy",
+            type=ConceptType.PERSON,
+            suggested_translation="веснушчатый мальчик",
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text="Chocolate Boy",
+            type=ConceptType.PERSON,
+            suggested_translation="Шоколадный Мальчик",
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+    )
+
+    # Monotonicity: 'the freckled boy' matches at block 2 both before and after block 38 is appended.
+    assert _first_name_block_index("the freckled boy", frag_tokens, glossary_with_lowercase) == 2
+    assert _first_name_block_index("the freckled boy", full_tokens, glossary_with_lowercase) == 2
+
+    # Even if a capitalized 'The Freckled Boy' candidate existed, lowercase generic phrase stays at block 2.
+    glossary_with_cap = (
+        GlossaryCandidateResponse(
+            source_text="The Freckled Boy",
+            type=ConceptType.PERSON,
+            suggested_translation="Веснушчатый Мальчик",
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+    )
+    assert _first_name_block_index("the freckled boy", full_tokens, glossary_with_cap) == 2
+
+    # Capitalized 'Chocolate Boy' strips generic head 'boy' and resolves to block 38 (not block 2).
+    assert _first_name_block_index("Chocolate Boy", full_tokens, glossary_with_lowercase) == 38
+
+    # Lowercase 'younger boy' keeps 'boy' and is treated as a neutral role label (no spoiler).
+    assert _first_name_block_index("younger boy", full_tokens, glossary_with_lowercase) is None
+
+    # Regression guard: 'the dark voldemort' with capitalized glossary 'Voldemort' still prefers capitalized match.
+    spoiler_texts = {
+        "b0": "A dark shadow passed by the door.",
+        "b1": "Then Voldemort spoke from the fog.",
+    }
+    spoiler_tokens = _extract_block_spoiler_tokens(("b0", "b1"), spoiler_texts)
+    voldemort_glossary = (
+        GlossaryCandidateResponse(
+            source_text="Voldemort",
+            type=ConceptType.PERSON,
+            suggested_translation="Волдеморт",
+            confidence=0.98,
+            model_flagged_review=False,
+        ),
+    )
+    assert _first_name_block_index("the dark voldemort", spoiler_tokens, voldemort_glossary) == 1
+
 
 
 

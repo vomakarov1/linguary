@@ -41,6 +41,7 @@ from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
     DEFAULT_MAX_FRAGMENT_CHARS,
     DEFAULT_MAX_FRAGMENT_WEIGHT,
+    AnalysisMergeError,
     ChapterFragment,
     FragmentAnalysis,
     before_you_read_entries,
@@ -572,21 +573,27 @@ class AnalyzeChapter:
                 known_names=known_names)
             attempts += count
             usages.append(usage)
-            narrative, scenes, facts = merge_narrative_fragments(
-                narrative_parts, section_blocks=section.ordered_blocks
-            )
-            enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
-            merged_name_policy = self._name_translation_policy if enforce_v7 else None
-            scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
-                ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
-                mandatory_facts=glossary_context_constraints(concepts),
-                blocks=blocks, source_offsets=True,
-                source_language=document.source_language,
-                target_language=document.target_language,
-                language_detector=self._language_detector,
-                known_names=known_names,
-                name_translation_policy=merged_name_policy,
-                enforce_strict_gender_subject=enforce_v7)
+            try:
+                narrative, scenes, facts = merge_narrative_fragments(
+                    narrative_parts, section_blocks=section.ordered_blocks
+                )
+                enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
+                merged_name_policy = self._name_translation_policy if enforce_v7 else None
+                scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
+                    ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
+                    mandatory_facts=glossary_context_constraints(concepts),
+                    blocks=blocks, source_offsets=True,
+                    source_language=document.source_language,
+                    target_language=document.target_language,
+                    language_detector=self._language_detector,
+                    known_names=known_names,
+                    name_translation_policy=merged_name_policy,
+                    enforce_strict_gender_subject=enforce_v7)
+            except (AnalysisMergeError, DomainError, ResultValidationError):
+                self._clear_fragment_passes(
+                    command.book_id, command.section_id, AnalysisPassKind.NARRATIVE
+                )
+                raise
             seq_active, par_batch, seed_active = self._loaded_run_mode.get()
             raw_versions = dependencies.get('versions') if isinstance(dependencies, Mapping) else None
             raw_prompts_v = raw_versions.get('prompts') if isinstance(raw_versions, Mapping) else None
@@ -685,25 +692,31 @@ class AnalyzeChapter:
                 prior_chapter_topics=prior_chapter_topics)
             attempts += count
             usages.append(usage)
-            merged = merge_chapter_analysis(parts, id=self._id_factory(), section_id=section.id,
-                expected_block_ids=tuple(aliases),
-                glossary_confidence_threshold=self._glossary_confidence_threshold,
-                id_factory=self._id_factory)
-            reader_level = 'a2' if self._is_a2_reader() else self._context_builder._reader_level
-            pedagogical = pedagogical_response(merged, reader_level=reader_level)
-            if reader_level == 'a2' and len(parts) > 1:
-                pedagogical = replace(
-                    pedagogical,
-                    reader_chapter_summary=select_staged_a2_summary(
-                        parts, narrative_summary=narrative.chapter_summary
-                    ),
+            try:
+                merged = merge_chapter_analysis(parts, id=self._id_factory(), section_id=section.id,
+                    expected_block_ids=tuple(aliases),
+                    glossary_confidence_threshold=self._glossary_confidence_threshold,
+                    id_factory=self._id_factory)
+                reader_level = 'a2' if self._is_a2_reader() else self._context_builder._reader_level
+                pedagogical = pedagogical_response(merged, reader_level=reader_level)
+                if reader_level == 'a2' and len(parts) > 1:
+                    pedagogical = replace(
+                        pedagogical,
+                        reader_chapter_summary=select_staged_a2_summary(
+                            parts, narrative_summary=narrative.chapter_summary
+                        ),
+                    )
+                analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
+                                                 accumulated, user_decisions,
+                                                 concepts=concepts,
+                                                 cumulative_words_before=cumulative_words,
+                                                 known_names=pedagogical_known_names,
+                                                 prior_chapter_topics=prior_chapter_topics)
+            except (AnalysisMergeError, DomainError, ResultValidationError):
+                self._clear_fragment_passes(
+                    command.book_id, command.section_id, AnalysisPassKind.PEDAGOGICAL
                 )
-            analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
-                                             accumulated, user_decisions,
-                                             concepts=concepts,
-                                             cumulative_words_before=cumulative_words,
-                                             known_names=pedagogical_known_names,
-                                             prior_chapter_topics=prior_chapter_topics)
+                raise
             self._save_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash,
                             pedagogical, expected_conditions_id)
         else:
@@ -1294,6 +1307,15 @@ class AnalyzeChapter:
                 if attempt.state == 'validated':
                     finalize_response(self._unit_of_work, response, 'accepted', transaction=tx)
         return saved
+
+    def _clear_fragment_passes(
+        self, book_id: str, section_id: str, pass_kind: AnalysisPassKind
+    ) -> None:
+        """Clear cached intermediate fragment passes for one section/pass_kind after merge failure."""
+        with self._unit_of_work.transaction() as tx:
+            delete_fn = getattr(tx.analyses, 'delete_fragment_passes_for_section', None)
+            if callable(delete_fn):
+                delete_fn(book_id, section_id, pass_kind)
 
     def _front_matter_analysis(
         self, section: DocumentSection, blocks: Sequence[DocumentBlock], *, id: str
@@ -2534,6 +2556,36 @@ def _merge_fragment_candidates(
     return tuple(merged)
 
 
+_A2_NOTE_PROPER_NAME_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
+_A2_NOTE_PROPER_NAME_STOPWORDS = frozenset({
+    "The",
+    "She",
+    "He",
+    "Her",
+    "His",
+    "They",
+    "This",
+    "That",
+    "From",
+    "Also",
+    "Only",
+    "Note",
+    "Name",
+    "Short",
+    "See",
+})
+
+
+def _extract_latin_proper_names_from_text(text: str | None) -> tuple[str, ...]:
+    if not isinstance(text, str) or not text.strip():
+        return ()
+    return tuple(
+        token
+        for token in _A2_NOTE_PROPER_NAME_RE.findall(text)
+        if token not in _A2_NOTE_PROPER_NAME_STOPWORDS
+    )
+
+
 def _a2_vocab_known_names_from_glossary(
     accumulated: Sequence[GlossaryCandidate],
     user_decisions: Sequence[TermConcept],
@@ -2542,8 +2594,12 @@ def _a2_vocab_known_names_from_glossary(
     """Collect proper-name source forms (PERSON/PLACE/ORGANIZATION) for A2 vocabulary filtering."""
     names: list[str] = []
     for candidate in accumulated:
-        if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+        if candidate.type not in _A2_VOCAB_NAME_TYPES:
+            continue
+        if candidate.source_text.strip():
             names.append(candidate.source_text.strip())
+        names.extend(_extract_latin_proper_names_from_text(getattr(candidate, "note", None)))
+        names.extend(_extract_latin_proper_names_from_text(getattr(candidate, "description", None)))
     for concept in (*user_decisions, *suggestions):
         if concept.type not in _A2_VOCAB_NAME_TYPES:
             continue
@@ -2553,6 +2609,7 @@ def _a2_vocab_known_names_from_glossary(
             source_text = getattr(variant, "source_text", None)
             if isinstance(source_text, str) and source_text.strip():
                 names.append(source_text.strip())
+        names.extend(_extract_latin_proper_names_from_text(getattr(concept, "note", None)))
     return tuple(dict.fromkeys(names))
 
 
@@ -2561,14 +2618,26 @@ def _a2_vocab_known_names_with_narrative(
     narrative: NarrativeAnalysisResponse | None = None,
     scenes: Sequence[Scene] = (),
 ) -> tuple[str, ...]:
-    """Combine prior proper-name source forms with current chapter proper-name candidates and participants."""
+    """Combine prior proper-name source forms with current chapter proper-name candidates, facts, and participants."""
     names: list[str] = [
         name.strip() for name in base_names if isinstance(name, str) and name.strip()
     ]
     if narrative is not None:
         for candidate in narrative.glossary_candidates:
-            if candidate.type in _A2_VOCAB_NAME_TYPES and candidate.source_text.strip():
+            if candidate.type not in _A2_VOCAB_NAME_TYPES:
+                continue
+            if candidate.source_text.strip():
                 names.append(candidate.source_text.strip())
+            names.extend(_extract_latin_proper_names_from_text(getattr(candidate, "note", None)))
+            names.extend(_extract_latin_proper_names_from_text(getattr(candidate, "description", None)))
+        for fact in getattr(narrative, "context_facts", ()):
+            if getattr(fact, "kind", None) not in {"speaker", "pronoun_referent"}:
+                continue
+            value = getattr(fact, "value", None)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped and any(ch.isupper() for ch in stripped):
+                    names.append(stripped)
         for scene in narrative.scenes:
             for participant in scene.participants:
                 if isinstance(participant, str) and participant.strip():
