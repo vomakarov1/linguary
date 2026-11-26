@@ -816,6 +816,7 @@ async def test_hallucinated_and_duplicate_candidate_ids_rejected(tmp_path: Path)
         ],
         handler=_handler,
         max_per_chapter=3,
+        policy=IllustrationPolicy(max_repair_turns=1),
     )
     await _drain_selection_tasks(harness)
 
@@ -1064,6 +1065,7 @@ async def test_candidates_invalid_insert_after_block_id_triggers_repair_and_fail
             )
         ],
         handler=_handler,
+        policy=IllustrationPolicy(max_repair_turns=1),
     )
     await _drain_selection_tasks(harness)
     assert attempts == 2
@@ -1075,3 +1077,245 @@ async def test_candidates_invalid_insert_after_block_id_triggers_repair_and_fail
         )
         assert len(failed) == 1
         assert failed[0].reason_code == IllustrationReasonCode.MODEL_OUTPUT_INVALID.value
+
+
+async def test_selection_default_policy_allows_two_repair_turns(tmp_path: Path) -> None:
+    selection_attempts = 0
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal selection_attempts
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-1",
+                        title_ru=f"Событие {blk['block_id']}",
+                        event_ru=f"Эпизод {blk['block_id']}",
+                        significance_ru="Ключевой эпизод",
+                        event_kind="encounter",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id=blk["block_id"], quote=blk["text"][:10]
+                            ),
+                        ),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            selection_attempts += 1
+            cid = data["candidates"][0]["candidate_id"]
+            if selection_attempts == 1:
+                # Missing selection_reasons_ru -> triggers 1st repair turn
+                return IllustrationSelectionResponse(
+                    selected_candidate_ids=(cid,),
+                    selection_reasons_ru=(),
+                )
+            if selection_attempts == 2:
+                # Hallucinated ID -> triggers 2nd repair turn (within default max_repair_turns=2)
+                return IllustrationSelectionResponse(
+                    selected_candidate_ids=("cand-hallucinated",),
+                    selection_reasons_ru=(
+                        IllustrationSelectionReasonDTO(
+                            candidate_id="cand-hallucinated", reason_ru="Выдуманный"
+                        ),
+                    ),
+                )
+            # 3rd attempt (2nd repair) succeeds!
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(
+                        candidate_id=cid, reason_ru="Точный выбор после двух ремонтов"
+                    ),
+                ),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            ("Сцена 1", [("b-1", "Alice opened the heavy door.")]),
+            ("Сцена 2", [("b-2", "Bob lit a candle on the table.")]),
+        ],
+        handler=_handler,
+        max_per_chapter=3,
+    )
+    await _drain_selection_tasks(harness)
+
+    assert selection_attempts == 3
+    selected = harness.selection.selected_moments(harness.generation_id, harness.section_id)
+    assert len(selected.winners) == 1
+    assert selected.winners[0].reason_ru == "Точный выбор после двух ремонтов"
+
+
+async def test_candidates_receives_spoiler_free_known_entities_and_preserves_on_split(
+    tmp_path: Path,
+) -> None:
+    from linguary.domain.illustrations import (
+        TIMELESS_POSITION_KEY,
+        IllustrationRegistryKind,
+        RegistryItem,
+    )
+
+    seen_inputs: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            seen_inputs.append(data)
+            if len(data["blocks"]) > 1:
+                # Trigger composite split to verify children inherit known_characters / known_locations
+                return IllustrationCandidatesResponse(
+                    scene_id=data["scene_id"],
+                    events=(),
+                    covered_source_unit_ids=(),
+                    complete=False,
+                )
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(),
+                zero_reason_ru="Тихая сцена.",
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        raise AssertionError(req.kind)
+
+    harness = _setup_chapter(
+        tmp_path,
+        scenes_spec=[
+            (
+                "Сцена в доме",
+                [
+                    ("b-0", "A tabby cat sat on the garden wall."),
+                    ("b-1", "Mr Dursley looked out onto Privet Drive."),
+                ],
+            )
+        ],
+        handler=_handler,
+        book_id="book-known-ent",
+    )
+
+    # Clear initial empty-registry scopes and seed ENTITY items spanning ch0 + future ch5, then replan!
+    def _ent(
+        gen_id: str,
+        eid: str,
+        kind: str,
+        canonical: str,
+        first_pos: str,
+        section_orders: list[int],
+        alias_first_positions: dict[str, str] | None = None,
+    ) -> RegistryItem:
+        pay: dict[str, Any] = {
+            "entity_id": eid,
+            "entity_kind": kind,
+            "canonical_name": canonical,
+            "aliases": [],
+            "section_orders": section_orders,
+            "mention_count": 1,
+            "first_position_key": first_pos,
+        }
+        if alias_first_positions is not None:
+            pay["alias_first_positions"] = alias_first_positions
+        return RegistryItem(
+            generation_id=gen_id,
+            kind=IllustrationRegistryKind.ENTITY,
+            item_key=eid,
+            entity_id=eid,
+            position_key=TIMELESS_POSITION_KEY,
+            is_back_applicable=False,
+            payload_sha256=canonical_sha(pay),
+            payload=pay,
+        )
+
+    with harness.uow.transaction() as tx:
+        gen = tx.illustrations.get_generation(harness.book_id, harness.generation_id)
+        assert gen is not None
+        snap = harness.source.snapshot(tx, harness.book_id)
+        head = tx.illustrations.get_head(harness.book_id)
+        assert head.settings_id is not None
+        tx.illustrations.revoke_generation(harness.book_id, gen.id, reason_code="settings_changed")
+        gen2, _ = tx.illustrations.create_or_get_generation(
+            harness.book_id,
+            settings_id=head.settings_id,
+            request_key="req-known-ent-2",
+            source_sha256=gen.source_sha256,
+            source_authority=gen.source_authority,
+            requested_sections=(harness.section_id,),
+        )
+        assert snap.manifest is not None and snap.manifest_sha256 is not None
+        gen2 = tx.illustrations.seal_manifest(
+            harness.book_id, gen2.id, manifest=snap.manifest, manifest_sha256=snap.manifest_sha256
+        )
+        tx.illustrations.upsert_registry_items(
+            gen2.id,
+            [
+                _ent(
+                    gen2.id,
+                    "ent-cat",
+                    "person",
+                    "Professor McGonagall",
+                    format_position_key(0, 0, 0),
+                    [0, 5],
+                    alias_first_positions={
+                        "tabby cat": format_position_key(0, 0, 0),
+                        "Professor McGonagall": format_position_key(5, 0, 0),
+                    },
+                ),
+                _ent(
+                    gen2.id,
+                    "ent-vernon",
+                    "person",
+                    "Mr Dursley",
+                    format_position_key(0, 1, 0),
+                    [0],
+                ),
+                _ent(
+                    gen2.id,
+                    "ent-future-hero",
+                    "person",
+                    "Future Villain",
+                    format_position_key(5, 0, 0),
+                    [5],
+                ),
+                _ent(
+                    gen2.id,
+                    "ent-street",
+                    "location",
+                    "Privet Drive",
+                    format_position_key(0, 1, 0),
+                    [0],
+                ),
+                _ent(
+                    gen2.id,
+                    "ent-future-castle",
+                    "location",
+                    "Future Fortress",
+                    format_position_key(5, 0, 0),
+                    [5],
+                ),
+            ],
+        )
+        gen2 = tx.illustrations.seal_registry(harness.book_id, gen2.id, registry_sha256="e" * 64)
+        gen2 = tx.illustrations.update_generation_state(
+            harness.book_id, gen2.id, state=IllustrationGenerationState.QUEUED, reason_code=None
+        )
+        new_gen_id = gen2.id
+
+    harness.selection.plan_scopes(new_gen_id, harness.section_id)
+    # Run tasks for gen2 (gen1 was revoked so only gen2 tasks advance)
+    await _drain_selection_tasks(harness)
+
+    # 1 initial composite call + 2 split child calls
+    assert len(seen_inputs) == 3
+    for payload in seen_inputs:
+        assert "tabby cat" in payload["known_characters"]
+        assert "Mr Dursley" in payload["known_characters"]
+        assert "Professor McGonagall" not in payload["known_characters"]
+        assert "Future Villain" not in payload["known_characters"]
+        assert payload["known_locations"] == ["Privet Drive"]
+        assert "Future Fortress" not in payload["known_locations"]

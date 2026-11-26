@@ -641,9 +641,16 @@ def _build_bounded_design_input(
         omit_ep: int,
         omit_all: int,
     ) -> dict[str, Any]:
+        raw_aliases = entity.get("aliases") or ()
+        bounded_aliases = [
+            str(a).strip()
+            for a in raw_aliases
+            if a is not None and str(a).strip()
+        ][:8]
         return {
             "entity_id": str(entity["entity_id"]),
             "canonical_name": str(entity["canonical_name"]),
+            "aliases": bounded_aliases,
             "entity_kind": entity_kind,
             "style": style,
             "allowed_traits": allowed_traits,
@@ -1683,7 +1690,17 @@ class IllustrationReference:
                     ok=False,
                     repair_reason=f"дублируется черта {item.trait}",
                 )
-            if has_cyrillic(item.description_en):
+            prefix_re = re.compile(rf"^{re.escape(item.trait)}\s*:\s*", re.IGNORECASE)
+            desc_en = prefix_re.sub("", item.description_en.strip()).strip()
+            desc_ru = prefix_re.sub("", item.description_ru.strip()).strip()
+            if not desc_en or not desc_ru:
+                return _ValidationResult(
+                    ok=False,
+                    repair_reason=(
+                        f"описание черты {item.trait} не может быть пустым после удаления префикса"
+                    ),
+                )
+            if has_cyrillic(desc_en):
                 return _ValidationResult(
                     ok=False,
                     repair_reason=(
@@ -1695,12 +1712,12 @@ class IllustrationReference:
                 strict_palette = item.trait == "palette_value"
                 color_word = (
                     find_monochrome_color_word(
-                        item.description_en,
+                        desc_en,
                         allowed_names=entity_names,
                         strict_palette=strict_palette,
                     )
                     or find_monochrome_color_word(
-                        item.description_ru,
+                        desc_ru,
                         allowed_names=entity_names,
                         strict_palette=strict_palette,
                     )
@@ -1717,8 +1734,8 @@ class IllustrationReference:
             traits.append(
                 {
                     "trait": item.trait,
-                    "description_ru": item.description_ru.strip(),
-                    "description_en": item.description_en.strip(),
+                    "description_ru": desc_ru,
+                    "description_en": desc_en,
                     "assumption_ru": item.assumption_ru.strip(),
                 }
             )
@@ -2295,12 +2312,31 @@ class IllustrationReference:
             entity_id = f"ent-{canonical_sha({'kind': kind, 'members': list(cluster)})[:12]}"
             for k in cluster:
                 mention_to_entity[k] = entity_id
-            aliases = sorted({str(m["name"]) for m in members})
+            canonical_name = _choose_canonical_name(members) or str(first["name"]).strip()
+            alias_first_positions: dict[str, str] = {}
+            section_orders_set: set[int] = set()
+            for m in members:
+                m_name = str(m["name"]).strip()
+                m_pos = str(m["position_key"])
+                if m_name and (
+                    m_name not in alias_first_positions or m_pos < alias_first_positions[m_name]
+                ):
+                    alias_first_positions[m_name] = m_pos
+                sec_part = m_pos.split(":", 1)[0]
+                if sec_part.isdigit():
+                    section_orders_set.add(int(sec_part))
+            aliases = sorted(
+                (name for name in alias_first_positions if name != canonical_name),
+                key=lambda n: (alias_first_positions[n], n.casefold()),
+            )
+            section_orders = sorted(section_orders_set)
             entity_payload = {
                 "entity_id": entity_id,
                 "entity_kind": kind,
-                "canonical_name": str(first["name"]),
+                "canonical_name": canonical_name,
                 "aliases": aliases,
+                "alias_first_positions": alias_first_positions,
+                "section_orders": section_orders,
                 "mention_count": len(members),
                 "first_position_key": str(first["position_key"]),
             }
@@ -2563,6 +2599,167 @@ class IllustrationReference:
         )
 
 
+_LEADING_GENERIC_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "these",
+        "those",
+        "his",
+        "her",
+        "their",
+        "my",
+        "our",
+        "your",
+        "some",
+        "one",
+        "old",
+        "young",
+        "little",
+        "small",
+        "big",
+        "large",
+        "tall",
+        "short",
+        "thin",
+        "fat",
+        "tiny",
+        "giant",
+        "strange",
+        "dark",
+    }
+)
+_INNER_CONNECTOR_WORDS = frozenset(
+    {
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "to",
+        "for",
+        "and",
+        "or",
+        "the",
+        "a",
+        "an",
+        "de",
+        "van",
+        "von",
+        "la",
+        "le",
+        "du",
+    }
+)
+_NAME_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9'-]+")
+
+
+def _score_canonical_name(name: str) -> tuple[int, int, int]:
+    """Return `(tier, short_len_flag, proper_word_count)` for canonical name ranking."""
+    words = _NAME_WORD_RE.findall(name)
+    if not words:
+        return (0, 0, 0)
+    tier = 0
+    if 1 <= len(words) <= 5:
+        trimmed = words[1:] if len(words) > 1 and words[0].lower() == "the" else words
+        content_words = [w for w in trimmed if w.lower() not in _INNER_CONNECTOR_WORDS]
+        cond_a = (
+            bool(content_words)
+            and all(w[0].isupper() for w in content_words)
+            and (
+                content_words[0].lower() not in _LEADING_GENERIC_WORDS
+                or len(content_words) >= 2
+            )
+        )
+        cond_b = any(w[0].isupper() for w in words[1:])
+        if cond_a or cond_b:
+            tier = 2
+        elif words[0][0].isupper() and words[0].lower() not in _LEADING_GENERIC_WORDS:
+            tier = 1
+    short_len = 1 if len(words) <= 4 else 0
+    proper_word_count = sum(
+        1 for w in words if w[0].isupper() and w.lower() not in _INNER_CONNECTOR_WORDS
+    )
+    return (tier, short_len, proper_word_count)
+
+
+def _choose_canonical_name(members: Sequence[Mapping[str, Any]]) -> str:
+    """Deterministically choose the best book-neutral canonical name from cluster members."""
+    if not members:
+        return ""
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for m in members:
+        raw_name = str(m.get("name", "")).strip()
+        if not raw_name:
+            continue
+        pos = str(m.get("position_key", ""))
+        norm = normalize_name_token(raw_name) or raw_name.casefold()
+        grouped[norm].append((raw_name, pos))
+    if not grouped:
+        return str(members[0].get("name", "")).strip()
+
+    candidates: list[tuple[tuple[int, int, int, int, str, str], str]] = []
+    for entries in grouped.values():
+        spelling_counts: dict[str, int] = defaultdict(int)
+        spelling_min_pos: dict[str, str] = {}
+        group_min_pos = min(pos for _, pos in entries)
+        for spelling, pos in entries:
+            spelling_counts[spelling] += 1
+            if spelling not in spelling_min_pos or pos < spelling_min_pos[spelling]:
+                spelling_min_pos[spelling] = pos
+        rep_name = min(
+            spelling_counts.keys(),
+            key=lambda s: (
+                -spelling_counts[s],
+                -_score_canonical_name(s)[0],
+                spelling_min_pos[s],
+                s.casefold(),
+            ),
+        )
+        tier, short_len, proper_word_count = _score_canonical_name(rep_name)
+        total_count = len(entries)
+        sort_key = (
+            -tier,
+            -short_len,
+            -min(proper_word_count, 3),
+            -total_count,
+            group_min_pos,
+            rep_name.casefold(),
+        )
+        candidates.append((sort_key, rep_name))
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _display_name_at_position(entity: Mapping[str, Any], event_position_key: str) -> str:
+    """Return spoiler-free display name for `entity` using only variants seen by `event_position_key`."""
+    raw_positions = entity.get("alias_first_positions")
+    if isinstance(raw_positions, Mapping) and event_position_key:
+        eligible = {
+            str(name).strip(): str(pos)
+            for name, pos in raw_positions.items()
+            if name is not None
+            and str(name).strip()
+            and isinstance(pos, str)
+            and pos
+            and pos <= event_position_key
+        }
+        if eligible:
+            chosen = _choose_canonical_name(
+                [{"name": n, "position_key": p} for n, p in eligible.items()]
+            )
+            if chosen:
+                return chosen
+    return str(entity.get("canonical_name", ""))
+
+
+_ANATOMICAL_DESIGN_TRAITS: frozenset[str] = frozenset(
+    {"build", "distinctive_mark", "hair", "eyes", "age_appearance"}
+)
+
 _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "hair": re.compile(
         r"\b(?:hair|haired|blond|blonde|redhead|curly|braid|braids|beard|bearded|"
@@ -2576,8 +2773,10 @@ _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
         re.IGNORECASE,
     ),
     "build": re.compile(
-        r"\b(?:tall|short|slender|stout|thin|broad|beefy|giant|plump|skinny|stocky|bony)\b"
-        r"|\b(?:рост|худощ|крепк|высок|крупн|грузн|великан|худой|худая|тощ|полн|костляв)",
+        r"\b(?:tall|short|slender|stout|thin|broad|beefy|giant|plump|skinny|stocky|bony|"
+        r"woman|man|boy|girl|human|person|cat|dog|owl|bird|animal|creature|quadruped|silhouette|figure)\b"
+        r"|\b(?:рост|худощ|крепк|высок|крупн|грузн|великан|худой|худая|тощ|полн|костляв|"
+        r"женщин|мужчин|человек|кошк|кот\b|животн)",
         re.IGNORECASE,
     ),
     "age_appearance": re.compile(
@@ -2615,6 +2814,39 @@ _TRAIT_PATTERNS: Mapping[str, re.Pattern[str]] = {
 
 _ECHO_STOPWORDS_EXACT = frozenset(
     {
+        "the",
+        "and",
+        "for",
+        "from",
+        "with",
+        "into",
+        "over",
+        "near",
+        "his",
+        "her",
+        "its",
+        "she",
+        "him",
+        "they",
+        "them",
+        "that",
+        "this",
+        "not",
+        "but",
+        "are",
+        "was",
+        "were",
+        "has",
+        "had",
+        "have",
+        "been",
+        "out",
+        "off",
+        "all",
+        "one",
+        "two",
+        "very",
+        "too",
         "short",
         "long",
         "dark",
@@ -2639,6 +2871,39 @@ _ECHO_STOPWORDS_EXACT = frozenset(
         "wearing",
         "dressed",
         "looking",
+        "как",
+        "для",
+        "при",
+        "под",
+        "над",
+        "без",
+        "или",
+        "его",
+        "её",
+        "ее",
+        "они",
+        "она",
+        "оно",
+        "это",
+        "что",
+        "был",
+        "была",
+        "были",
+        "быть",
+        "все",
+        "всё",
+        "так",
+        "уже",
+        "ещё",
+        "еще",
+        "нет",
+        "там",
+        "тут",
+        "где",
+        "кто",
+        "про",
+        "чем",
+        "тем",
     }
 )
 _ECHO_STOPWORDS_RU_PREFIXES: tuple[str, ...] = (
@@ -2652,7 +2917,7 @@ _ECHO_STOPWORDS_RU_PREFIXES: tuple[str, ...] = (
     "обычн",
     "нейтральн",
 )
-_ECHO_TOKEN_RE = re.compile(r"[a-zа-яё]{5,}")
+_ECHO_TOKEN_RE = re.compile(r"[a-zа-яё]{3,}")
 
 
 def _echo_content_tokens(text: str) -> set[str]:
@@ -2677,8 +2942,15 @@ def resolve_appearance_with_design_fallback(
     Any design trait whose visual category is covered by active facts/compact descriptions,
     or whose category/lexical content echoes facts explicitly excluded by FACT_SCOPE (except
     `palette_value`), is suppressed so stale design assumptions never override chronology.
+    When any fact in `explicit_facts` or `excluded_facts` carries `temporal_scope == "state_change"`,
+    anatomical design traits (`build`, `distinctive_mark`, `hair`, `eyes`, `age_appearance`)
+    are suppressed so a previous form never leaks across a transformation.
     """
     explicit_list = [thaw(f) for f in explicit_facts]
+    has_state_change = any(
+        str(f.get("temporal_scope", "")) == "state_change"
+        for f in (*explicit_facts, *excluded_facts)
+    )
     explicit_blob = " ".join(
         f"{f.get('description_en', '')} {f.get('description_ru', '')}"
         for f in explicit_list
@@ -2699,6 +2971,8 @@ def resolve_appearance_with_design_fallback(
     kept_design: list[dict[str, Any]] = []
     for trait_obj in design_traits:
         trait_name = str(trait_obj.get("trait", ""))
+        if has_state_change and trait_name in _ANATOMICAL_DESIGN_TRAITS:
+            continue
         pattern = _TRAIT_PATTERNS.get(trait_name)
         if pattern is not None and pattern.search(active_blob):
             continue
@@ -2718,6 +2992,8 @@ def resolve_appearance_with_design_fallback(
 __all__ = [
     "TIMELESS_POSITION_KEY",
     "IllustrationReference",
+    "_choose_canonical_name",
+    "_display_name_at_position",
     "build_alias_candidate_pairs",
     "format_position_key",
     "resolve_appearance_with_design_fallback",

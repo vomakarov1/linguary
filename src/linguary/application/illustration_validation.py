@@ -206,7 +206,7 @@ def _token_matches_ref(tok: str, ref_tokens: set[str]) -> bool:
 
 
 def _clause_covered_in_text(clause: str, reference_text: str) -> bool:
-    norm_clause = " ".join(clause.split()).strip().casefold()
+    norm_clause = " ".join(clause.split()).strip().rstrip(".;").strip().casefold()
     if not norm_clause:
         return True
     norm_ref = " ".join(reference_text.split()).strip().casefold()
@@ -388,6 +388,9 @@ def compose_monochrome_prompt(
             IllustrationReasonCode.MODEL_OUTPUT_INVALID,
             "scene_composition_en не может быть пустым",
         )
+    comp = re.sub(r"\.{2,}$", ".", comp)
+    if comp[-1] not in ".!?":
+        comp = f"{comp}."
     if style_profile not in ILLUSTRATION_SUPPORTED_STYLES:
         raise IllustrationValidationError(
             IllustrationReasonCode.INVALID_REQUEST,
@@ -409,7 +412,10 @@ def compose_monochrome_prompt(
                 IllustrationReasonCode.MODEL_OUTPUT_INVALID,
                 "применимый образ обязан содержать непустое description_en",
             )
-        clauses = [" ".join(piece.split()).strip() for piece in desc_clean.split(";")]
+        clauses = [
+            " ".join(piece.split()).strip().rstrip(".;").strip()
+            for piece in desc_clean.split(";")
+        ]
         clauses = [c for c in clauses if c]
         if not clauses:
             raise IllustrationValidationError(
@@ -420,9 +426,12 @@ def compose_monochrome_prompt(
         if remaining_clauses:
             rem_text = "; ".join(remaining_clauses)
             if name and not has_cyrillic(name):
-                appearance_lines.append(f"{name}: {rem_text}")
+                line = f"{name}: {rem_text}"
             else:
-                appearance_lines.append(rem_text)
+                line = rem_text
+            cleaned_line = line.strip().rstrip(".;").strip()
+            if cleaned_line:
+                appearance_lines.append(cleaned_line)
 
     parts = [comp]
     if appearance_lines:

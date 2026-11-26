@@ -1223,3 +1223,324 @@ def test_alias_blocking_singularizes_plural_surnames_and_ignores_generic_kin_pla
         {"mention_key": "s6", "name": "Iri", "entity_kind": "person"},
     ]
     assert build_alias_candidate_pairs(special_endings) == ()
+
+
+def test_compact_repair_summary_idempotent_stage_preamble_and_utf8_cap() -> None:
+    from linguary.application.illustration_context import MAX_REPAIR_SUMMARY_BYTES
+
+    default_msg = compact_repair_summary("не хватает selection_reasons_ru")
+    assert "ПОЛНЫЙ JSON-ответ целиком" in default_msg
+    assert compact_repair_summary(default_msg) == default_msg
+    assert compact_repair_summary(default_msg, stage=IllustrationScopeStage.EXTRACT) == default_msg
+
+    extract_msg = compact_repair_summary(
+        "пропущен unit-2", stage=IllustrationScopeStage.EXTRACT
+    )
+    assert "ВСЕХ переданных source_unit_id в covered_source_unit_ids" in extract_msg
+    assert compact_repair_summary(extract_msg, stage=IllustrationScopeStage.EXTRACT) == extract_msg
+
+    cand_msg = compact_repair_summary(
+        "пропущен b-1", stage=IllustrationScopeStage.CANDIDATES
+    )
+    assert "ВСЕХ переданных source_unit_id в covered_source_unit_ids" in cand_msg
+
+    long_msg = compact_repair_summary(
+        "Длинная ошибка кириллицей " * 80,
+        details=("подробность " * 40,),
+        stage=IllustrationScopeStage.EXTRACT,
+    )
+    assert len(long_msg.encode("utf-8")) <= MAX_REPAIR_SUMMARY_BYTES
+
+
+def test_choose_canonical_name_three_tiers_and_aliases_in_design_input() -> None:
+    from linguary.application.illustration_reference import (
+        _choose_canonical_name,
+        _score_canonical_name,
+    )
+
+    assert _score_canonical_name("Professor McGonagall")[0] == 2
+    assert _score_canonical_name("McGonagall")[0] == 2
+    assert _score_canonical_name("The Leaky Cauldron")[0] == 2
+    assert _score_canonical_name("number four, Privet Drive")[0] == 2
+    assert _score_canonical_name("Tabby cat")[0] == 1
+    assert _score_canonical_name("tabby cat")[0] == 0
+    assert _score_canonical_name("the boy")[0] == 0
+
+    # Tier 2 (2 proper words) > Tier 2 (1 proper word) > Tier 1 > Tier 0
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "tabby cat", "position_key": format_position_key(0, 0, 0)},
+                {"name": "Tabby cat", "position_key": format_position_key(0, 1, 0)},
+                {"name": "McGonagall", "position_key": format_position_key(0, 2, 0)},
+                {"name": "Professor McGonagall", "position_key": format_position_key(0, 3, 0)},
+            ]
+        )
+        == "Professor McGonagall"
+    )
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "tabby cat", "position_key": format_position_key(0, 0, 0)},
+                {"name": "McGonagall", "position_key": format_position_key(0, 2, 0)},
+            ]
+        )
+        == "McGonagall"
+    )
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "tabby cat", "position_key": format_position_key(0, 0, 0)},
+                {"name": "Tabby cat", "position_key": format_position_key(0, 1, 0)},
+            ]
+        )
+        == "Tabby cat"
+    )
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "a dark cupboard", "position_key": format_position_key(0, 0, 0)},
+                {"name": "number four, Privet Drive", "position_key": format_position_key(0, 1, 0)},
+            ]
+        )
+        == "number four, Privet Drive"
+    )
+    assert (
+        _choose_canonical_name(
+            [
+                {"name": "the pub", "position_key": format_position_key(0, 0, 0)},
+                {"name": "The Leaky Cauldron", "position_key": format_position_key(0, 1, 0)},
+            ]
+        )
+        == "The Leaky Cauldron"
+    )
+
+    # _build_bounded_design_input includes up to 8 aliases
+    bounded = _build_bounded_design_input(
+        entity={
+            "entity_id": "ent-1",
+            "canonical_name": "Professor McGonagall",
+            "aliases": [f"alias-{i}" for i in range(12)],
+            "entity_kind": "person",
+        },
+        facts=(),
+        sizer=_real_sizer(),
+        book_id="b1",
+        conditions_id=None,
+        policy=IllustrationPolicy(),
+    )
+    assert bounded["aliases"] == [f"alias-{i}" for i in range(8)]
+
+
+async def test_entity_persists_canonical_name_alias_first_positions_and_section_orders(
+    tmp_path: Path,
+) -> None:
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            mentions = []
+            covered = []
+            for u in data["units"]:
+                covered.append(u["source_unit_id"])
+                for blk in u["blocks"]:
+                    if "tabby cat" in blk["text"]:
+                        mentions.append(
+                            IllustrationMentionDTO(
+                                mention_id=f"m-{blk['block_id']}",
+                                name="tabby cat",
+                                entity_kind="person",
+                                alias_of_hint="Professor McGonagall",
+                                quote_block_id=blk["block_id"],
+                                quote="tabby cat",
+                            )
+                        )
+                    elif "Professor McGonagall" in blk["text"]:
+                        mentions.append(
+                            IllustrationMentionDTO(
+                                mention_id=f"m-{blk['block_id']}",
+                                name="Professor McGonagall",
+                                entity_kind="person",
+                                alias_of_hint=None,
+                                quote_block_id=blk["block_id"],
+                                quote="Professor McGonagall",
+                            )
+                        )
+            return IllustrationExtractResponse(
+                mentions=tuple(mentions),
+                facts=(),
+                covered_source_unit_ids=tuple(covered),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(
+                decisions=tuple(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict="same_entity", evidence_fact_ids=()
+                    )
+                    for p in data["pairs"]
+                )
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            ("sec-0", "Ch 1", [("b-0", "A tabby cat sat on the brick wall.")]),
+            ("sec-1", "Ch 2", [("b-1", "Professor McGonagall stepped forward.")]),
+        ],
+        handler=_handler,
+        book_id="book-canon-meta",
+    )
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.transaction() as tx:
+        entities, total = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.ENTITY
+        )
+        assert total == 1
+        pay = entities[0].raw_payload()
+        assert pay["canonical_name"] == "Professor McGonagall"
+        assert pay["aliases"] == ["tabby cat"]
+        assert set(pay["alias_first_positions"].keys()) == {"tabby cat", "Professor McGonagall"}
+        assert pay["alias_first_positions"]["tabby cat"] < pay["alias_first_positions"]["Professor McGonagall"]
+        assert pay["section_orders"] == [0, 1]
+
+
+def test_validate_design_strips_trait_prefix_before_checks_and_rejects_empty() -> None:
+    from datetime import UTC, datetime
+
+    from linguary.domain.illustrations import IllustrationScope
+
+    ref = IllustrationReference.__new__(IllustrationReference)
+    now = datetime(2026, 11, 26, tzinfo=UTC)
+    design_scope = IllustrationScope(
+        id="sc-des-pref",
+        generation_id="gen-1",
+        parent_scope_id=None,
+        stage=IllustrationScopeStage.DESIGN,
+        scope_key="design:ent-1",
+        section_id=None,
+        section_order=None,
+        section_title=None,
+        task_id=None,
+        input_sha256="a" * 64,
+        state=IllustrationScopeState.RUNNING,
+        reason_code=None,
+        attempt_id=None,
+        output_sha256=None,
+        payload=None,
+        summary={"entity_id": "ent-1", "entity_kind": "person", "style": "monochrome_ink"},
+        created_at=now,
+        updated_at=now,
+    )
+
+    ok_res = ref._validate_design(
+        design_scope,
+        IllustrationDesignResponse(
+            entity_id="ent-1",
+            traits=(
+                IllustrationDesignTraitDTO(
+                    trait="palette_value",
+                    description_ru="palette_value: Контрастная тушь",
+                    description_en="Palette_Value: high-contrast black ink",
+                    assumption_ru="",
+                ),
+            ),
+        ),
+    )
+    assert ok_res.ok is True and ok_res.payload is not None
+    assert ok_res.payload["traits"][0]["description_en"] == "high-contrast black ink"
+    assert ok_res.payload["traits"][0]["description_ru"] == "Контрастная тушь"
+
+    empty_after_strip = ref._validate_design(
+        design_scope,
+        IllustrationDesignResponse(
+            entity_id="ent-1",
+            traits=(
+                IllustrationDesignTraitDTO(
+                    trait="palette_value",
+                    description_ru="Контрастная тушь",
+                    description_en="palette_value:   ",
+                    assumption_ru="",
+                ),
+            ),
+        ),
+    )
+    assert empty_after_strip.ok is False
+
+    color_after_strip = ref._validate_design(
+        design_scope,
+        IllustrationDesignResponse(
+            entity_id="ent-1",
+            traits=(
+                IllustrationDesignTraitDTO(
+                    trait="palette_value",
+                    description_ru="Контрастная тушь",
+                    description_en="palette_value: vivid green ink",
+                    assumption_ru="",
+                ),
+            ),
+        ),
+    )
+    assert color_after_strip.ok is False
+    assert "monochrome_ink" in color_after_strip.repair_reason
+
+    cyr_after_strip = ref._validate_design(
+        design_scope,
+        IllustrationDesignResponse(
+            entity_id="ent-1",
+            traits=(
+                IllustrationDesignTraitDTO(
+                    trait="build",
+                    description_ru="Стройный силуэт",
+                    description_en="build: Стройный силуэт",
+                    assumption_ru="",
+                ),
+            ),
+        ),
+    )
+    assert cyr_after_strip.ok is False
+    assert "кириллиц" in cyr_after_strip.repair_reason
+
+
+def test_resolve_appearance_state_change_suppresses_anatomical_traits_and_short_token_echo() -> None:
+    design = [
+        {"trait": "build", "description_en": "Small tabby cat silhouette", "description_ru": "Силуэт кошки"},
+        {"trait": "distinctive_mark", "description_en": "Square markings around eyes", "description_ru": "Квадратные отметины"},
+        {"trait": "hair", "description_en": "Striped fur", "description_ru": "Полосатая шерсть"},
+        {"trait": "eyes", "description_en": "Alert feline gaze", "description_ru": "Настороженный взгляд"},
+        {"trait": "age_appearance", "description_en": "Ageless animal", "description_ru": "Взрослая кошка"},
+        {"trait": "palette_value", "description_en": "Crisp black ink contrast", "description_ru": "Чёткий контраст туши"},
+    ]
+    # 1. state_change in explicit_facts suppresses all anatomical traits, preserves palette_value
+    _, kept_explicit_sc = resolve_appearance_with_design_fallback(
+        [{"temporal_scope": "state_change", "description_en": "Severe woman in a cloak", "description_ru": "Строгая женщина в плаще"}],
+        design,
+    )
+    assert [t["trait"] for t in kept_explicit_sc] == ["palette_value"]
+
+    # 2. state_change in excluded_facts ALSO suppresses all anatomical traits, preserves palette_value
+    _, kept_excluded_sc = resolve_appearance_with_design_fallback(
+        [{"temporal_scope": "episodic", "description_en": "Standing on the pavement", "description_ru": "Стоит на тротуаре"}],
+        design,
+        excluded_facts=[
+            {"temporal_scope": "state_change", "description_en": "Transformed from a cat", "description_ru": "Превратилась из кошки"}
+        ],
+    )
+    assert [t["trait"] for t in kept_excluded_sc] == ["palette_value"]
+
+    # 3. 3-character lexical echo tokens ("cat", "fur", "tail") suppress matching design trait
+    _, kept_short_echo = resolve_appearance_with_design_fallback(
+        [],
+        [
+            {"trait": "attire_default", "description_en": "Cat fur tail collar", "description_ru": "Воротник с мехом кошки"},
+            {"trait": "palette_value", "description_en": "Crisp ink linework", "description_ru": "Чёткая линия туши"},
+        ],
+        excluded_facts=[
+            {"temporal_scope": "episodic", "description_en": "Small cat with soft fur and tail", "description_ru": "Кошка с мехом и хвостом"}
+        ],
+    )
+    assert [t["trait"] for t in kept_short_echo] == ["palette_value"]

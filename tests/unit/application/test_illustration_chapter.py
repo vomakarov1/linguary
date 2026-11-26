@@ -1792,3 +1792,444 @@ def test_compute_chapter_fingerprint_uses_v2_kind() -> None:
         }
     )
     assert fp == expected_v2
+
+
+def test_resolve_entity_name_prefers_canonical_over_alias_and_preserves_ambiguous() -> None:
+    from linguary.application.illustration_chapter import _resolve_entity_name
+
+    entities = [
+        {
+            "entity_id": "ent-street",
+            "entity_kind": "location",
+            "canonical_name": "Privet Drive",
+            "aliases": [],
+        },
+        {
+            "entity_id": "ent-house",
+            "entity_kind": "location",
+            "canonical_name": "number four, Privet Drive",
+            "aliases": ["Privet Drive", "4 Privet Drive"],
+        },
+        {
+            "entity_id": "ent-john-1",
+            "entity_kind": "person",
+            "canonical_name": "John",
+            "aliases": ["the tall man"],
+        },
+        {
+            "entity_id": "ent-john-2",
+            "entity_kind": "person",
+            "canonical_name": "John",
+            "aliases": ["the tall man"],
+        },
+    ]
+    # Pass 1 (canonical_name) uniquely resolves "Privet Drive" to the street despite alias on house!
+    st, ent = _resolve_entity_name("Privet Drive", expected_kind="location", entities=entities)
+    assert st == "resolved" and ent is not None and ent["entity_id"] == "ent-street"
+
+    # Pass 2 (aliases) resolves "4 Privet Drive" uniquely to the house!
+    st2, ent2 = _resolve_entity_name("4 Privet Drive", expected_kind="location", entities=entities)
+    assert st2 == "resolved" and ent2 is not None and ent2["entity_id"] == "ent-house"
+
+    # Duplicate canonical_name remains ambiguous!
+    st3, ent3 = _resolve_entity_name("John", expected_kind="person", entities=entities)
+    assert st3 == "ambiguous" and ent3 is None
+
+    # Duplicate alias with no canonical match remains ambiguous!
+    st4, ent4 = _resolve_entity_name("the tall man", expected_kind="person", entities=entities)
+    assert st4 == "ambiguous" and ent4 is None
+
+    # Unknown name is unmatched!
+    st5, ent5 = _resolve_entity_name("Hogwarts", expected_kind="location", entities=entities)
+    assert st5 == "unmatched" and ent5 is None
+
+
+async def test_display_name_at_position_prevents_name_spoilers_in_fact_scope_and_appearances(
+    tmp_path: Path,
+) -> None:
+    fact_scope_entity_names: list[tuple[str, str]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-early",
+                        title_ru="Кошка на стене",
+                        event_ru="Полосатая кошка сидит на садовой стене.",
+                        significance_ru="Загадочное наблюдение",
+                        event_kind="observation",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id="b-0", quote="A tabby cat sat"),
+                        ),
+                        participant_names=("tabby cat",),
+                    ),
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-late",
+                        title_ru="Появление профессора",
+                        event_ru="Профессор Макгонагалл обращается к Дамблдору.",
+                        significance_ru="Раскрытие личности",
+                        event_kind="revelation",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id="b-2", quote="Professor McGonagall spoke"
+                            ),
+                        ),
+                        participant_names=("Professor McGonagall",),
+                    ),
+                ),
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cids = tuple(c["candidate_id"] for c in data["candidates"])
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=cids,
+                selection_reasons_ru=tuple(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Важный кадр")
+                    for cid in cids
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            fact_scope_entity_names.append((data["event_position_key"], data["entity_name"]))
+            fids = tuple(f["fact_id"] for f in data["facts"])
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=fids,
+                excluded_fact_ids=(),
+                compact_description_ru="Стройный силуэт",
+                compact_description_en="Slender silhouette",
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Monochrome scene on the quiet street.",
+                depicted_entity_ids=tuple(c["entity_id"] for c in data["characters"]),
+                used_fact_ids=tuple(data["allowed_fact_ids"]),
+                used_design_keys=(),
+            )
+        raise AssertionError(req.kind)
+
+    mcgonagall_pay = {
+        "entity_id": "ent-mc",
+        "entity_kind": "person",
+        "canonical_name": "Professor McGonagall",
+        "aliases": ["tabby cat"],
+        "alias_first_positions": {
+            "tabby cat": format_position_key(0, 0, 0),
+            "Professor McGonagall": format_position_key(0, 2, 0),
+        },
+        "section_orders": [0],
+        "mention_count": 2,
+        "first_position_key": format_position_key(0, 0, 0),
+    }
+    mcgonagall_item = RegistryItem(
+        generation_id="placeholder",
+        kind=IllustrationRegistryKind.ENTITY,
+        item_key="ent-mc",
+        entity_id="ent-mc",
+        position_key=TIMELESS_POSITION_KEY,
+        is_back_applicable=False,
+        payload_sha256=canonical_sha(mcgonagall_pay),
+        payload=mcgonagall_pay,
+    )
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[
+            (
+                "sec-0",
+                "Chapter 1",
+                0,
+                [
+                    ("b-0", "A tabby cat sat stiffly on the brick wall."),
+                    ("b-1", "The street grew dark as lamps went out."),
+                    ("b-2", "Professor McGonagall spoke sharply to the tall wizard."),
+                ],
+            )
+        ],
+        registry_items_spec=[
+            mcgonagall_item,
+            _fact_item(
+                "f-cat",
+                "ent-mc",
+                section_order=0,
+                block_order=0,
+                temporal_scope="episodic",
+                desc_ru="Полосатая кошка",
+                desc_en="Tabby cat",
+            ),
+        ],
+        handler=_handler,
+        book_id="book-no-name-spoiler",
+    )
+    await _drain_chapter_tasks(harness)
+
+    fact_scope_entity_names.sort(key=lambda x: x[0])
+    assert fact_scope_entity_names[0][1] == "tabby cat"
+    assert fact_scope_entity_names[1][1] == "Professor McGonagall"
+
+    with harness.uow.transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.state is IllustrationScopeState.ACCEPTED and ch.payload is not None
+        moments = ch.payload["moments"]
+        assert len(moments) == 2
+        early_char = moments[0]["character_descriptions"][0]
+        late_char = moments[1]["character_descriptions"][0]
+        assert early_char["name_ru"] == "tabby cat"
+        assert early_char["name_en"] == "tabby cat"
+        assert "McGonagall" not in moments[0]["prompt_en"]
+        assert late_char["name_ru"] == "Professor McGonagall"
+        assert late_char["name_en"] == "Professor McGonagall"
+
+
+async def test_depicted_entity_ids_filters_prompt_and_moment_and_validates_owners(
+    tmp_path: Path,
+) -> None:
+    prompt_inputs_seen: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            blk = data["blocks"][0]
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-photos",
+                        title_ru="Фотографии на каминной полке",
+                        event_ru="На каминной полке стоят фотографии Дадли, а Гарри в кадре нет.",
+                        significance_ru="Контраст отношения семьи",
+                        event_kind="detail",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(
+                                block_id=blk["block_id"], quote="photographs of Dudley"
+                            ),
+                        ),
+                        # Absent Harry mistakenly listed by CANDIDATES; PROMPT excludes him via depicted_entity_ids!
+                        participant_names=("Dudley", "Harry"),
+                        location_names=(),
+                    ),
+                ),
+                covered_source_unit_ids=(blk["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Яркая деталь"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            fids = tuple(f["fact_id"] for f in data["facts"])
+            desc_en = ", ".join(f["description_en"] for f in data["facts"])
+            desc_ru = ", ".join(f["description_ru"] for f in data["facts"])
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=fids,
+                excluded_fact_ids=(),
+                compact_description_ru=desc_ru,
+                compact_description_en=desc_en,
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            prompt_inputs_seen.append(data)
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Mantelpiece lined with framed photographs of a plump boy.",
+                depicted_entity_ids=("ent-dudley",),
+                used_fact_ids=("f-dudley",),
+                used_design_keys=(),
+            )
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[
+            (
+                "sec-0",
+                "Chapter 1",
+                0,
+                [("b-0", "Rows of photographs of Dudley stood on the mantelpiece, with no sign of Harry.")],
+            )
+        ],
+        registry_items_spec=[
+            _entity_item("ent-dudley", "Dudley"),
+            _entity_item("ent-harry", "Harry"),
+            _fact_item(
+                "f-dudley",
+                "ent-dudley",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Пухлый мальчик",
+                desc_en="plump boy",
+            ),
+            _fact_item(
+                "f-harry",
+                "ent-harry",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Шрам-молния на лбу",
+                desc_en="lightning-shaped scar on forehead",
+            ),
+        ],
+        handler=_handler,
+        book_id="book-depicted",
+    )
+    await _drain_chapter_tasks(harness)
+
+    # Empty locations -> scene_location_ru reference field passed to PROMPT!
+    assert len(prompt_inputs_seen) == 1
+    assert prompt_inputs_seen[0]["locations"] == []
+    assert prompt_inputs_seen[0]["scene_location_ru"] == "Зал"
+
+    with harness.uow.transaction() as tx:
+        ch = tx.illustrations.list_scopes(
+            harness.generation_id, stage=IllustrationScopeStage.CHAPTER, section_id="sec-0"
+        )[0]
+        assert ch.state is IllustrationScopeState.ACCEPTED and ch.payload is not None
+        moment = ch.payload["moments"][0]
+        assert [c["entity_id"] for c in moment["character_descriptions"]] == ["ent-dudley"]
+        assert "Harry" not in moment["prompt_en"]
+        assert "scar" not in moment["prompt_en"].casefold()
+
+    # Unit checks for _validate_render_response on depicted_entity_ids invariants & legacy None
+    from linguary.domain.illustrations import IllustrationScope, IllustrationSettingsRevision
+
+    chapter = IllustrationChapter.__new__(IllustrationChapter)
+    now = datetime(2026, 11, 26, tzinfo=UTC)
+    rev = IllustrationSettingsRevision(
+        id="rev-1",
+        book_id="book-1",
+        revision=1,
+        settings_sha256="a" * 64,
+        settings=IllustrationSettings(enabled=True, model_reference="m", model_prompts="m"),
+        created_at=now,
+    )
+    scope = IllustrationScope(
+        id="sc-p",
+        generation_id="gen-1",
+        parent_scope_id=None,
+        stage=IllustrationScopeStage.PROMPT,
+        scope_key="prompt:sec-0:m1",
+        section_id="sec-0",
+        section_order=0,
+        section_title="Ch 1",
+        task_id=None,
+        input_sha256="a" * 64,
+        state=IllustrationScopeState.RUNNING,
+        reason_code=None,
+        attempt_id=None,
+        output_sha256=None,
+        payload=None,
+        summary={
+            "moment_id": "m1",
+            "allowed_fact_ids": ["f-dudley", "f-harry"],
+            "allowed_design_keys": ["ent-harry:hair"],
+            "design_traits_by_key": {
+                "ent-harry:hair": {
+                    "key": "ent-harry:hair",
+                    "entity_id": "ent-harry",
+                    "trait": "hair",
+                    "description_ru": "Взъерошенные волосы",
+                    "description_en": "messy hair",
+                    "assumption_ru": "",
+                }
+            },
+            "characters": [
+                IllustrationAppearance("ent-dudley", "Dudley", "Пухлый", "plump boy", ("f-dudley",), (), "Dudley").to_dict(),
+                IllustrationAppearance("ent-harry", "Harry", "Шрам", "scar on forehead", ("f-harry",), (), "Harry").to_dict(),
+            ],
+            "locations": [],
+        },
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Duplicate depicted_entity_ids -> rejected
+    assert chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "A plump boy.", ("f-dudley",), (), (), ("ent-dudley", "ent-dudley")),
+        rev,
+    ).ok is False
+    # Unknown entity_id -> rejected
+    assert chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "A plump boy.", (), (), (), ("ent-unknown",)),
+        rev,
+    ).ok is False
+    # Fact owner not in depicted_entity_ids -> rejected
+    assert chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "A plump boy.", ("f-harry",), (), (), ("ent-dudley",)),
+        rev,
+    ).ok is False
+    # Design key owner not in depicted_entity_ids -> rejected
+    assert chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "A plump boy.", (), ("ent-harry:hair",), (), ("ent-dudley",)),
+        rev,
+    ).ok is False
+    # Legacy depicted_entity_ids=None -> backward compatible (keeps both characters)
+    legacy_ok = chapter._validate_render_response(
+        scope,
+        IllustrationPromptResponse("m1", "Two boys stand in the room.", ("f-dudley", "f-harry"), (), (), None),
+        rev,
+    )
+    assert legacy_ok.ok is True and legacy_ok.payload is not None
+    assert "depicted_entity_ids" not in legacy_ok.payload
+    assert "scar on forehead" in legacy_ok.payload["prompt_en"]
+
+
+def test_punctuation_cleanup_and_single_word_clause_with_trailing_dot(tmp_path: Path) -> None:
+    harness = _seed_book_with_registry(
+        tmp_path,
+        sections_spec=[("sec-0", "Chapter 1", 0, [("b-0", "Alice stood at the gate.")])],
+        registry_items_spec=[],
+        handler=lambda _r, _n: (_ for _ in ()).throw(AssertionError("unused")),
+        book_id="book-punct",
+    )
+    with harness.uow.transaction() as tx:
+        snap = harness.source.snapshot(tx, harness.book_id)
+    sec0 = harness.document.ordered_sections[0]
+    scene_id = snap.entries[0].scenes[0].id
+
+    app = IllustrationAppearance(
+        entity_id="ent-alice",
+        name_ru="Alice",
+        name_en="Alice",
+        description_ru="Шрам.; Тёмный плащ.",
+        description_en="scar.; dark cloak.",
+    )
+    prompt = compose_monochrome_prompt("Alice stands beside the gate..", [app])
+    assert ".;" not in prompt
+    assert ".." not in prompt
+    assert "Visual details: Alice: scar; dark cloak." in prompt
+
+    validated = validate_moment(
+        ValidatedMoment(
+            id="m-punct",
+            scene_id=scene_id,
+            title_ru="У ворот",
+            reason_ru="Причина",
+            event_ru="Событие",
+            prompt_en=prompt,
+            insert_after_block_id="b-0",
+            anchors=(SourceAnchor("b-0", 0, 5, "Alice"),),
+            character_descriptions=(app,),
+        ),
+        snapshot=snap,
+        section=sec0,
+        scene_start_block_id="b-0",
+        scene_end_block_id="b-0",
+        registry={},
+        event_position_key=format_position_key(0, 0, 0),
+    )
+    assert validated.prompt_en == prompt

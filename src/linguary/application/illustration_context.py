@@ -159,18 +159,39 @@ def compact_safe_detail(text: str, *, max_bytes: int = 256) -> str:
     return f"{trimmed}..."
 
 
+_REPAIR_PREAMBLE_PREFIXES: tuple[str, ...] = (
+    "Исправь ответ:",
+    "Исправь ошибку и верни ПОЛНЫЙ JSON-ответ",
+)
+_REPAIR_PREAMBLE_DEFAULT = (
+    "Исправь ошибку и верни ПОЛНЫЙ JSON-ответ целиком для всех элементов запроса "
+    "(не частичный фрагмент): "
+)
+_REPAIR_PREAMBLE_COVERED_UNITS = (
+    "Исправь ошибку и верни ПОЛНЫЙ JSON-ответ для ВСЕХ переданных source_unit_id "
+    "в covered_source_unit_ids (не частичный фрагмент): "
+)
+
+
 def compact_repair_summary(
     reason: str,
     details: Sequence[str] = (),
     *,
     max_bytes: int = MAX_REPAIR_SUMMARY_BYTES,
+    stage: IllustrationScopeStage | None = None,
 ) -> str:
     """Build a compact repair instruction capped strictly in UTF-8 bytes without raw assistant echo."""
     clean_reason = " ".join(reason.split()).strip() or "исправь формат и точность ответа"
-    if clean_reason.startswith("Исправь ответ:"):
+    if clean_reason.startswith(_REPAIR_PREAMBLE_PREFIXES):
         parts = [clean_reason]
     else:
-        parts = [f"Исправь ответ: {clean_reason}."]
+        preamble = (
+            _REPAIR_PREAMBLE_COVERED_UNITS
+            if stage in {IllustrationScopeStage.EXTRACT, IllustrationScopeStage.CANDIDATES}
+            else _REPAIR_PREAMBLE_DEFAULT
+        )
+        suffix = "" if clean_reason.endswith((".", "!", "?")) else "."
+        parts = [f"{preamble}{clean_reason}{suffix}"]
     for detail in details:
         text = " ".join(detail.split()).strip()
         if text:
@@ -179,8 +200,13 @@ def compact_repair_summary(
     encoded = combined.encode("utf-8")
     if len(encoded) <= max_bytes:
         return combined
+    if max_bytes <= 3:
+        cut = encoded[: max(0, max_bytes)]
+        while cut and (cut[-1] & 0xC0) == 0x80:
+            cut = cut[:-1]
+        return cut.decode("utf-8", errors="ignore")
     # Leave room for ellipsis and cut on a valid UTF-8 codepoint boundary.
-    limit = max(16, max_bytes - 3)
+    limit = max(1, max_bytes - 3)
     cut = encoded[:limit]
     while cut and (cut[-1] & 0xC0) == 0x80:
         cut = cut[:-1]
@@ -328,6 +354,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Ты извлекаешь визуальные упоминания персонажей и мест и цитатные факты для справочника иллюстраций книги. "
         "Используй только приведённые блоки текста. Цитаты копируй дословно и достаточно длинно, чтобы они были уникальны внутри блока. "
         "Описания на русском и английском должны отражать только подтверждённые текстом сведения. "
+        "Для entity_kind=\"location\" используй точное различающее имя места из оригинального текста "
+        "(улица — именем улицы; дом — адресом или названием дома; комната — названием комнаты; не подписывай конкретный дом голым названием улицы). "
         "Если в ближайшем тексте описательное или родственное обозначение прямо соотносится с названным персонажем или местом "
         "(например, «сын X по имени Y»), укажи это имя в alias_of_hint. "
         "Ставь back_applicable=true только для неизменных черт (например, цвет глаз), которые не раскрывают будущий спойлер. "
@@ -342,6 +370,9 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Если два упоминания явно обозначают одного и того же человека (например, имя и обращение с фамилией/титулом, "
         "такие как Petunia и Mrs Dursley, при подтверждении текстом/цитатой/глоссарием), ставь same_entity. "
         "При этом общая фамилия с разными титулами или полом (Mr Dursley и Mrs Dursley) — different. "
+        "Для entity_kind=\"location\": повторные упоминания одного и того же места, улицы или дома под тем же именем "
+        "или явным вариантом — same_entity, даже если в разных сценах упомянуты разные детали окружения; "
+        "контейнер и его часть (улица и конкретный дом на ней, дом и отдельная комната или дверь внутри него) — строго different. "
         "unknown ставь только когда доказательств действительно недостаточно."
     ),
     IllustrationScopeStage.DESIGN: (
@@ -353,6 +384,8 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Категорически ЗАПРЕЩЕНО закреплять в DESIGN эпизодические и изменяемые состояния (temporal_scope=\"episodic\" или \"state_change\"): "
         "сон или закрытые глаза, временную позу или выражение лица, разовую одежду или обёртку конкретного эпизода, переменное освещение, "
         "случайных животных или предметы в локации, а также преходящий возрастной снимок, если его постоянство не подтверждено permanent-фактом. "
+        "Если у сущности есть факты temporal_scope=\"state_change\" (смена облика, формы или маскировки), не фиксируй в DESIGN "
+        "анатомические или видовые черты только одной из форм; оставляй только нейтральные признаки (например, palette_value) или traits: []. "
         "Не противоречь переданным facts и не дублируй черты, уже описанные в facts; если деталей в facts достаточно или переданы только временные факты "
         "(non_permanent_context_only=true), допустимо вернуть только palette_value или traits: []. "
         "Если style == \"monochrome_ink\", описывай palette_value ТОЛЬКО тональными характеристиками чёрно-белой туши "
@@ -375,23 +408,38 @@ _STAGE_INSTRUCTIONS: Mapping[IllustrationScopeStage, str] = {
         "Ты выделяешь до двух сильных визуальных сюжетных событий из переданной сцены главы. "
         "Каждое событие должно иметь непустое обоснование значимости significance_ru, дословные уникальные quote_anchors в рамках переданных блоков "
         "и опционально insert_after_block_id в пределах этой сцены. "
+        "В participant_names указывай ТОЛЬКО персонажей, физически видимых или изображаемых в кадре "
+        "(включая показанных на фотографиях или портретах, если кадр о них); запрещено включать отсутствующих персонажей, "
+        "упомянутых через отрицание («нет следов X»), находящихся за кадром или упоминаемых только в речи или мыслях. "
+        "Имена в participant_names и location_names всегда записывай на языке оригинала книги "
+        "(никогда не переводи на язык перевода, даже если scene.location или participants даны на языке перевода). "
+        "При совпадении используй точные имена из переданных списков known_characters и known_locations. "
+        "Обязательно заполняй location_names, если место действия известно из текста сцены. "
         "Если подходящих событий нет, верни пустой список и непустую причину zero_reason_ru. "
         "При complete=true перечисли все source_unit_id в covered_source_unit_ids."
     ),
     IllustrationScopeStage.SELECTION: (
         "Ты отбираешь наиболее сильные и визуально разнообразные моменты для иллюстраций главы в пределах указанного лимита group_cap. "
         "Выбирай только переданные candidate_id без повторов и выдуманных ID. "
-        "Если ни один кандидат не достоин иллюстрации, верни пустой selected_candidate_ids и непустую zero_reason_ru."
+        "Для каждого candidate_id из selected_candidate_ids обязательно верни объект {candidate_id, reason_ru} в selection_reasons_ru "
+        "с кратким обоснованием выбора на русском языке. "
+        "Если ни один кандидат не достоин иллюстрации, верни пустой selected_candidate_ids, пустой selection_reasons_ru: [] и непустую zero_reason_ru."
     ),
     IllustrationScopeStage.PROMPT: (
         "Ты составляешь англоязычную композицию одного кадра (scene_composition_en) для монохромной книжной иллюстрации тушью. "
         "Опирайся строго на переданные применимые факты, описания образов и только те available_design_traits, которые действительно нужны кадру, "
         "не вводи несогласованные детали и перечисли фактически использованные used_fact_ids и used_design_keys. "
+        "Поле characters[].description_en — единственный авторитетный облик персонажа на момент события; "
+        "запрещено выбирать used_design_keys, противоречащие characters[].description_en или event_ru. "
+        "Обязательно укажи в depicted_entity_ids все entity_id из переданных characters и locations, которые реально изображены в scene_composition_en. "
+        "Запрещено описывать в scene_composition_en отсутствующих персонажей через отрицания (например, «no boy with a scar», «without X»); "
+        "описывай только реально изображаемое в кадре. "
         "Пиши scene_composition_en строго на английском языке (без кириллицы). "
         "При style == \"monochrome_ink\" не используй названия хроматических цветов в scene_composition_en, выражая визуальные различия через светлоту, контраст и фактуру. "
         "Точно соблюдай позу, действие и физически возможную точку зрения камеры из event_ru: "
-        "не показывай снаружи фасад здания в том же кадре, если действие происходит внутри комнаты без выхода наружу, "
-        "и не меняй положение тела персонажа вопреки описанию события."
+        "для комнатных сцен не показывай снаружи фасад здания без выхода наружу; "
+        "для уличных и наружных сцен (улица, крыльцо, двор, сад, дорога) изображай именно наружную обстановку, а не интерьер; "
+        "не меняй положение тела персонажа вопреки описанию события."
     ),
 }
 
@@ -430,7 +478,7 @@ class IllustrationContext:
         input_text = compact_json(input_payload)
         repair_turns: tuple[tuple[str | None, str], ...] = ()
         if repair_summary is not None:
-            repair_turns = ((None, compact_repair_summary(repair_summary)),)
+            repair_turns = ((None, compact_repair_summary(repair_summary, stage=stage)),)
 
         call_stage = (
             LLMCallStage.ILLUSTRATION_REFERENCE

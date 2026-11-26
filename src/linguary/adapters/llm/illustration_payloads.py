@@ -236,8 +236,20 @@ class IllustrationCandidateEventSchema(_IllustrationStrictBase):
     event_kind: str = Field(min_length=1, max_length=200)
     quote_anchors: list[IllustrationQuoteAnchorSchema] = Field(min_length=1, max_length=_MAX_ANCHORS)
     insert_after_block_id: str | None = Field(default=None, max_length=200)
-    participant_names: list[str] = Field(max_length=_MAX_LIST)
-    location_names: list[str] = Field(max_length=_MAX_LIST)
+    participant_names: list[str] = Field(
+        max_length=_MAX_LIST,
+        description=(
+            "Только персонажи, физически видимые или изображаемые в кадре, на языке оригинала книги "
+            "(используй точные имена из known_characters; не включай отсутствующих)."
+        ),
+    )
+    location_names: list[str] = Field(
+        max_length=_MAX_LIST,
+        description=(
+            "Место действия сцены на языке оригинала книги "
+            "(используй точные имена из known_locations, если место подходит; не переводи)."
+        ),
+    )
 
     @field_validator("participant_names", "location_names")
     @classmethod
@@ -294,10 +306,26 @@ class IllustrationSelectionReasonSchema(_IllustrationStrictBase):
 
 
 class IllustrationSelectionSchema(_VersionedIllustrationBase):
-    selected_candidate_ids: list[str] = Field(max_length=_MAX_LIST)
-    selection_reasons_ru: list[IllustrationSelectionReasonSchema] = Field(max_length=_MAX_LIST)
-    rejected_reasons_ru: list[IllustrationSelectionReasonSchema] = Field(max_length=_MAX_LIST)
-    zero_reason_ru: str | None = Field(default=None, max_length=_MAX_STR)
+    selected_candidate_ids: list[str] = Field(
+        max_length=_MAX_LIST,
+        description="Список выбранных candidate_id из переданных candidates (без повторов, не более group_cap).",
+    )
+    selection_reasons_ru: list[IllustrationSelectionReasonSchema] = Field(
+        max_length=_MAX_LIST,
+        description=(
+            "Обязательно: по одной записи {candidate_id, reason_ru} на русском для КАЖДОГО элемента "
+            "из selected_candidate_ids; [] если selected_candidate_ids пуст."
+        ),
+    )
+    rejected_reasons_ru: list[IllustrationSelectionReasonSchema] = Field(
+        max_length=_MAX_LIST,
+        description="Краткие причины отклонения невыбранных кандидатов на русском языке.",
+    )
+    zero_reason_ru: str | None = Field(
+        default=None,
+        max_length=_MAX_STR,
+        description="Обязательная причина на русском, если selected_candidate_ids пуст; иначе null.",
+    )
 
     @field_validator("selected_candidate_ids")
     @classmethod
@@ -325,11 +353,18 @@ class IllustrationSelectionSchema(_VersionedIllustrationBase):
 class IllustrationPromptSchema(_VersionedIllustrationBase):
     moment_id: str = Field(min_length=1, max_length=200)
     scene_composition_en: str = Field(min_length=1, max_length=_MAX_STR)
+    depicted_entity_ids: list[str] = Field(
+        max_length=_MAX_LIST,
+        description=(
+            "Список entity_id из переданных characters и locations, которые реально физически изображены "
+            "в scene_composition_en (без дублей; все владельцы used_fact_ids и used_design_keys должны входить сюда)."
+        ),
+    )
     used_fact_ids: list[str] = Field(max_length=_MAX_LIST)
     used_design_keys: list[str] = Field(max_length=_MAX_LIST)
     assumptions_ru: list[str] = Field(max_length=_MAX_LIST)
 
-    @field_validator("used_fact_ids", "used_design_keys")
+    @field_validator("depicted_entity_ids", "used_fact_ids", "used_design_keys")
     @classmethod
     def _check_refs(cls, value: list[str]) -> list[str]:
         if any(not item or len(item) > 200 for item in value):
@@ -350,6 +385,7 @@ class IllustrationPromptSchema(_VersionedIllustrationBase):
             used_fact_ids=tuple(self.used_fact_ids),
             used_design_keys=tuple(self.used_design_keys),
             assumptions_ru=tuple(self.assumptions_ru),
+            depicted_entity_ids=tuple(self.depicted_entity_ids),
             contract_version=self.contract_version,
         )
 
