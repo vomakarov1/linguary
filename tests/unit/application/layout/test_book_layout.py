@@ -3178,6 +3178,68 @@ def test_common_short_speaker_name_non_spoiler_and_preserves_titled_names() -> N
 
     assert _speaker_name("Allie", (alex_concept,), (), "ru", document=doc, section_order=1) == "Элли"
 
+    # Multi-word canonical_source_text counts properly (re.escape must not break spaces!).
+    mw_ch1 = _block(
+        "mw1",
+        0,
+        "Alexandra Johnson walked in. Alexandra Johnson paused. Alexandra Johnson smiled. Allie nodded.",
+    )
+    mw_ch1_dlg = _block("mw1", 1, "“Hello.”")
+    mw_ch2 = _block("mw2", 0, "Allie ran. Allie jumped. Allie called out.")
+    mw_ch2_dlg = _block("mw2", 1, "“Look!”")
+    mw_doc = _document(
+        (
+            _section("mw1", 0, "Chapter 1", (mw_ch1, mw_ch1_dlg)),
+            _section("mw2", 1, "Chapter 2", (mw_ch2, mw_ch2_dlg)),
+        )
+    )
+    mw_concept = TermConcept(
+        id="c-alex-full",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Alexandra Johnson",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-alex-full", "ru", "Александра Джонсон", TermStatus.APPROVED),),
+        note="Краткое имя: Allie (Элли).",
+    )
+    # Chapter 1: Alexandra Johnson=3, Allie=1 -> stays Александра Джонсон.
+    assert (
+        _speaker_name(
+            "Alexandra Johnson", (mw_concept,), (), "ru", document=mw_doc, section_order=0
+        )
+        == "Александра Джонсон"
+    )
+    # Chapter 2: cumulative Allie=4 > Alexandra Johnson=3 -> switches to Элли.
+    assert (
+        _speaker_name(
+            "Alexandra Johnson", (mw_concept,), (), "ru", document=mw_doc, section_order=1
+        )
+        == "Элли"
+    )
+
+    # Explicit TermConcept("Allie") appearing AFTER TermConcept("Alexandra", note="...Allie (Элли)")
+    # keeps its explicit user translation regardless of concept order.
+    explicit_allie = TermConcept(
+        id="c-allie-explicit",
+        book_id=DOCUMENT_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Allie",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-allie-explicit", "ru", "Алли", TermStatus.APPROVED),),
+    )
+    assert (
+        _speaker_name(
+            "Allie", (alex_concept, explicit_allie), (), "ru", document=doc, section_order=1
+        )
+        == "Алли"
+    )
+    assert (
+        _speaker_name(
+            "Allie", (explicit_allie, alex_concept), (), "ru", document=doc, section_order=1
+        )
+        == "Алли"
+    )
+
 
 def test_self_identifies_speaker_suppresses_intro_line_but_keeps_generic_phrase() -> None:
     """Self-introduction lines suppress «Говорит …», including short names; generic nouns never suppress."""

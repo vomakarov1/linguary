@@ -2760,10 +2760,10 @@ async def test_trivial_permanent_fact_scope_fast_path_and_guards(tmp_path: Path)
                         event_kind="encounter",
                         quote_anchors=(
                             IllustrationQuoteAnchorDTO(
-                                block_id=blk["block_id"], quote="Alice, Bob, and Clara met"
+                                block_id=blk["block_id"], quote="Alice, Bob, Clara, David, and Eva met"
                             ),
                         ),
-                        participant_names=("Alice", "Bob", "Clara"),
+                        participant_names=("Alice", "Bob", "Clara", "David", "Eva"),
                     ),
                 ),
                 covered_source_unit_ids=(blk["source_unit_id"],),
@@ -2780,20 +2780,27 @@ async def test_trivial_permanent_fact_scope_fast_path_and_guards(tmp_path: Path)
         if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
             fact_scope_entities.append(str(data["entity_id"]))
             fids = tuple(f["fact_id"] for f in data["facts"])
+            desc_by_ent = {
+                "ent-clara": ("Светлый взгляд", "Bright gaze"),
+                "ent-bob": ("В плаще", "In a cloak"),
+                "ent-david": ("В тёмном плаще", "In a dark cloak"),
+                "ent-eva": ("Высокая с короткими волосами", "Tall with short hair"),
+            }
+            desc_ru, desc_en = desc_by_ent[str(data["entity_id"])]
             return IllustrationFactScopeResponse(
                 event_id=data["event_id"],
                 applicable_fact_ids=fids,
                 excluded_fact_ids=(),
-                compact_description_ru="Светлый взгляд" if data["entity_id"] == "ent-clara" else "В плаще",
-                compact_description_en="Bright gaze" if data["entity_id"] == "ent-clara" else "In a cloak",
+                compact_description_ru=desc_ru,
+                compact_description_en=desc_en,
                 complete=True,
             )
         if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
             seen_prompt_inputs.append(data)
             return IllustrationPromptResponse(
                 moment_id=data["moment_id"],
-                scene_composition_en="Alice, Bob, and Clara stand on the stone square in monochrome ink.",
-                depicted_entity_ids=("ent-alice", "ent-bob", "ent-clara"),
+                scene_composition_en="Alice, Bob, Clara, David, and Eva stand on the stone square in monochrome ink.",
+                depicted_entity_ids=("ent-alice", "ent-bob", "ent-clara", "ent-david", "ent-eva"),
                 used_fact_ids=tuple(data["allowed_fact_ids"]),
                 used_design_keys=(),
             )
@@ -2802,12 +2809,19 @@ async def test_trivial_permanent_fact_scope_fast_path_and_guards(tmp_path: Path)
     harness = _seed_book_with_registry(
         tmp_path,
         sections_spec=[
-            ("sec-0", "Ch 1", 0, [("b-0", "Alice, Bob, and Clara met on the stone square.")])
+            (
+                "sec-0",
+                "Ch 1",
+                0,
+                [("b-0", "Alice, Bob, Clara, David, and Eva met on the stone square.")],
+            )
         ],
         registry_items_spec=[
             _entity_item("ent-alice", "Alice"),
             _entity_item("ent-bob", "Bob"),
             _entity_item("ent-clara", "Clara"),
+            _entity_item("ent-david", "David"),
+            _entity_item("ent-eva", "Eva"),
             # Alice: 1 permanent fact, no color words, clean EN/RU -> FAST-PATH!
             _fact_item(
                 "f-alice-perm",
@@ -2842,15 +2856,41 @@ async def test_trivial_permanent_fact_scope_fast_path_and_guards(tmp_path: Path)
                 desc_ru="Яркие зелёные глаза",
                 desc_en="Bright green eyes",
             ),
+            # David: 1 permanent fact WITH Cyrillic in description_en -> MUST call FACT_SCOPE!
+            _fact_item(
+                "f-david-cyr",
+                "ent-david",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Тёмный плащ",
+                desc_en="Dark плащ",
+            ),
+            # Eva: 2 permanent facts -> MUST call FACT_SCOPE!
+            _fact_item(
+                "f-eva-p1",
+                "ent-eva",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Высокого роста",
+                desc_en="Tall stature",
+            ),
+            _fact_item(
+                "f-eva-p2",
+                "ent-eva",
+                section_order=0,
+                temporal_scope="permanent",
+                desc_ru="Короткие волосы",
+                desc_en="Short hair",
+            ),
         ],
         handler=_handler,
         book_id="book-fact-fastpath",
     )
     await _drain_chapter_tasks(harness)
 
-    # Alice bypassed FACT_SCOPE; Bob (episodic) and Clara (color word) ran FACT_SCOPE!
+    # Alice bypassed FACT_SCOPE; Bob (episodic), Clara (color), David (Cyrillic in EN), Eva (2 permanent) ran FACT_SCOPE!
     assert "ent-alice" not in fact_scope_entities
-    assert set(fact_scope_entities) == {"ent-bob", "ent-clara"}
+    assert set(fact_scope_entities) == {"ent-bob", "ent-clara", "ent-david", "ent-eva"}
     assert len(seen_prompt_inputs) == 1
     p_in = seen_prompt_inputs[0]
     assert "f-alice-perm" in p_in["allowed_fact_ids"]

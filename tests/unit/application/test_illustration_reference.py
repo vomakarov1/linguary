@@ -2667,3 +2667,95 @@ def test_build_bounded_design_input_episodic_context_only_and_extract_back_appli
     assert "посмерт" in extract_instr.casefold() or "временных" in extract_instr.casefold()
 
 
+async def test_extract_composite_split_preserves_canonical_uuids_and_realiases_children(
+    tmp_path: Path,
+) -> None:
+    """Splitting a composite EXTRACT scope with >16-char UUIDs keeps canonical UUIDs in DB
+    while re-aliasing each child wire request to b1/u1 and decoding facts back to canonical UUIDs."""
+    from linguary.application.ports.llm import LLMResponseFormatError
+
+    uuid_b1 = "11111111-1111-4111-8111-111111111111"
+    uuid_b2 = "22222222-2222-4222-8222-222222222222"
+    seen_wire_unit_blocks: list[list[tuple[str, tuple[str, ...]]]] = []
+    extract_calls = 0
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        nonlocal extract_calls
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            extract_calls += 1
+            seen_wire_unit_blocks.append(
+                [
+                    (u["source_unit_id"], tuple(b["block_id"] for b in u["blocks"]))
+                    for u in data["units"]
+                ]
+            )
+            total_blocks = sum(len(u["blocks"]) for u in data["units"])
+            if total_blocks == 2:
+                # Force composite split on provider_truncated.
+                raise LLMResponseFormatError("truncated composite extract", truncated=True)
+            u = data["units"][0]
+            b = u["blocks"][0]
+            name = "Alice" if "Alice" in b["text"] else "Bob"
+            return IllustrationExtractResponse(
+                mentions=(
+                    IllustrationMentionDTO(f"m-{name}", name, "person", None, b["block_id"], name),
+                ),
+                facts=(
+                    IllustrationFactDTO(
+                        f"f-{name}",
+                        f"m-{name}",
+                        "permanent",
+                        True,
+                        False,
+                        f"Черта {name}",
+                        f"Trait {name}",
+                        b["block_id"],
+                        name,
+                    ),
+                ),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(decisions=())
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(req.kind)
+
+    h = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            (
+                "sec-split-uuid",
+                "Ch 1",
+                [(uuid_b1, "Alice stood by the gate."), (uuid_b2, "Bob stood by the tree.")],
+            )
+        ],
+        handler=_handler,
+        book_id="book-wire-split-extract",
+    )
+    ref, gen_id = _create_and_plan(h)
+    await _drain_ref_tasks(h, ref)
+
+    # First call was composite (2 blocks -> b1, b2), then split into 2 children (each re-aliased to b1/u1).
+    assert extract_calls == 3
+    assert seen_wire_unit_blocks[0] == [("u1", ("b1", "b2"))]
+    assert seen_wire_unit_blocks[1] == [("u1", ("b1",))]
+    assert seen_wire_unit_blocks[2] == [("u1", ("b1",))]
+
+    with h.uow.read_transaction() as tx:
+        scopes = tx.illustrations.list_scopes(gen_id, stage=IllustrationScopeStage.EXTRACT)
+        children = [s for s in scopes if s.parent_scope_id is not None]
+        assert len(children) == 2
+        child_block_ids = {
+            c.summary["request_input"]["units"][0]["blocks"][0]["block_id"] for c in children
+        }
+        assert child_block_ids == {uuid_b1, uuid_b2}
+        facts_reg, _ = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.FACT
+        )
+        assert {f.raw_payload()["block_id"] for f in facts_reg} == {uuid_b1, uuid_b2}
+
+
+

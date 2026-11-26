@@ -2374,6 +2374,7 @@ class IllustrationReference:
         glossary_links: dict[str, str] = {}
         glossary_source_keys: set[str] = set()
         glossary_ru_by_key: dict[str, str] = {}
+        glossary_ru_rank: dict[str, int] = {}
         glossary_repo = getattr(tx, "glossary", None)
         list_glossary = getattr(glossary_repo, "list_for_book", None) if glossary_repo is not None else None
         if callable(list_glossary):
@@ -2385,7 +2386,11 @@ class IllustrationReference:
                 glossary_source_keys.add(ckey)
                 ru_var = concept.variant_for("ru")
                 if ru_var is not None and ru_var.text.strip():
-                    glossary_ru_by_key[ckey] = ru_var.text.strip()
+                    status_val = getattr(ru_var.status, "value", "")
+                    rank = 2 if status_val == "locked" else (1 if status_val == "approved" else 0)
+                    if rank > glossary_ru_rank.get(ckey, -1):
+                        glossary_ru_rank[ckey] = rank
+                        glossary_ru_by_key[ckey] = ru_var.text.strip()
         glossary_source_keys_frozen = frozenset(glossary_source_keys)
 
         candidate_pairs = build_alias_candidate_pairs(mentions, glossary_links=glossary_links)
@@ -2712,9 +2717,17 @@ class IllustrationReference:
                             k = glossary_key(str(n))
                             if k:
                                 allowed_keys.add(k)
-                    relevant_facts = [
+                    permanent_ent_facts = [
                         f for f in ent_facts if str(f.get("temporal_scope", "")) == "permanent"
-                    ] or list(ent_facts)
+                    ]
+                    if len(permanent_ent_facts) == 1:
+                        episodic_for_ctx = sorted(
+                            (f for f in ent_facts if str(f.get("temporal_scope", "")) == "episodic"),
+                            key=lambda f: (str(f.get("position_key", "")), str(f.get("fact_id", ""))),
+                        )[:2]
+                        relevant_facts = [*permanent_ent_facts, *episodic_for_ctx]
+                    else:
+                        relevant_facts = permanent_ent_facts or list(ent_facts)
                     facts_blob = glossary_key(
                         " ".join(
                             f"{f.get('description_en', '')} {f.get('description_ru', '')} {f.get('quote', '')}"

@@ -754,6 +754,7 @@ def _speaker_index(
     user_by_key: dict[str, str] = {}
     short_name_by_key: dict[str, _ShortNameSpec] = {}
     source_names_sets: dict[str, set[str]] = {}
+    deferred_shorts: list[tuple[str, str, set[str]]] = []
     for concept in concepts:
         key = glossary_key(concept.canonical_source_text)
         if not key or key in user_by_key:
@@ -790,15 +791,17 @@ def _speaker_index(
                         short_name_by_key.setdefault(spec_key, spec)
                 short_key = glossary_key(short_en)
                 if short_key:
-                    user_by_key.setdefault(short_key, short_ru)
-                    lookup_keys.append(short_key)
+                    deferred_shorts.append((short_key, short_ru, names_for_concept))
                 short_ru_key = glossary_key(short_ru)
                 if short_ru_key:
-                    user_by_key.setdefault(short_ru_key, short_ru)
-                    lookup_keys.append(short_ru_key)
+                    deferred_shorts.append((short_ru_key, short_ru, names_for_concept))
             for lookup_key in lookup_keys:
                 if lookup_key:
                     source_names_sets.setdefault(lookup_key, set()).update(names_for_concept)
+    for deferred_key, deferred_ru, deferred_names in deferred_shorts:
+        if deferred_key not in user_by_key:
+            user_by_key[deferred_key] = deferred_ru
+            source_names_sets.setdefault(deferred_key, set()).update(deferred_names)
     candidate_by_key: dict[str, str] = {}
     for analysis in ordered_analyses:
         for candidate in analysis.glossary_candidates:
@@ -832,7 +835,9 @@ def _speaker_index(
             }
         )
         patterns = {
-            name: re.compile(rf"(?<!\w){re.sub(r'\s+', r'\\s+', re.escape(name))}(?!\w)")
+            name: re.compile(
+                rf"(?<!\w){r'\s+'.join(re.escape(part) for part in name.split())}(?!\w)"
+            )
             for name in needed_names
         }
         running = {name: 0 for name in needed_names}
