@@ -941,7 +941,7 @@ async def test_v2_segment_correction_propose_review_apply_on_mixed_three_segment
                 )
 
             assert request.kind is LLMResponseKind.CHAPTER_CORRECTION_REVIEW
-            (cid, sha) = request.correction_candidate_refs[0]
+            (_cid, sha) = request.correction_candidate_refs[0]
             raw_review = json.dumps(
                 {
                     "candidates": [
