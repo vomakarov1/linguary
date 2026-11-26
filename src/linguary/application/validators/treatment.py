@@ -256,7 +256,8 @@ def _block_content_violation(
         if block.segments:
             return (
                 f"для блока {block.source_block_id} без нескольких сегментов "
-                "список segments недопустим"
+                "список segments недопустим: перенеси полный перевод в translated_text "
+                "и верни segments: []"
             )
         return _legacy_content(block, planned=item.treatment, strict_v3=strict_v3)
     return _segmented_content(block, item=item, modes=modes, strict_v3=strict_v3)

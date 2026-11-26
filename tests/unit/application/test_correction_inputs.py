@@ -2487,3 +2487,140 @@ def test_llm_block_result_serializes_note_source_block_id_preserving_checksums()
     assert inputs.checksums == checksums_before
     assert inputs.context_sha256 == expected_context_sha
 
+
+def test_segment_evidence_resolution_and_validation_on_mixed_block() -> None:
+    from dataclasses import asdict
+    from linguary.application.correction_dto import (
+        CorrectionIssue,
+        CurrentAbsenceEvidence,
+        CurrentQuoteEvidence,
+        _evidence_value,
+    )
+    from linguary.application.llm_dto import LLMPayloadError
+    from linguary.application.use_cases.correct_chapter import _llm_block_result
+    from linguary.composition.correction_runtime import CORRECTION_PROMPT_V2
+
+    assert "segments.<index>.translated_text" in CORRECTION_PROMPT_V2
+
+    mixed_result = BlockProcessingResult(
+        block_id="block-mixed",
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второй сегмент. Третий сегмент.",
+        segment_treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.TRANSLATE,
+        ),
+        segment_translations=(None, "Второй сегмент.", "Третий сегмент."),
+    )
+    domain_dict = asdict(mixed_result)
+    llm_dict = _llm_block_result(domain_dict, {"block-mixed": "b1"})
+    assert llm_dict["translated_text"] is None
+    assert llm_dict["segments"] == [
+        {"index": 2, "translated_text": "Второй сегмент."},
+        {"index": 3, "translated_text": "Третий сегмент."},
+    ]
+
+    for current in (domain_dict, llm_dict):
+        # Strict 1-based resolution via entry['index'].
+        assert _evidence_value(current, "segments") == [
+            {"index": 2, "translated_text": "Второй сегмент."},
+            {"index": 3, "translated_text": "Третий сегмент."},
+        ]
+        assert _evidence_value(current, "segments.2") == {
+            "index": 2,
+            "translated_text": "Второй сегмент.",
+        }
+        assert _evidence_value(current, "segments.2.translated_text") == "Второй сегмент."
+        assert _evidence_value(current, "segments[3].translated_text") == "Третий сегмент."
+
+        # Safe fallback to entries[0] ONLY when req_idx == 0.
+        assert _evidence_value(current, "segments.0") == {
+            "index": 2,
+            "translated_text": "Второй сегмент.",
+        }
+        assert _evidence_value(current, "segments.0.translated_text") == "Второй сегмент."
+
+        # No positional collision for req_idx >= 1 when index 1 is READ_AS_IS (absent from entries).
+        assert _evidence_value(current, "segments.1") is None
+        assert _evidence_value(current, "segments.1.translated_text") is None
+
+        # CurrentQuoteEvidence: exact 1-based match works.
+        issue_ok = CorrectionIssue(
+            field_path="segments.2.translated_text",
+            source_quote="Second sentence.",
+            current_evidence=CurrentQuoteEvidence(
+                field_path="segments.2.translated_text",
+                quote="Второй сегмент.",
+            ),
+            problem="Неточность перевода.",
+            minimal_fix_reason="Точечная правка сегмента 2.",
+        )
+        assert issue_ok.valid_for("First. Second sentence. Third.", current) is True
+
+        # CurrentQuoteEvidence ignores 'index' field when path points to segments.2.
+        assert (
+            CurrentQuoteEvidence(field_path="segments.2", quote="Второй").valid_for(current)
+            is True
+        )
+        assert (
+            CurrentQuoteEvidence(field_path="segments.2", quote="2").valid_for(current)
+            is False
+        )
+
+        # CurrentQuoteEvidence tolerant positional fallback for req_idx >= 1 (entries[1] -> index 3).
+        assert (
+            CurrentQuoteEvidence(
+                field_path="segments.1.translated_text",
+                quote="Третий сегмент.",
+            ).valid_for(current)
+            is True
+        )
+        assert (
+            CurrentQuoteEvidence(
+                field_path="segments.1.translated_text",
+                quote="Второй сегмент.",
+            ).valid_for(current)
+            is False
+        )
+
+        # CurrentAbsenceEvidence NEVER uses positional fallback for req_idx >= 1.
+        assert (
+            CurrentAbsenceEvidence(
+                field_path="segments.1.translated_text",
+                observed=None,
+                missing_meaning="Сегмент 1 не переводился.",
+            ).valid_for(current)
+            is True
+        )
+        assert (
+            CurrentAbsenceEvidence(
+                field_path="segments.1.translated_text",
+                observed="meaning_missing",
+                missing_meaning="Пропуск смысла.",
+            ).valid_for(current)
+            is False
+        )
+        assert (
+            CurrentAbsenceEvidence(
+                field_path="segments.2.translated_text",
+                observed="meaning_missing",
+                missing_meaning="Пропуск детали в сегменте 2.",
+            ).valid_for(current)
+            is True
+        )
+
+    # Protected / non-reader paths stay rejected.
+    for bad_path in (
+        "segments.1.index",
+        "segments.foo.translated_text",
+        "segments.2.extra",
+        "block_id",
+        "treatment",
+        "segment_treatments",
+        "segment_translations",
+    ):
+        with pytest.raises(LLMPayloadError):
+            _evidence_value(domain_dict, bad_path)
+
+

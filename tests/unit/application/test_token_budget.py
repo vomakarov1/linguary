@@ -783,14 +783,14 @@ def test_recommended_unit_max_completion_tokens_implicit_reasoning_reserve() -> 
         == 2048 + 10000
     )
 
-    # Explicit reasoning_effort (including "none") or reasoning_max_tokens takes precedence.
+    # Explicit reasoning_effort="none" or reasoning_max_tokens is NOT overridden by implicit_reasoning_tokens.
     assert (
         recommended_unit_max_completion_tokens(
             0,
             max_output_tokens=32768,
             reasoning_effort="none",
             reasoning_max_tokens=None,
-            implicit_reasoning_tokens=5000,
+            implicit_reasoning_tokens=8000,
         )
         == 2048
     )
@@ -800,9 +800,43 @@ def test_recommended_unit_max_completion_tokens_implicit_reasoning_reserve() -> 
             max_output_tokens=32768,
             reasoning_effort=None,
             reasoning_max_tokens=4096,
-            implicit_reasoning_tokens=5000,
+            implicit_reasoning_tokens=8000,
         )
         == 2048 + 4096
+    )
+
+    # Active reasoning_effort (e.g. "low") combines with implicit_reasoning_tokens via max(effort_total, implicit_total).
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort="low",
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=8000,
+        )
+        == 2048 + 16000
+    )
+    # Still clamped by max_output_tokens when configured.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=10000,
+            reasoning_effort="low",
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=8000,
+        )
+        == 10000
+    )
+    # When effort's own floor is already higher than implicit_total, keep effort_total.
+    assert (
+        recommended_unit_max_completion_tokens(
+            0,
+            max_output_tokens=32768,
+            reasoning_effort="high",
+            reasoning_max_tokens=None,
+            implicit_reasoning_tokens=1000,
+        )
+        == 2048 + 12288
     )
 
 
@@ -1097,4 +1131,160 @@ async def test_translation_call_same_call_escalates_on_truncation_with_none_max_
         )  # type: ignore[arg-type]
     assert seen_none == [2048]
     assert call_none._get_implicit_reasoning_floor() == 0
+
+
+async def test_recovery_implicit_escalation_with_low_effort_and_none_max_output_runs_once() -> None:
+    """WP2.2: recovery with max_output_tokens=None and reasoning_effort='low' escalates once from observed reasoning."""
+    cond_id = str(uuid4())
+    root_id = str(uuid4())
+    conditions = SimpleNamespace(
+        id=cond_id,
+        payload={
+            "models": {"processing": "deepseek-v4"},
+            "versions": {"validators": 1},
+            "llm_parameters": {
+                "max_output_tokens": None,
+                "reasoning_effort": "low",
+                "reasoning_max_tokens": None,
+            },
+        },
+    )
+
+    def _make_recovery_uow(unit: TranslationUnit):
+        calls_used = {"n": 0}
+        root_state = SimpleNamespace(
+            id=root_id,
+            conditions_id=cond_id,
+            policy_version=CURRENT_TRANSLATION_POLICY,
+            generation=1,
+            calls_used=0,
+            extra_calls=0,
+            superseded_by=None,
+            status="active",
+            reason=None,
+            manifest={"policy": {"max_calls": 10, "max_scope_calls": 5}},
+        )
+
+        def begin_attempt(*args, **kwargs):
+            calls_used["n"] += 1
+            root_state.calls_used = calls_used["n"]
+            return CallContext(
+                conditions_id=cond_id,
+                stage=LLMCallStage.TRANSLATION_UNIT.value,
+                scope_id="scope-1",
+                ordered_block_ids=tuple(item.block.id for item in unit.items),
+                attempt_id=str(uuid4()),
+                generation=0,
+                assigned_model="deepseek-v4",
+                prompt_hash="a" * 64,
+                root_id=root_id,
+                policy_version=CURRENT_TRANSLATION_POLICY,
+            )
+
+        fake_tx = SimpleNamespace(
+            runs=SimpleNamespace(active_for_book=lambda book_id: None),
+            work=SimpleNamespace(
+                get_binding=lambda kind, key: None,
+                get_conditions=lambda cid: conditions if cid == cond_id else None,
+                get_root=lambda rid: root_state if rid == root_id else None,
+                begin_recovery_attempt=begin_attempt,
+                owns_recovery_attempt=lambda aid: True,
+                record_recovery_failure=lambda *a, **k: True,
+                scope_attempt_count=lambda sid: calls_used["n"],
+                stop_root=lambda *a, **k: None,
+                set_root_status=lambda *a, **k: None,
+            ),
+        )
+        return SimpleNamespace(
+            transaction=lambda: nullcontext(fake_tx),
+            _diagnostics_service=SimpleNamespace(
+                ensure_available=lambda: None,
+                fail=lambda: None,
+                finalize_attempt=lambda *a, **k: None,
+            ),
+        )
+
+    # 1. Single-block unit: truncated at 6144 with reasoning_tokens=5000 -> escalates to 2048+10000=12048 and succeeds.
+    block1, unit1 = _sample_unit("Hello world.")
+    seen1: list[int | None] = []
+
+    async def gen_once(req: LLMRequest[TranslationResultResponse]) -> LLMResponse[TranslationResultResponse]:
+        seen1.append(req.max_completion_tokens)
+        if len(seen1) == 1:
+            raise LLMResponseFormatError(
+                "truncated",
+                truncated=True,
+                usage=TokenUsage(prompt_tokens=100, completion_tokens=6144, reasoning_tokens=5000),
+                violation=Violation(
+                    rule_code="provider_truncated",
+                    stage=LLMCallStage.TRANSLATION_UNIT.value,
+                    scope="global",
+                    safe_message="truncated",
+                ),
+            )
+        return LLMResponse(
+            payload=TranslationResultResponse(blocks=()),
+            provider="fake",
+            model="deepseek-v4",
+            call_context=req.call_context,
+        )
+
+    call1 = TranslationCall(
+        unit_of_work=_make_recovery_uow(unit1),  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(generate=gen_once),  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=SimpleNamespace(
+            validate=lambda payload, **kwargs: (
+                BlockProcessingResult(block1.id, BlockTreatment.TRANSLATE, "Привет."),
+            )
+        ),  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    req1 = LLMRequest.for_translation(instructions="Translate.", input_text="b1: Hello world.")
+    res1 = await call1.request(
+        _translation_context(req1),  # type: ignore[arg-type]
+        unit=unit1,
+        target_language="ru",
+        note_ids=lambda: "n1",
+        recovery=(root_id, "scope-1"),
+    )
+    assert res1.attempts == 2
+    assert seen1 == [6144, 12048]
+
+    # 2. Multi-block unit: escalates AT MOST ONCE even if second call reports higher reasoning_tokens -> RecoverySplit.
+    _blocks2, unit2 = _multi_block_unit(2)
+    seen2: list[int | None] = []
+
+    async def gen_always_trunc(req: LLMRequest[TranslationResultResponse]) -> LLMResponse[TranslationResultResponse]:
+        seen2.append(req.max_completion_tokens)
+        reported = 5000 if len(seen2) == 1 else 9000
+        raise LLMResponseFormatError(
+            "truncated",
+            truncated=True,
+            usage=TokenUsage(prompt_tokens=100, completion_tokens=reported, reasoning_tokens=reported),
+            violation=Violation(
+                rule_code="provider_truncated",
+                stage=LLMCallStage.TRANSLATION_UNIT.value,
+                scope="global",
+                safe_message="truncated",
+            ),
+        )
+
+    call2 = TranslationCall(
+        unit_of_work=_make_recovery_uow(unit2),  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(generate=gen_always_trunc),  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=SimpleNamespace(validate=lambda payload, **kwargs: ()),  # type: ignore[arg-type]
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    with pytest.raises(RecoverySplit):
+        await call2.request(
+            _translation_context(req1),  # type: ignore[arg-type]
+            unit=unit2,
+            target_language="ru",
+            note_ids=lambda: "n1",
+            recovery=(root_id, "scope-1"),
+        )
+    assert seen2 == [6144, 12048]
+
 

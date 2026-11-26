@@ -64,10 +64,15 @@ CORRECTION_PROMPT_V2 = """Сверь текущие результаты с ор
 current_evidence с kind quote, точной цитатой и совпадающим field_path. Для отсутствующего значения
 используй kind absence с observed null, empty_list или empty_text и описанием missing_meaning.
 Если в непустом тексте упущен смысл, используй observed meaning_missing и опиши пропущенный смысл;
-никогда не выдумывай цитату текущего текста. Пути полей имеют вид translated_text,
-glossary_hints.0.translation или language_notes.0.note. Для блока из нескольких сегментов верни
-segments с индексом от 1 и translated_text исправляемого сегмента, оставь translated_text блока
-null, а пропущенный индекс сохраняет текущий перевод сегмента. Блок из одного промежутка
+никогда не выдумывай цитату текущего текста. Для несегментированного блока пути полей имеют вид
+translated_text, glossary_hints.<индекс>.<поле> (например, glossary_hints.0.translation) или
+language_notes.<индекс>.<поле> (например, language_notes.0.note). Для сегментированного блока
+(где translated_text равен null и передан массив segments) используй field_path вида
+segments.<index>.translated_text, где <index> — номер index из переданного элемента segments
+(например, segments.2.translated_text), а также glossary_hints.<индекс>.<поле> и
+language_notes.<индекс>.<поле>. Для блока из нескольких сегментов верни segments с индексом от 1
+и translated_text исправляемого сегмента, оставь translated_text блока null, а пропущенный индекс
+сохраняет текущий перевод сегмента. Блок из одного промежутка
 исправляй целиком через translated_text и верни пустой список segments. Режим TRANSLATE требует полного перевода,
 GLOSSARY_ONLY — подсказок и null вместо перевода, READ_AS_IS — null вместо перевода и отсутствия
 подсказок. Заметки принадлежат своему блоку. Не меняй оригинал, режим, предупреждения,

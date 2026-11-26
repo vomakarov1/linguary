@@ -697,3 +697,299 @@ async def test_lifecycle_mixed_block_processing_correction_recovery(
     assert recovered.segment_translations == (corrected, None)
     assert recovered.translated_text == recovered.rebuild_translation()
     assert recovered.translated_text == corrected
+
+
+async def test_v2_segment_correction_propose_review_apply_on_mixed_three_segment_block(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Full V2 propose -> review -> apply cycle on [READ_AS_IS, TRANSLATE, TRANSLATE] with segments.2.translated_text."""
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.application.correction import reconcile_corrections
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V3,
+        CorrectionSnapshotV2,
+    )
+    from linguary.application.ports.llm import LLMResponse, LLMResponseKind
+    from linguary.application.use_cases.correct_chapter import (
+        CorrectChapterCommand,
+        CorrectChapterV2,
+    )
+    from linguary.composition.correction_runtime import (
+        CORRECTION_PROMPT_V2,
+        CORRECTION_REVIEW_PROMPT,
+    )
+    from linguary.domain import TaskStatus
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V3
+    from linguary.domain.recovery import CallAttempt
+
+    seg1 = "Simple start. "
+    seg2 = "Two dozen owls flew past. "
+    seg3 = "Gamma waited quietly."
+    full_source = seg1 + seg2 + seg3
+    spans = (
+        BlockSegment(0, len(seg1), 0),
+        BlockSegment(len(seg1), len(seg1) + len(seg2), 1),
+        BlockSegment(len(seg1) + len(seg2), len(full_source), 2),
+    )
+    treatments = (
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    )
+    orig_seg2 = "Два десятка сов пролетели мимо."
+    fixed_seg2 = "Две дюжины сов пролетели мимо."
+    orig_seg3 = "Гамма тихо ждала."
+
+    store_processing_book(unit_of_work, chapters=((full_source,),))
+    with unit_of_work.transaction() as tx:
+        document = tx.documents.get(BOOK_ID)
+        analysis = tx.analyses.get_for_section(BOOK_ID, "section-1")
+    section = document.section("section-1")
+    block = section.ordered_blocks[0]
+    segmented = replace(block, segments=spans)
+    revised = replace(
+        analysis,
+        treatment_plan=TreatmentPlan(
+            section.id,
+            (
+                TreatmentPlanItem(
+                    block.id,
+                    BlockTreatment.TRANSLATE,
+                    treatments,
+                    sentence_indexes=(0, 1, 2),
+                ),
+            ),
+        ),
+    )
+
+    snapshot_v2 = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={
+            "provider": "openai_compatible",
+            "base_url": "https://example.test/v1",
+            "proxy": "",
+            "route_id": "r1",
+        },
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 2000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt=CORRECTION_PROMPT_V2,
+        review_prompt=CORRECTION_REVIEW_PROMPT,
+        versions=CORRECTION_VERSIONS_V3,
+        policy_version=CORRECTION_POLICY_VERSION_V3,
+    )
+    cond = BookConditions(
+        id=str(uuid4()),
+        book_id=BOOK_ID,
+        revision=1,
+        payload={
+            "schema_version": 1,
+            "english_help": False,
+            "reader_level": "b2",
+            "versions": {"validators": 3},
+        },
+        created_at=datetime.now(UTC),
+    )
+    initial_result = _result(block, (None, orig_seg2, orig_seg3), treatments)
+    initial_attempt_id = str(uuid4())
+    with unit_of_work.transaction() as tx:
+        tx.documents.save(replace(document, sections=(replace(section, blocks=(segmented,)),)))
+        tx.analyses.save(BOOK_ID, revised)
+        tx.results.replace_results(RUN_ID, (initial_result,))
+        tx.work.add_conditions(cond)
+        tx.work.bind(
+            "run",
+            RUN_ID,
+            book_id=BOOK_ID,
+            conditions_id=cond.id,
+            payload={"schema_version": 1, "correction": snapshot_v2.to_payload()},
+        )
+        tx.work.add_attempt(
+            CallAttempt(
+                initial_attempt_id,
+                BOOK_ID,
+                conditions_id=cond.id,
+                task_id=str(uuid4()),
+                run_id=RUN_ID,
+                ordinal=1,
+                context={
+                    "schema_version": 1,
+                    "stage": "translation_unit",
+                    "ordered_block_ids": [block.id],
+                },
+                state="accepted",
+            )
+        )
+        (initial_artifact,) = tx.work.archive_artifacts(
+            [
+                {
+                    "book_id": BOOK_ID,
+                    "conditions_id": cond.id,
+                    "attempt_id": initial_attempt_id,
+                    "run_id": RUN_ID,
+                    "kind": "block_result",
+                    "scope_id": block.id,
+                    "body": {
+                        "schema_version": 1,
+                        "result": json.loads(json.dumps(asdict(initial_result))),
+                    },
+                }
+            ]
+        )
+        tx.work.bind(
+            "result",
+            f"{RUN_ID}:{block.id}",
+            book_id=BOOK_ID,
+            conditions_id=cond.id,
+            attempt_id=initial_attempt_id,
+            artifact_revision_id=initial_artifact,
+            payload={"schema_version": 1},
+        )
+        (created_task,) = reconcile_corrections(tx, BOOK_ID)
+        task_id = created_task.id
+        op_id = created_task.operation_id
+        tx.tasks.save(
+            replace(
+                created_task,
+                status=TaskStatus.RUNNING,
+                attempts=1,
+            )
+        )
+
+    stages_seen: list[LLMResponseKind] = []
+
+    class V2SegmentClient:
+        async def generate(self, request):
+            stages_seen.append(request.kind)
+            ctx = request.call_context
+            attempt_ctx = {
+                **ctx.to_dict(),
+                "task_attempt": 1,
+                "operation_id": op_id,
+            }
+            with unit_of_work.transaction() as tx:
+                tx.work.add_attempt(
+                    CallAttempt(
+                        ctx.attempt_id,
+                        BOOK_ID,
+                        conditions_id=cond.id,
+                        task_id=task_id,
+                        run_id=RUN_ID,
+                        ordinal=request.attempt,
+                        context=attempt_ctx,
+                        state="validated",
+                    )
+                )
+            if request.kind is LLMResponseKind.CHAPTER_CORRECTION:
+                body = json.loads(request.input_text)
+                assert body["blocks"][0]["current_result"]["segments"] == [
+                    {"index": 2, "translated_text": orig_seg2},
+                    {"index": 3, "translated_text": orig_seg3},
+                ]
+                raw = json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "block_id": "b1",
+                                "status": "proposed",
+                                "translated_text": None,
+                                "glossary_hints": [],
+                                "language_notes": [],
+                                "segments": [
+                                    {"index": 2, "translated_text": fixed_seg2},
+                                ],
+                                "issues": [
+                                    {
+                                        "field_path": "segments.2.translated_text",
+                                        "source_quote": "Two dozen owls",
+                                        "current_evidence": {
+                                            "kind": "quote",
+                                            "field_path": "segments.2.translated_text",
+                                            "quote": "Два десятка сов",
+                                        },
+                                        "problem": "«two dozen» означает «две дюжины», а не «два десятка».",
+                                        "minimal_fix_reason": "Меняется только неверное числительное в сегменте 2.",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+                payload = parse_payload(
+                    LLMResponseKind.CHAPTER_CORRECTION,
+                    raw,
+                    contract_version=2,
+                ).with_resolved_block_ids(dict(request.block_aliases))
+                return LLMResponse(
+                    payload=payload,
+                    provider="fake",
+                    model="gpt-test",
+                    raw_content=raw,
+                    call_context=ctx,
+                )
+
+            assert request.kind is LLMResponseKind.CHAPTER_CORRECTION_REVIEW
+            (cid, sha) = request.correction_candidate_refs[0]
+            raw_review = json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "candidate_id": "c1",
+                            "proposal_sha256": sha,
+                            "verdict": "confirmed",
+                            "error_supported": True,
+                            "evidence_valid": True,
+                            "minimal": True,
+                            "no_semantic_loss": True,
+                            "reason": "Исправление точное и минимальное.",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            review_payload = parse_payload(
+                LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+                raw_review,
+                contract_version=1,
+            ).with_resolved_proposal_shas(request.correction_candidate_refs)
+            return LLMResponse(
+                payload=review_payload,
+                provider="fake",
+                model="gpt-test",
+                raw_content=raw_review,
+                call_context=ctx,
+            )
+
+    handler = CorrectChapterV2(
+        unit_of_work=unit_of_work,
+        llm_client=V2SegmentClient(),
+        snapshot=snapshot_v2,
+        validator=make_validator(),
+    )
+    await handler(CorrectChapterCommand(BOOK_ID, section.id, task_id))
+
+    assert stages_seen == [
+        LLMResponseKind.CHAPTER_CORRECTION,
+        LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+    ]
+    (updated,) = _stored(unit_of_work)
+    assert updated.segment_translations == (None, fixed_seg2, orig_seg3)
+    assert updated.translated_text == f"{fixed_seg2} {orig_seg3}"
+    with unit_of_work.transaction() as tx:
+        cands = tx.work.list_correction_candidates(RUN_ID, section_id=section.id)
+    assert len(cands) == 1
+    assert cands[0].state == "auto_applied"
+    assert cands[0].payload["evidence_valid"] is True
+

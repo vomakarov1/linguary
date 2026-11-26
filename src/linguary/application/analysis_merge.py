@@ -1846,7 +1846,7 @@ def _exact_quote_spans(text: str, quote: str) -> list[tuple[int, int, str]]:
 
 
 _QUOTE_LENIENT_TOKEN_RE = re.compile(
-    r"(?P<dash_sp>\s*(?:[—–]|(?<=\s)-(?=\s))\s*)|(?P<ws>\s+)|(?P<ch>.)",
+    r"(?P<dash_sp>\s*(?:[—–]|(?<=\s)-(?=\s))\s*)|(?P<ellipsis>…|\.{3})|(?P<ws>\s+)|(?P<ch>.)",
     re.DOTALL,
 )
 
@@ -1859,6 +1859,8 @@ def _lenient_quote_pattern(quote: str) -> str:
         part = match.group(0)
         if kind == "dash_sp":
             pattern_parts.append(r"\s*[-—–]\s*")
+        elif kind == "ellipsis":
+            pattern_parts.append(r"(?:…|\.{3})")
         elif kind == "ws":
             pattern_parts.append(r"\s+")
         elif part in ("'", "’", "‘", "`"):

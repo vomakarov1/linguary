@@ -1854,6 +1854,27 @@ def test_validate_narrative_rejects_generic_lowercase_person_candidates():
     assert prio_exc.value.violation.rule_code == 'name_assessment_conflict'
 
 
+def test_find_quote_span_matches_ellipsis_and_three_dots_both_ways() -> None:
+    """WP2.4: find_quote_span treats Unicode '…' and ASCII '...' equivalently without matching arbitrary text."""
+    from linguary.application.analysis_merge import find_quote_span
+
+    text_unicode = "He paused… then spoke softly."
+    span1 = find_quote_span(text_unicode, "He paused... then spoke")
+    assert span1 is not None
+    assert text_unicode[span1[0] : span1[1]] == "He paused… then spoke"
+
+    text_ascii = "He paused... then spoke softly."
+    span2 = find_quote_span(text_ascii, "He paused… then spoke")
+    assert span2 is not None
+    assert text_ascii[span2[0] : span2[1]] == "He paused... then spoke"
+
+    # Must not match two dots or arbitrary text.
+    assert find_quote_span("He paused.. then spoke.", "He paused… then spoke") is None
+    assert find_quote_span("He paused--- then spoke.", "He paused... then spoke") is None
+    assert find_quote_span("He pausedabc then spoke.", "He paused… then spoke") is None
+
+
+
 
 
 

@@ -3634,3 +3634,29 @@ def test_note_language_leak_apostrophe_boundary_prevents_partial_contraction_mat
         is not None
     )
 
+
+def test_single_segment_block_with_segments_gives_actionable_violation() -> None:
+    """WP2.3: returning segments for a non-segmented block tells the model to move translation to translated_text."""
+    from linguary.application.validators.treatment import content_violation
+
+    block = make_block(order=0, text="Single paragraph.")
+    unit = make_unit((block,))
+    payload = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                glossary_hints=(),
+                segments=(SegmentTranslationResponse(1, "Один абзац."),),
+            ),
+        )
+    )
+    violation = content_violation(payload, unit=unit)
+    assert violation == (
+        f"для блока {block.id} без нескольких сегментов "
+        "список segments недопустим: перенеси полный перевод в translated_text "
+        "и верни segments: []"
+    )
+
+

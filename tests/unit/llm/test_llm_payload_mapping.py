@@ -963,7 +963,9 @@ def test_format_error_schema_hints_for_segment_index_bounds_and_static_value_err
                 "glossary_hints": [],
                 "segments": [{"index": 1, "translated_text": "Часть."}],
             },
-            "для блока с переводами сегментов полный перевод блока недопустим",
+            "нельзя одновременно заполнять translated_text и segments: "
+            "для блока без меток сегментов верни перевод в translated_text и segments: []; "
+            "для блока с метками сегментов верни translated_text: null и заполни segments",
         ),
     ]
     for bad_block, expected_hint in value_error_cases:
@@ -1019,4 +1021,106 @@ def test_format_error_schema_hints_for_segment_index_bounds_and_static_value_err
     assert "context_facts[0]: value_error" in unknown_msg
     assert "подсказки схемы:" not in unknown_msg
     assert "SECRET_CONTEXT_VALUE" not in unknown_msg
+
+
+def test_parse_payload_contract_error_uses_static_allowlist_without_leaking_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linguary.adapters.llm import payloads as payloads_mod
+    from linguary.application.llm_dto import LLMPayloadError
+
+    # 1. Known static LLMPayloadError from correction_dto surfaces safe static hint.
+    correction_bad_protected = {
+        "blocks": [
+            {
+                "block_id": "b1",
+                "status": "proposed",
+                "translated_text": "Перевод.",
+                "glossary_hints": [],
+                "language_notes": [],
+                "issues": [
+                    {
+                        "field_path": "treatment",
+                        "source_quote": "Secret book text",
+                        "current_evidence": {
+                            "kind": "quote",
+                            "field_path": "treatment",
+                            "quote": "Secret quote",
+                        },
+                        "problem": "Ошибка.",
+                        "minimal_fix_reason": "Правка.",
+                    }
+                ],
+            }
+        ]
+    }
+    with pytest.raises(LLMResponseFormatError) as protected_err:
+        parse_payload(
+            LLMResponseKind.CHAPTER_CORRECTION,
+            as_content(correction_bad_protected),
+            contract_version=2,
+        )
+    protected_msg = str(protected_err.value)
+    assert "(LLMPayloadError): доказательство указывает на защищённое поле" in protected_msg
+    assert "Secret book text" not in protected_msg
+    assert "Secret quote" not in protected_msg
+    assert protected_err.value.violation is not None
+    assert protected_err.value.violation.safe_message == "Ответ не соответствует внутреннему контракту"
+
+    # 2. Forbidden segment subfield segments.1.index surfaces safe static hint.
+    correction_bad_subfield = {
+        "blocks": [
+            {
+                "block_id": "b1",
+                "status": "proposed",
+                "translated_text": None,
+                "glossary_hints": [],
+                "language_notes": [],
+                "segments": [{"index": 1, "translated_text": "Новый."}],
+                "issues": [
+                    {
+                        "field_path": "segments.1.index",
+                        "source_quote": "Secret line",
+                        "current_evidence": {
+                            "kind": "quote",
+                            "field_path": "segments.1.index",
+                            "quote": "1",
+                        },
+                        "problem": "Ошибка.",
+                        "minimal_fix_reason": "Правка.",
+                    }
+                ],
+            }
+        ]
+    }
+    with pytest.raises(LLMResponseFormatError) as subfield_err:
+        parse_payload(
+            LLMResponseKind.CHAPTER_CORRECTION,
+            as_content(correction_bad_subfield),
+            contract_version=2,
+        )
+    assert "(LLMPayloadError): путь доказательства не является читательским полем" in str(
+        subfield_err.value
+    )
+    assert subfield_err.value.violation is not None
+    assert subfield_err.value.violation.safe_message == "Ответ не соответствует внутреннему контракту"
+
+    # 3. Unregistered LLMPayloadError containing raw book text / source_block_id MUST NOT leak.
+    def _raise_unregistered(_validated: object) -> object:
+        raise LLMPayloadError(
+            "для блока secret-uuid-42 текст «SECRET BOOK EXCERPT» недопустим"
+        )
+
+    monkeypatch.setattr(payloads_mod, "_to_dto", _raise_unregistered)
+    with pytest.raises(LLMResponseFormatError) as raw_err:
+        parse_payload(
+            LLMResponseKind.TRANSLATION_RESULT,
+            as_content(translation_payload()),
+        )
+    raw_msg = str(raw_err.value)
+    assert raw_msg == "ответ модели (translation_result) не соответствует внутреннему контракту: LLMPayloadError"
+    assert "secret-uuid-42" not in raw_msg
+    assert "SECRET BOOK EXCERPT" not in raw_msg
+    assert raw_err.value.violation is not None
+    assert raw_err.value.violation.safe_message == "Ответ не соответствует внутреннему контракту"
 
