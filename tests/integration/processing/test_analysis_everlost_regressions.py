@@ -2028,3 +2028,148 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
             assert part1_modes[part1_blocks[1].id] is BlockTreatment.GLOSSARY_ONLY
     finally:
         await default_seq_app.aclose()
+
+
+async def test_everlost_ch2_spoiler_monotonic_and_fragment_cache_retry_breaks_deadlock(tmp_path: Path) -> None:
+    """Everlost Ch.2: merge failure clears fragment cache and RetryTask avoids a 0-call deadlock."""
+    from linguary.application.use_cases.retry_task import RetryTaskCommand
+
+    section = DocumentSection(
+        id=SECTION_ID,
+        document_id=BOOK_ID,
+        title="Chapter 2: Deadspots",
+        order=0,
+        source_resource_path="ch2.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id=BOOK_ID,
+                section_id=SECTION_ID,
+                type=BlockType.PARAGRAPH,
+                order=0,
+                text="The younger freckled boy looked across the misty road.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[1]"),
+                support_status=SupportStatus.SUPPORTED,
+            ),
+            DocumentBlock.create(
+                document_id=BOOK_ID,
+                section_id=SECTION_ID,
+                type=BlockType.PARAGRAPH,
+                order=1,
+                text="Everyone called the newcomer Chocolate Boy.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[2]"),
+                support_status=SupportStatus.SUPPORTED,
+            ),
+        ),
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Everlost", authors=("Neal Shusterman",)),
+        source_language="en",
+        target_language="ru",
+        sections=(section,),
+    )
+
+    # First run: fragment 0 leaks 'Chocolate Boy' before it appears in fragment 1 -> chapter merge fails
+    # and clears NARRATIVE fragment passes.
+    # Retry run: fragment 0 uses neutral 'younger boy' (monotone with later 'Chocolate Boy' in fragment 1)
+    # and succeeds without hitting a 0-call deadlock.
+    bad_frag0 = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=1,
+            chapter_summary="The younger boy looks at the road.",
+            location="Misty Road",
+            participants=("Chocolate Boy",),
+        )
+    )
+    good_frag1 = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=1,
+            chapter_summary="The younger boy is called Chocolate Boy.",
+            location="Everlost Forest",
+            participants=("Chocolate Boy",),
+            glossary_candidates=[
+                {
+                    "source_text": "Chocolate Boy",
+                    "type": "person",
+                    "suggested_translation": "Шоколадный Мальчик",
+                    "confidence": 0.9,
+                    "model_flagged_review": False,
+                    "note": "",
+                    "description": "Мальчик с лицом, перемазанным шоколадом.",
+                    "name_translation_assessment": {
+                        "opaque_name": False,
+                        "applied_method": "meaning",
+                        "eligible_without_review": True,
+                        "review_reasons": [],
+                        "rationale": "Прозрачное прозвище.",
+                    },
+                }
+            ],
+        )
+    )
+    fixed_frag0 = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=1,
+            chapter_summary="The younger boy looks at the road.",
+            location="Misty Road",
+            participants=("younger boy",),
+        )
+    )
+    ped_frag0 = FakeReply.of_payload(
+        _pedagogical_payload(block_count=1, summary="The younger boy looks at the road.")
+    )
+    ped_frag1 = FakeReply.of_payload(
+        _pedagogical_payload(block_count=1, summary="The younger boy is called Chocolate Boy.")
+    )
+
+    client = StagedFakeLLMClient([
+        bad_frag0,
+        good_frag1,
+        fixed_frag0,
+        good_frag1,
+        ped_frag0,
+        ped_frag1,
+    ])
+    app, _ = _make_everlost_app(
+        tmp_path / "deadlock-break",
+        client,
+        max_fragment_blocks=1,
+        max_attempts=1,
+        seed_book=False,
+    )
+    try:
+        source = app.paths.source_epub(BOOK_ID)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"synthetic everlost epub")
+        with app.unit_of_work.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    id=BOOK_ID,
+                    metadata=document.metadata,
+                    source_language="en",
+                    target_language="ru",
+                    status=BookStatus.IMPORTED,
+                    source_epub_path=str(source),
+                    created_at=CREATED_AT,
+                )
+            )
+            tx.documents.save(document)
+
+        await app.analysis.start(BOOK_ID)
+        first_run = await drain_tasks(app)
+        assert len(first_run) == 1
+        assert first_run[0].status is TaskStatus.FAILED
+        assert first_run[0].last_error is not None
+        assert first_run[0].last_error.type is ErrorType.VALIDATION
+        assert "Chocolate Boy" in first_run[0].last_error.message
+        with app.unit_of_work.transaction() as tx:
+            assert tx.analyses.list_passes_for_section(BOOK_ID, SECTION_ID) == ()
+
+        app.retry_task(RetryTaskCommand(task_id=first_run[0].id))
+        second_run = await drain_tasks(app)
+        assert len(second_run) == 1
+        assert second_run[0].status is TaskStatus.SUCCEEDED, second_run[0].last_error
+        assert len(client.requests) == 6
+    finally:
+        await app.aclose()
+

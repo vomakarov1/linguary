@@ -1365,3 +1365,475 @@ async def test_failed_per_section_extract_blocks_prepare_for_other_section(tmp_p
     recovered = service.get(book_id)
     assert recovered.state == "ready"
 
+
+async def test_wp2_end_to_end_anonymous_blocking_canonical_priority_aliases_and_glossary(
+    tmp_path: Path,
+) -> None:
+    """WP2 integration: anonymous descriptor blocking, glossary canonical name, clean known_characters, localized name_ru."""
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain.glossary import ConceptType, TermConcept, TermStatus, TermVariant
+
+    db = tmp_path / "wp2_e2e.db"
+    apply_migrations(db)
+    uow = SqlAlchemyUnitOfWork.for_engine(create_database_engine(db))
+    book_id = "book-wp2-e2e"
+    conditions_id = str(uuid4())
+    source_sha = "e" * 64
+
+    sections = (
+        DocumentSection(
+            id="sec-0",
+            document_id=book_id,
+            title="Chapter 1",
+            order=0,
+            source_resource_path="ch1.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id="b-0",
+                    section_id="sec-0",
+                    type=BlockType.PARAGRAPH,
+                    order=0,
+                    text="The boy woke up in the quiet forest. Nick wiped chocolate from his chin.",
+                    source_reference=SourceReference("ch1.xhtml", "p[0]"),
+                    support_status=SupportStatus.SUPPORTED,
+                ),
+                DocumentBlock(
+                    id="b-1",
+                    section_id="sec-0",
+                    type=BlockType.PARAGRAPH,
+                    order=1,
+                    text="Nick looked around and someone called him Chocolate Boy.",
+                    source_reference=SourceReference("ch1.xhtml", "p[1]"),
+                    support_status=SupportStatus.SUPPORTED,
+                ),
+            ),
+        ),
+        DocumentSection(
+            id="sec-1",
+            document_id=book_id,
+            title="Chapter 2",
+            order=1,
+            source_resource_path="ch2.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id="b-2",
+                    section_id="sec-1",
+                    type=BlockType.PARAGRAPH,
+                    order=0,
+                    text="Nick walked past the misty harbor where The McGill watched silently.",
+                    source_reference=SourceReference("ch2.xhtml", "p[0]"),
+                    support_status=SupportStatus.SUPPORTED,
+                ),
+            ),
+        ),
+    )
+    document = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="Everlost Sample", authors=("Author",)),
+        sections=sections,
+        resources=(),
+        source_language="en",
+        target_language="ru",
+    )
+    book = BookRecord(
+        id=book_id,
+        metadata=document.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.GLOSSARY_REVIEW,
+        source_epub_path=str(tmp_path / "wp2.epub"),
+        created_at=datetime(2026, 11, 1, tzinfo=UTC),
+    )
+    app_settings = AppSettings(
+        llm=LLMSettings(
+            provider="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5-mini",
+            api_key="test-key",
+            max_output_tokens=16384,
+            staged_analysis=True,
+        ),
+        checks=CheckSettings(sequential_analysis=False),
+        reading=ReadingSettings(reader_level="b1", name_translation_strategy="sound"),
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+    )
+    cond_payload = conditions_payload(book, app_settings, revision=1, profile="content-plan-v3")
+    cond_payload["source_sha256"] = source_sha
+    ctx_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        name_translation_policy=NameTranslationPolicy(
+            version=1, strategy=NameTranslationStrategy.SOUND
+        ),
+        reader_level="b1",
+    )
+    model_deps = _pass_model_dependencies(cond_payload)
+    max_frag = narrative_max_fragment_blocks_for(cond_payload["llm_parameters"])
+
+    with uow.transaction() as tx:
+        tx.books.add(book)
+        tx.documents.save(document)
+        tx.work.add_conditions(
+            BookConditions(
+                id=conditions_id,
+                book_id=book_id,
+                revision=1,
+                payload=cond_payload,
+                created_at=datetime(2026, 11, 1, tzinfo=UTC),
+            )
+        )
+        for cid, src, ru, ctype in (
+            ("c-nick", "Nick", "Ник", ConceptType.PERSON),
+            ("c-mcgill", "The McGill", "Макгилл", ConceptType.PERSON),
+        ):
+            tx.glossary.save(
+                TermConcept(
+                    id=cid,
+                    book_id=book_id,
+                    type=ctype,
+                    canonical_source_text=src,
+                    status=TermStatus.APPROVED,
+                    variants=(
+                        TermVariant(
+                            concept_id=cid,
+                            language="ru",
+                            text=ru,
+                            status=TermStatus.APPROVED,
+                        ),
+                    ),
+                )
+            )
+        for sec, cand_src, cand_ru in (
+            (sections[0], "Nick", "Ник"),
+            (sections[1], "The McGill", "Макгилл"),
+        ):
+            narrative = NarrativeAnalysisResponse(
+                translation_instructions="Спокойный стиль.",
+                chapter_summary=f"Summary for {sec.title}.",
+                glossary_candidates=(
+                    GlossaryCandidateResponse(
+                        source_text=cand_src,
+                        type=ConceptType.PERSON,
+                        suggested_translation=cand_ru,
+                        confidence=0.95,
+                        model_flagged_review=False,
+                    ),
+                ),
+                context_facts=(),
+                scenes=(
+                    QuotedSceneResponse(
+                        start_block_id=sec.blocks[0].id,
+                        end_block_id=sec.blocks[-1].id,
+                        summary=f"Сцена в {sec.title}.",
+                        location="Лес",
+                        participants=(),
+                        visual_facts=(),
+                        visual_assumptions=(),
+                        continues_previous_scene=False,
+                    ),
+                ),
+            )
+            encoded = encode_pass(narrative)
+            encoded["input_suggestions"] = []
+            encoded["input_context"] = {
+                "schema_version": 1,
+                "sequential_analysis": False,
+                "parallel_batch": True,
+                "seed_active": False,
+                "user_decisions": [],
+                "nonbinding_suggestions": [],
+                "prompts_version": cond_payload["versions"]["prompts"],
+            }
+            input_sha = ctx_builder.narrative_input_sha256(
+                document,
+                sec,
+                (),
+                (),
+                (),
+                model_dependencies=model_deps,
+                max_fragment_blocks=max_frag,
+            )
+            tx.analyses.save_pass(
+                AnalysisPassResult(
+                    id=f"pass-{sec.id}",
+                    book_id=book_id,
+                    section_id=sec.id,
+                    pass_kind=AnalysisPassKind.NARRATIVE,
+                    scope_key="",
+                    input_sha256=input_sha,
+                    output_sha256=canonical_sha(encoded),
+                    conditions_id=conditions_id,
+                    attempt_id=None,
+                    payload=encoded,
+                )
+            )
+
+    alias_pairs_seen: list[tuple[str, str]] = []
+    candidates_inputs: dict[str, dict[str, Any]] = {}
+    prompt_inputs: dict[str, dict[str, Any]] = {}
+
+    def _handler(req: LLMRequest[Any], _call_no: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            mentions: list[IllustrationMentionDTO] = []
+            facts: list[IllustrationFactDTO] = []
+            covered: list[str] = []
+            for u in data["units"]:
+                covered.append(u["source_unit_id"])
+                for blk in u["blocks"]:
+                    bid = blk["block_id"]
+                    if bid == "b-0":
+                        mentions.extend(
+                            [
+                                IllustrationMentionDTO(
+                                    mention_id="m-boy",
+                                    name="the boy",
+                                    entity_kind="person",
+                                    alias_of_hint=None,
+                                    quote_block_id=bid,
+                                    quote="The boy",
+                                ),
+                                IllustrationMentionDTO(
+                                    mention_id="m-nick-0",
+                                    name="Nick",
+                                    entity_kind="person",
+                                    alias_of_hint=None,
+                                    quote_block_id=bid,
+                                    quote="Nick wiped chocolate",
+                                ),
+                            ]
+                        )
+                        facts.append(
+                            IllustrationFactDTO(
+                                fact_id="f-choc",
+                                subject_mention_id="m-nick-0",
+                                temporal_scope="permanent",
+                                back_applicable=True,
+                                reveals_future_spoiler=False,
+                                description_ru="След шоколада на подбородке",
+                                description_en="Chocolate smudge on chin",
+                                quote_block_id=bid,
+                                quote="chocolate from his chin",
+                            )
+                        )
+                    elif bid == "b-1":
+                        mentions.extend(
+                            [
+                                IllustrationMentionDTO(
+                                    mention_id="m-nick-1",
+                                    name="Nick",
+                                    entity_kind="person",
+                                    alias_of_hint=None,
+                                    quote_block_id=bid,
+                                    quote="Nick looked",
+                                ),
+                                IllustrationMentionDTO(
+                                    mention_id="m-chocboy",
+                                    name="Chocolate Boy",
+                                    entity_kind="person",
+                                    alias_of_hint="Nick",
+                                    quote_block_id=bid,
+                                    quote="Chocolate Boy",
+                                ),
+                            ]
+                        )
+                    elif bid == "b-2":
+                        mentions.extend(
+                            [
+                                IllustrationMentionDTO(
+                                    mention_id="m-nick-2",
+                                    name="Nick",
+                                    entity_kind="person",
+                                    alias_of_hint=None,
+                                    quote_block_id=bid,
+                                    quote="Nick walked",
+                                ),
+                                IllustrationMentionDTO(
+                                    mention_id="m-mcgill",
+                                    name="The McGill",
+                                    entity_kind="person",
+                                    alias_of_hint=None,
+                                    quote_block_id=bid,
+                                    quote="The McGill",
+                                ),
+                            ]
+                        )
+            return IllustrationExtractResponse(
+                mentions=tuple(mentions),
+                facts=tuple(facts),
+                covered_source_unit_ids=tuple(covered),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            decisions: list[IllustrationAliasDecisionDTO] = []
+            nick_names = {"the boy", "Nick", "Chocolate Boy"}
+            for p in data["pairs"]:
+                ln = p["left"]["name"]
+                rn = p["right"]["name"]
+                alias_pairs_seen.append((ln, rn))
+                verdict = "same_entity" if (ln in nick_names and rn in nick_names) else "different"
+                decisions.append(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict=verdict, evidence_fact_ids=()
+                    )
+                )
+            return IllustrationAliasResponse(decisions=tuple(decisions))
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(
+                entity_id=data["entity_id"],
+                traits=(
+                    IllustrationDesignTraitDTO(
+                        trait="palette_value",
+                        description_ru="Чёткий тушевой контур.",
+                        description_en="Crisp ink outline.",
+                        assumption_ru="",
+                    ),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            sec_id = data["section_id"]
+            candidates_inputs[sec_id] = data
+            if sec_id == "sec-0":
+                return IllustrationCandidatesResponse(
+                    scene_id=data["scene_id"],
+                    events=(
+                        IllustrationCandidateEventDTO(
+                            event_id="ev-ch1",
+                            title_ru="Ник в лесу",
+                            event_ru="Ник оглядывается в лесу.",
+                            significance_ru="Начало пути",
+                            event_kind="encounter",
+                            quote_anchors=(
+                                IllustrationQuoteAnchorDTO(block_id="b-1", quote="Nick looked around"),
+                            ),
+                            participant_names=("Nick",),
+                        ),
+                    ),
+                    covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                    complete=True,
+                )
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(
+                    IllustrationCandidateEventDTO(
+                        event_id="ev-ch2",
+                        title_ru="Ник в гавани",
+                        event_ru="Ник проходит мимо туманной гавани.",
+                        significance_ru="Встреча в гавани",
+                        event_kind="encounter",
+                        quote_anchors=(
+                            IllustrationQuoteAnchorDTO(block_id="b-2", quote="Nick walked past"),
+                        ),
+                        participant_names=("Nick",),
+                    ),
+                ),
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_SELECTION:
+            cid = data["candidates"][0]["candidate_id"]
+            return IllustrationSelectionResponse(
+                selected_candidate_ids=(cid,),
+                selection_reasons_ru=(
+                    IllustrationSelectionReasonDTO(candidate_id=cid, reason_ru="Ключевой кадр"),
+                ),
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_FACT_SCOPE:
+            facts = data["facts"]
+            return IllustrationFactScopeResponse(
+                event_id=data["event_id"],
+                applicable_fact_ids=tuple(f["fact_id"] for f in facts),
+                excluded_fact_ids=(),
+                compact_description_ru="Мальчик со следом шоколада на подбородке.",
+                compact_description_en="Boy with a chocolate smudge on his chin.",
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_PROMPT:
+            sec_key = "sec-0" if "sec-0" in data["moment_id"] else "sec-1"
+            prompt_inputs[sec_key] = data
+            nick_c = data["characters"][0]
+            return IllustrationPromptResponse(
+                moment_id=data["moment_id"],
+                scene_composition_en="Nick stands attentively in crisp ink linework.",
+                depicted_entity_ids=(nick_c["entity_id"],),
+                used_fact_ids=tuple(nick_c["fact_ids"]),
+                used_design_keys=(),
+                assumptions_ru=(),
+            )
+        raise AssertionError(f"unexpected {req.kind}")
+
+    source = IllustrationSource(
+        language_detector=Py3LangidDetector(),
+        source_digest_fn=lambda _p: source_sha,
+    )
+    runtime = _LoggedStubRuntime(uow, _handler, debug_payloads=False)
+
+    async def _noop_sleep(_: float) -> None:
+        return None
+
+    chapter = IllustrationChapter(uow, source=source, runtime=runtime, sleep_fn=_noop_sleep)
+    reference = IllustrationReference(
+        uow,
+        source=source,
+        runtime=runtime,
+        sleep_fn=_noop_sleep,
+        plan_chapter_scopes=chapter.plan_chapter_scopes,
+    )
+    coordinator = IllustrationCoordinator(
+        uow,
+        source=source,
+        plan_reference_scopes=reference.plan_scopes,
+        plan_chapter_scopes=chapter.plan_chapter_scopes,
+    )
+    service = IllustrationService(
+        uow,
+        provider_ready_fn=runtime.is_provider_ready,
+        default_model_fn=runtime.default_model,
+        source_snapshot_fn=source.snapshot,
+        reconcile_in_tx_fn=coordinator.reconcile_in_transaction,
+    )
+    rev = service.save_settings(
+        book_id,
+        expected_revision=0,
+        settings=IllustrationSettings(
+            enabled=True,
+            max_per_chapter=2,
+            model_reference="gpt-5-mini",
+            model_prompts="gpt-5-mini",
+        ),
+    )
+    view0 = await service.prepare(book_id, expected_revision=rev.revision)
+    assert view0.active_generation_id is not None
+    await _drain(uow, book_id, reference, chapter)
+
+    # 1. Contextual blocking paired anonymous "the boy" with "Nick" in ALIAS!
+    assert any(
+        {ln, rn} == {"the boy", "Nick"} for ln, rn in alias_pairs_seen
+    )
+
+    # 2. Clean known_characters + separate known_entity_aliases + non-spoiler glossary_terms_ru in ch1 vs ch2!
+    assert candidates_inputs["sec-0"]["known_characters"] == ["Nick"]
+    assert candidates_inputs["sec-0"]["known_entity_aliases"] == {
+        "Nick": ["the boy", "Chocolate Boy"]
+    }
+    assert candidates_inputs["sec-0"]["glossary_terms_ru"] == {"Nick": "Ник"}
+    assert "The McGill" not in candidates_inputs["sec-0"]["glossary_terms_ru"]
+
+    assert "Nick" in candidates_inputs["sec-1"]["known_characters"]
+    assert "The McGill" in candidates_inputs["sec-1"]["known_characters"]
+    assert candidates_inputs["sec-1"]["glossary_terms_ru"] == {
+        "Nick": "Ник",
+        "The McGill": "Макгилл",
+    }
+
+    # 3. Localized name_ru ("Ник") with English name_en ("Nick"), NEVER reverted to "Chocolate Boy" in ch2!
+    ch2_view = service.get(book_id, section_id="sec-1")
+    assert ch2_view.state == "ready" and ch2_view.selected_chapter is not None
+    ch2_moment = ch2_view.selected_chapter.moments[0]
+    ch2_char = ch2_moment.character_descriptions[0]
+    assert ch2_char.name_ru == "Ник"
+    assert prompt_inputs["sec-1"]["characters"][0]["name_ru"] == "Ник"
+    assert prompt_inputs["sec-1"]["characters"][0]["name_en"] == "Nick"
+    assert "Nick" in ch2_moment.prompt_en
+    assert "Chocolate Boy" not in ch2_moment.prompt_en
+
+

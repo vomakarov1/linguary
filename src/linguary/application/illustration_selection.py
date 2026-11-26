@@ -11,7 +11,11 @@ from uuid import uuid4
 from linguary.application.context_builder import source_text_for_model, textual_blocks
 from linguary.application.illustration_context import (
     IllustrationContext,
+    _collect_book_glossary_terms_ru,
     compact_safe_detail,
+    decode_wire_id_aliases,
+    encode_wire_id_aliases,
+    fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
     is_transient_error,
@@ -100,18 +104,21 @@ def _load_entity_payloads(tx: UnitOfWork, generation_id: str) -> list[dict[str, 
     return items
 
 
-def _known_entity_names_for_chapter(
+_MAX_KNOWN_ENTITY_ALIASES = 3
+
+
+def _known_entities_context_for_chapter(
     tx: UnitOfWork,
     generation_id: str,
     *,
     section_order: int,
     limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Collect spoiler-free known character and location names visible by the end of `section_order`."""
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, list[str]]]:
+    """Collect clean spoiler-free known names and separate non-spoiler aliases visible by `section_order`."""
     chapter_end_pos = format_position_key(section_order, 999_999, 99_999_999)
     entities = _load_entity_payloads(tx, generation_id)
-    persons: list[tuple[int, str, str, str]] = []
-    locations: list[tuple[int, str, str, str]] = []
+    persons: list[tuple[int, str, str, str, list[str]]] = []
+    locations: list[tuple[int, str, str, str, list[str]]] = []
     for ent in entities:
         raw_orders = ent.get("section_orders")
         has_orders = isinstance(raw_orders, (list, tuple))
@@ -129,28 +136,78 @@ def _known_entity_names_for_chapter(
         display_name = _display_name_at_position(ent, chapter_end_pos).strip()
         if not display_name:
             continue
+        display_norm = normalize_name_token(display_name)
+        visible_aliases: list[str] = []
+        raw_positions = ent.get("alias_first_positions")
+        if isinstance(raw_positions, Mapping):
+            eligible_aliases: list[tuple[str, str, str]] = []
+            for raw_alias, pos in raw_positions.items():
+                if (
+                    raw_alias is None
+                    or not isinstance(pos, str)
+                    or not pos
+                    or pos > chapter_end_pos
+                ):
+                    continue
+                clean_alias = str(raw_alias).strip()
+                if not clean_alias:
+                    continue
+                alias_norm = normalize_name_token(clean_alias)
+                if not alias_norm or alias_norm == display_norm:
+                    continue
+                eligible_aliases.append((pos, clean_alias.casefold(), clean_alias))
+            eligible_aliases.sort()
+            seen_alias_norms: set[str] = set()
+            for _, _, clean_alias in eligible_aliases:
+                alias_norm = normalize_name_token(clean_alias)
+                if alias_norm in seen_alias_norms:
+                    continue
+                seen_alias_norms.add(alias_norm)
+                visible_aliases.append(clean_alias)
+                if len(visible_aliases) >= _MAX_KNOWN_ENTITY_ALIASES:
+                    break
         priority = 0 if in_current else 1
-        row = (priority, first_pos, display_name.casefold(), display_name)
+        row = (priority, first_pos, display_name.casefold(), display_name, visible_aliases)
         kind = str(ent.get("entity_kind", ""))
         if kind == "person":
             persons.append(row)
         elif kind == "location":
             locations.append(row)
 
-    def _finalize(rows: list[tuple[int, str, str, str]]) -> tuple[str, ...]:
+    known_entity_aliases: dict[str, list[str]] = {}
+
+    def _finalize(rows: list[tuple[int, str, str, str, list[str]]]) -> tuple[str, ...]:
         rows.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
         seen: set[str] = set()
         out: list[str] = []
-        for _, _, key, name in rows:
+        for _, _, key, name, aliases_list in rows:
             if key in seen:
                 continue
             seen.add(key)
             out.append(name)
+            if aliases_list and name not in known_entity_aliases:
+                known_entity_aliases[name] = aliases_list
             if len(out) >= limit_per_kind:
                 break
         return tuple(out)
 
-    return _finalize(persons), _finalize(locations)
+    known_chars = _finalize(persons)
+    known_locs = _finalize(locations)
+    return known_chars, known_locs, known_entity_aliases
+
+
+def _known_entity_names_for_chapter(
+    tx: UnitOfWork,
+    generation_id: str,
+    *,
+    section_order: int,
+    limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Collect spoiler-free known character and location names visible by the end of `section_order`."""
+    known_chars, known_locs, _ = _known_entities_context_for_chapter(
+        tx, generation_id, section_order=section_order, limit_per_kind=limit_per_kind
+    )
+    return known_chars, known_locs
 
 
 def _default_id() -> str:
@@ -269,14 +326,45 @@ def _anchors_overlap(a: Sequence[SelectedAnchor], b: Sequence[SelectedAnchor]) -
     return False
 
 
-def moments_conflict_diversity(a: SelectedMomentCard, b: SelectedMomentCard) -> bool:
-    """Return `True` iff two moments represent a duplicate beat within the same chapter.
+def effective_chapter_illustration_cap(
+    max_per_chapter: int,
+    content_block_count: int,
+    scene_count: int,
+) -> int:
+    """Scale chapter illustration cap down for very short chapters."""
+    if content_block_count <= 2 and scene_count <= 1:
+        return min(max_per_chapter, 1)
+    if 3 <= content_block_count <= 8 and scene_count <= 2:
+        return min(max_per_chapter, 2)
+    return max_per_chapter
+
+
+def _moment_block_position(
+    card: SelectedMomentCard, block_order_by_id: Mapping[str, int]
+) -> int | None:
+    if card.insert_after_block_id and card.insert_after_block_id in block_order_by_id:
+        return block_order_by_id[card.insert_after_block_id]
+    for anchor in card.anchors:
+        if anchor.block_id in block_order_by_id:
+            return block_order_by_id[anchor.block_id]
+    return None
+
+
+def moments_conflict_diversity(
+    a: SelectedMomentCard,
+    b: SelectedMomentCard,
+    *,
+    block_order_by_id: Mapping[str, int] | None = None,
+    min_block_gap: int = 0,
+) -> bool:
+    """Return `True` iff two moments represent a duplicate or too-close beat within the same chapter.
 
     - Overlapping quote anchors on the same block always conflict.
     - Identical normalized `title_ru` or `event_ru` always conflict.
     - Same `scene_id` + same normalized `event_kind` conflict (same beat type in same scene).
     - Distinct scenes with distinct conflicts sharing a broad `event_kind` (e.g. two different
-      `'action'` conflicts in different scenes) do NOT conflict.
+      `'action'` conflicts in different scenes) do NOT conflict unless `min_block_gap > 0`
+      and their resolved block positions are closer than `min_block_gap`.
     """
     if a.candidate_id == b.candidate_id:
         return True
@@ -296,6 +384,11 @@ def moments_conflict_diversity(a: SelectedMomentCard, b: SelectedMomentCard) -> 
         and normalize_name_token(a.event_kind) == normalize_name_token(b.event_kind)
     ):
         return True
+    if min_block_gap > 0 and block_order_by_id is not None:
+        pos_a = _moment_block_position(a, block_order_by_id)
+        pos_b = _moment_block_position(b, block_order_by_id)
+        if pos_a is not None and pos_b is not None and abs(pos_a - pos_b) < min_block_gap:
+            return True
     return False
 
 
@@ -304,6 +397,8 @@ def enforce_intra_chapter_diversity(
     shortlist: Sequence[SelectedMomentCard],
     *,
     zero_reason_ru: str | None = None,
+    block_order_by_id: Mapping[str, int] | None = None,
+    min_block_gap: int | None = None,
 ) -> tuple[tuple[SelectedMomentCard, ...], tuple[SelectedMomentCard, ...], str | None]:
     """Validate pairwise diversity among a chapter's winners, replacing duplicates from LIFO shortlist.
 
@@ -311,12 +406,25 @@ def enforce_intra_chapter_diversity(
     - At most `len(shortlist)` replacement attempts are performed.
     - Final winners and rejected duplicate beats are stripped from the returned `shortlist`.
     """
+    if min_block_gap is None:
+        effective_gap = 2 if (block_order_by_id is not None and len(block_order_by_id) >= 12) else 0
+    else:
+        effective_gap = min_block_gap if block_order_by_id is not None else 0
+
     accepted: list[SelectedMomentCard] = []
     rejected_ids: set[str] = set()
     available_shortlist = list(shortlist)
 
     for candidate in winners:
-        if not any(moments_conflict_diversity(candidate, existing) for existing in accepted):
+        if not any(
+            moments_conflict_diversity(
+                candidate,
+                existing,
+                block_order_by_id=block_order_by_id,
+                min_block_gap=effective_gap,
+            )
+            for existing in accepted
+        ):
             accepted.append(candidate)
             continue
 
@@ -328,7 +436,15 @@ def enforce_intra_chapter_diversity(
                 runner_up.candidate_id == w.candidate_id for w in accepted
             ):
                 continue
-            if not any(moments_conflict_diversity(runner_up, existing) for existing in accepted):
+            if not any(
+                moments_conflict_diversity(
+                    runner_up,
+                    existing,
+                    block_order_by_id=block_order_by_id,
+                    min_block_gap=effective_gap,
+                )
+                for existing in accepted
+            ):
                 promoted = SelectedMomentCard(
                     candidate_id=runner_up.candidate_id,
                     section_id=runner_up.section_id,
@@ -490,12 +606,14 @@ def _build_candidate_scope_spec(
     route_id: str,
     known_characters: Sequence[str] = (),
     known_locations: Sequence[str] = (),
+    known_entity_aliases: Mapping[str, Sequence[str]] | None = None,
+    glossary_terms_ru: Mapping[str, str] | None = None,
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
     expected_unit_ids = [str(b["source_unit_id"]) for b in blocks_chunk]
     ordered_block_ids = [str(b["block_id"]) for b in blocks_chunk]
-    request_input = {
+    request_input: dict[str, Any] = {
         "section_id": section_id,
         "section_title": section_title,
         "scene_id": str(scene_meta["scene_id"]),
@@ -507,6 +625,23 @@ def _build_candidate_scope_spec(
         "max_candidates": policy.max_candidates_per_scene,
         "blocks": [thaw(b) for b in blocks_chunk],
     }
+    if known_entity_aliases:
+        cleaned_aliases = {
+            str(k): [str(a) for a in v if a is not None and str(a).strip()]
+            for k, v in known_entity_aliases.items()
+            if k is not None and str(k).strip() and v
+        }
+        cleaned_aliases = {k: v for k, v in cleaned_aliases.items() if v}
+        if cleaned_aliases:
+            request_input["known_entity_aliases"] = cleaned_aliases
+    if glossary_terms_ru:
+        cleaned_gloss = {
+            str(k): str(v)
+            for k, v in glossary_terms_ru.items()
+            if k is not None and str(k).strip() and v is not None and str(v).strip()
+        }
+        if cleaned_gloss:
+            request_input["glossary_terms_ru"] = cleaned_gloss
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.CANDIDATES.value,
@@ -566,12 +701,16 @@ def _build_selection_scope_spec(
     depth: int,
     revision: IllustrationSettingsRevision,
     route_id: str,
+    chapter_cap: int | None = None,
     carried_singletons: Sequence[SelectedMomentCard] = (),
     prior_shortlist: Sequence[SelectedMomentCard] = (),
     prior_zero_reasons: Sequence[str] = (),
     reusable: IllustrationScope | None = None,
 ) -> IllustrationScopeSpec:
     policy = revision.settings.policy
+    effective_cap = (
+        revision.settings.max_per_chapter if chapter_cap is None else chapter_cap
+    )
     request_input = {
         "section_id": section_id,
         "section_title": section_title,
@@ -587,6 +726,7 @@ def _build_selection_scope_spec(
             "route_id": route_id,
             "style": revision.settings.style,
             "max_per_chapter": revision.settings.max_per_chapter,
+            "effective_max_per_chapter": effective_cap,
             "policy": policy.to_payload(),
         }
     )
@@ -600,6 +740,7 @@ def _build_selection_scope_spec(
         "round": round_num,
         "group_idx": group_idx,
         "group_cap": group_cap,
+        "effective_max_per_chapter": effective_cap,
         "expected_candidate_ids": [c.candidate_id for c in cards],
         "cards": [c.to_dict() for c in cards],
         "carried_singletons": [c.to_dict() for c in carried_singletons],
@@ -746,37 +887,72 @@ class IllustrationSelection:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
-        known_characters, known_locations = _known_entity_names_for_chapter(
-            tx, generation.id, section_order=entry.order
+        known_characters, known_locations, known_entity_aliases = (
+            _known_entities_context_for_chapter(
+                tx, generation.id, section_order=entry.order
+            )
+        )
+        chapter_glossary_terms_ru = _collect_book_glossary_terms_ru(
+            tx,
+            generation.book_id,
+            generation_id=generation.id,
+            max_section_order=entry.order,
         )
 
         specs: list[IllustrationScopeSpec] = []
         for s_idx, scene_meta in enumerate(scene_units):
             blocks_list = scene_meta["blocks"]
 
-            def _build_req(
+            def _make_cand_req(
                 chunk: Sequence[dict[str, Any]],
+                cur_glossary: Mapping[str, str],
                 _meta: Mapping[str, Any] = scene_meta,
             ) -> LLMRequest[Any]:
+                payload: dict[str, Any] = {
+                    "section_id": section_id,
+                    "section_title": entry.title,
+                    "scene_id": str(_meta["scene_id"]),
+                    "scene_summary": str(_meta.get("scene_summary", "")),
+                    "location": str(_meta.get("location", "")),
+                    "participants": list(_meta.get("participants", ())),
+                    "known_characters": list(known_characters),
+                    "known_locations": list(known_locations),
+                    "max_candidates": policy.max_candidates_per_scene,
+                    "blocks": list(chunk),
+                }
+                if known_entity_aliases:
+                    payload["known_entity_aliases"] = {
+                        k: list(v) for k, v in known_entity_aliases.items()
+                    }
+                if cur_glossary:
+                    payload["glossary_terms_ru"] = dict(cur_glossary)
                 return IllustrationContext.build_for_kind(
                     kind=LLMResponseKind.ILLUSTRATION_CANDIDATES,
                     stage=IllustrationScopeStage.CANDIDATES,
-                    input_payload={
-                        "section_id": section_id,
-                        "section_title": entry.title,
-                        "scene_id": str(_meta["scene_id"]),
-                        "scene_summary": str(_meta.get("scene_summary", "")),
-                        "location": str(_meta.get("location", "")),
-                        "participants": list(_meta.get("participants", ())),
-                        "known_characters": list(known_characters),
-                        "known_locations": list(known_locations),
-                        "max_candidates": policy.max_candidates_per_scene,
-                        "blocks": list(chunk),
-                    },
+                    input_payload=payload,
                     book_id=snapshot.book_id,
                     conditions_id=snapshot.conditions_id,
                     policy=policy,
                 )
+
+            bounded_glossary_terms_ru: dict[str, str] = {}
+            if chapter_glossary_terms_ru and blocks_list:
+                heaviest_block = max(
+                    blocks_list,
+                    key=lambda b: len(str(b.get("text", "")).encode("utf-8")),
+                )
+                bounded_glossary_terms_ru = fit_glossary_terms_to_wire_budget(
+                    chapter_glossary_terms_ru,
+                    build_request=lambda g, _hb=heaviest_block: _make_cand_req([_hb], g),
+                    sizer=sizer,
+                    target_bytes=policy.initial_target_bytes,
+                )
+
+            def _build_req(
+                chunk: Sequence[dict[str, Any]],
+                _gloss: Mapping[str, str] = bounded_glossary_terms_ru,
+            ) -> LLMRequest[Any]:
+                return _make_cand_req(chunk, _gloss)
 
             chunks = pack_items_by_wire_budget(
                 blocks_list,
@@ -799,6 +975,8 @@ class IllustrationSelection:
                     route_id=route_id,
                     known_characters=known_characters,
                     known_locations=known_locations,
+                    known_entity_aliases=known_entity_aliases,
+                    glossary_terms_ru=bounded_glossary_terms_ru,
                 )
                 reusable = tx.illustrations.find_reusable_scope(
                     generation.book_id,
@@ -818,6 +996,8 @@ class IllustrationSelection:
                         route_id=route_id,
                         known_characters=known_characters,
                         known_locations=known_locations,
+                        known_entity_aliases=known_entity_aliases,
+                        glossary_terms_ru=bounded_glossary_terms_ru,
                         reusable=reusable,
                     )
                 specs.append(draft)
@@ -1114,7 +1294,23 @@ class IllustrationSelection:
                     raise LLMResponseFormatError(
                         "ответ модели усечён по лимиту токенов", truncated=True
                     )
-                validation = self._validate_response(scope, response.payload, block_lookup)
+                payload_for_validation = response.payload
+                if scope.stage is IllustrationScopeStage.CANDIDATES:
+                    raw_input = scope.summary.get("request_input")
+                    if isinstance(raw_input, Mapping):
+                        _, alias_to_canonical, _ = encode_wire_id_aliases(scope.stage, raw_input)
+                        raw_scene_id = scope.summary.get("scene_id")
+                        single_scene_id = (
+                            str(raw_scene_id).strip()
+                            if raw_scene_id is not None and str(raw_scene_id).strip()
+                            else None
+                        )
+                        payload_for_validation = decode_wire_id_aliases(
+                            payload_for_validation,
+                            alias_to_canonical,
+                            single_scene_id=single_scene_id,
+                        )
+                validation = self._validate_response(scope, payload_for_validation, block_lookup)
             except Exception as err:
                 call_error = err
 
@@ -1159,6 +1355,22 @@ class IllustrationSelection:
                             fail_reason=IllustrationReasonCode.PROVIDER_TRUNCATED.value,
                         )
                         break
+                    if self._can_continue_activation(
+                        activation_calls_used, scope.id, book_id, policy
+                    ):
+                        with self._uow.transaction() as tx:
+                            tx.illustrations.record_attempt_outcome(
+                                attempt.id,
+                                state=IllustrationAttemptState.FAILED,
+                                outcome={
+                                    "reason_code": IllustrationReasonCode.PROVIDER_TRUNCATED.value
+                                },
+                            )
+                        repair_summary = (
+                            "Предыдущий ответ был обрезан по длине. "
+                            "Верни компактный валидный JSON без повторов и лишних пробелов."
+                        )
+                        continue
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,
@@ -1724,7 +1936,11 @@ class IllustrationSelection:
             if s.stage is IllustrationScopeStage.SELECTION and s.scope_key != final_key
         ]
 
-        max_per_chapter = revision.settings.max_per_chapter
+        max_per_chapter = effective_chapter_illustration_cap(
+            revision.settings.max_per_chapter,
+            len(entry.block_digests),
+            len(entry.scenes),
+        )
 
         if not sel_scopes:
             # Collect & deduplicate all candidate cards from accepted CANDIDATES leaves.
@@ -1924,10 +2140,13 @@ class IllustrationSelection:
 
         # Count is now in 1..max_per_chapter (and editorial gate or tournament round ran) -> diversity check!
         consolidated_zero = "; ".join(dict.fromkeys(zero_reasons)) or None
+        block_order_by_id = {bid: idx for idx, bid in enumerate(entry.block_digests)}
         final_winners, final_shortlist, final_zero = enforce_intra_chapter_diversity(
             next_cards,
             updated_shortlist,
             zero_reason_ru=consolidated_zero,
+            block_order_by_id=block_order_by_id,
+            min_block_gap=2 if len(entry.block_digests) >= 12 else 0,
         )
         self._persist_final_selection(
             tx,
@@ -1963,7 +2182,11 @@ class IllustrationSelection:
         id_factory: Callable[[], str],
     ) -> bool:
         policy = revision.settings.policy
-        max_per_chapter = revision.settings.max_per_chapter
+        max_per_chapter = effective_chapter_illustration_cap(
+            revision.settings.max_per_chapter,
+            len(entry.block_digests),
+            len(entry.scenes),
+        )
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
 
@@ -2045,6 +2268,7 @@ class IllustrationSelection:
                 depth=0,
                 revision=revision,
                 route_id=route_id,
+                chapter_cap=max_per_chapter,
                 carried_singletons=carried_singletons if g_idx == 0 else (),
                 prior_shortlist=prior_shortlist if g_idx == 0 else (),
                 prior_zero_reasons=prior_zero_reasons if g_idx == 0 else (),
@@ -2067,6 +2291,7 @@ class IllustrationSelection:
                     depth=0,
                     revision=revision,
                     route_id=route_id,
+                    chapter_cap=max_per_chapter,
                     carried_singletons=carried_singletons if g_idx == 0 else (),
                     prior_shortlist=prior_shortlist if g_idx == 0 else (),
                     prior_zero_reasons=prior_zero_reasons if g_idx == 0 else (),
@@ -2191,6 +2416,22 @@ class IllustrationSelection:
             }
             known_characters = [str(n) for n in req_input.get("known_characters", ())]
             known_locations = [str(n) for n in req_input.get("known_locations", ())]
+            raw_known_aliases = req_input.get("known_entity_aliases")
+            known_entity_aliases = (
+                {
+                    str(k): [str(a) for a in v]
+                    for k, v in raw_known_aliases.items()
+                    if isinstance(v, (list, tuple)) and v
+                }
+                if isinstance(raw_known_aliases, Mapping)
+                else None
+            )
+            raw_glossary = req_input.get("glossary_terms_ru")
+            glossary_terms_ru = (
+                {str(k): str(v) for k, v in raw_glossary.items()}
+                if isinstance(raw_glossary, Mapping) and raw_glossary
+                else None
+            )
             return [
                 _build_candidate_scope_spec(
                     section_id=section_id,
@@ -2204,6 +2445,8 @@ class IllustrationSelection:
                     route_id=route_id,
                     known_characters=known_characters,
                     known_locations=known_locations,
+                    known_entity_aliases=known_entity_aliases,
+                    glossary_terms_ru=glossary_terms_ru,
                 )
                 for idx, half in enumerate((blocks[:mid], blocks[mid:]))
             ]
@@ -2217,7 +2460,9 @@ class IllustrationSelection:
             # Both halves have size >= 2 if len(cards) >= 4; if len(cards) == 3, [2] and [1] -> carry singleton!
             round_num = int(scope.summary.get("round", 1))
             group_idx = int(scope.summary.get("group_idx", 0))
-            max_per = revision.settings.max_per_chapter
+            max_per = int(
+                scope.summary.get("effective_max_per_chapter", revision.settings.max_per_chapter)
+            )
             prior_singletons = [
                 SelectedMomentCard.from_dict(c)
                 for c in scope.summary.get("carried_singletons", ())
@@ -2244,6 +2489,7 @@ class IllustrationSelection:
                     depth=depth + 1,
                     revision=revision,
                     route_id=route_id,
+                    chapter_cap=max_per,
                     carried_singletons=([*prior_singletons, *extra_singletons] if idx == 0 else ()),
                     prior_shortlist=(prior_shortlist if idx == 0 else ()),
                     prior_zero_reasons=(prior_zeros if idx == 0 else ()),
@@ -2641,6 +2887,7 @@ __all__ = [
     "SelectedMomentCard",
     "SelectedMoments",
     "deduplicate_candidates",
+    "effective_chapter_illustration_cap",
     "enforce_intra_chapter_diversity",
     "moments_conflict_diversity",
 ]

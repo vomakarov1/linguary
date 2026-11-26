@@ -3734,7 +3734,10 @@ def test_narrative_prompt_and_name_policy_p5_t2_rules() -> None:
         assert "said ..." in text
         assert "до конца фрагмента" in text
         assert "без подстановки имени из других глав" in text
-        assert "the freckled boy" in text
+        assert "Iron Hand" in text
+        assert "the freckled boy" not in text
+        assert "the younger boy" in text
+        assert "НЕ включай в `glossary_candidates`" in text
         assert "opaque_name=false" in text
         assert 'applied_method="meaning"' in text
 
@@ -4122,4 +4125,56 @@ def test_mixed_block_glossary_only_prompt_rules_present() -> None:
     a2_guidance = _reader_level_treatment_guidance("a2")
     assert "хотя бы 1 незнакомого слова или выражения выше A2" in a2_guidance
 
+
+def test_a2_v3_dialogue_dash_prompt_rule_plural_you_and_noun_infinitive_guard() -> None:
+    """WP4: A2/V3 prompts sync dialogue dash-after-period rule, plural 'вы', and verbs-only `to` infinitives."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _SEGMENT_TRANSLATION_RULE,
+        _TRANSLATION_CONTEXT_V2,
+        _TRANSLATION_INSTRUCTIONS,
+    )
+    from linguary.application.reader_text import (
+        _A2_DIALOGUE_AND_CALQUE_RULES,
+        _A2_NOTE_DISCIPLINE,
+        learner_instructions,
+    )
+
+    templates_a2 = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+
+    for text in (
+        _A2_DIALOGUE_AND_CALQUE_RULES,
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING_V3,
+        learner_instructions("a2"),
+        templates_a2["content_processing"],
+        templates_a2["learner_quality"],
+    ):
+        assert "не ставь «— » в той же строке после точки" in text
+        assert "Он обернулся: «…»" in text
+        assert "к нескольким собеседникам" in text
+        assert "множественное число «вы»" in text
+
+    for text in (
+        _A2_NOTE_DISCIPLINE,
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING_V3,
+        learner_instructions("a2"),
+        templates_a2["content_processing"],
+        templates_a2["learner_quality"],
+        templates_a2["pedagogical_analysis"],
+    ):
+        assert "приводи к инфинитиву с to только глаголы" in text
+        assert "a guffaw" in text
+        assert "оставляй существительными без to" in text
+
+    # Dialogue-only rules stay out of pedagogical_analysis and frozen baseline templates.
+    assert "не ставь «— » в той же строке после точки" not in templates_a2["pedagogical_analysis"]
+    assert "не ставь «— » в той же строке после точки" not in _TRANSLATION_INSTRUCTIONS
+    assert "не ставь «— » в той же строке после точки" not in _SEGMENT_TRANSLATION_RULE
 

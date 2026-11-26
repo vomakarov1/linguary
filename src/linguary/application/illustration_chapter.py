@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -11,7 +12,9 @@ from uuid import uuid4
 from linguary.application.analysis_pass_cache import encode_illustration_pass
 from linguary.application.illustration_context import (
     IllustrationContext,
+    _collect_book_glossary_terms_ru,
     compact_safe_detail,
+    fit_glossary_terms_to_wire_budget,
     is_context_limit_error,
     is_incompatible_route_error,
     is_transient_error,
@@ -74,6 +77,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskError,
     TaskType,
+    glossary_key,
 )
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
@@ -166,6 +170,46 @@ def _resolve_scene_location_ru(
     return None
 
 
+def _display_name_ru_at_position(
+    entity: Mapping[str, Any],
+    event_position_key: str,
+    display_name_en: str,
+) -> str:
+    """Return spoiler-free localized Russian display name for `display_name_en`."""
+    _ = event_position_key
+    alias_tr = entity.get("alias_translations_ru")
+    if isinstance(alias_tr, Mapping):
+        direct = alias_tr.get(display_name_en)
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        target_key = glossary_key(display_name_en)
+        if target_key:
+            for alias_name, tr in alias_tr.items():
+                if (
+                    isinstance(alias_name, str)
+                    and isinstance(tr, str)
+                    and tr.strip()
+                    and glossary_key(alias_name) == target_key
+                ):
+                    return tr.strip()
+    canonical = str(entity.get("canonical_name") or "").strip()
+    canonical_tr = entity.get("glossary_translation_ru")
+    if (
+        canonical
+        and isinstance(canonical_tr, str)
+        and canonical_tr.strip()
+        and (
+            display_name_en == canonical
+            or (
+                glossary_key(display_name_en)
+                and glossary_key(display_name_en) == glossary_key(canonical)
+            )
+        )
+    ):
+        return canonical_tr.strip()
+    return display_name_en
+
+
 def _entity_names(entity: Mapping[str, Any]) -> list[str]:
     names: list[str] = []
     raw_canonical = entity.get("canonical_name")
@@ -176,6 +220,14 @@ def _entity_names(entity: Mapping[str, Any]) -> list[str]:
         for alias in raw_aliases:
             if alias is not None and str(alias).strip():
                 names.append(str(alias).strip())
+    raw_tr = entity.get("glossary_translation_ru")
+    if isinstance(raw_tr, str) and raw_tr.strip():
+        names.append(raw_tr.strip())
+    raw_alias_tr = entity.get("alias_translations_ru")
+    if isinstance(raw_alias_tr, Mapping):
+        for tr in raw_alias_tr.values():
+            if isinstance(tr, str) and tr.strip():
+                names.append(tr.strip())
     return list(dict.fromkeys(names))
 
 
@@ -313,7 +365,8 @@ def _resolve_entity_name(
       - `("ambiguous", None)` when 2+ distinct entities match (never merged or guessed!)
       - `("unmatched", None)` when no entity in the registry matches
     """
-    norm = normalize_name_token(name)
+    cleaned_name = re.sub(r"\s*\(aliases:.*\)$", "", name, flags=re.IGNORECASE).strip()
+    norm = normalize_name_token(cleaned_name)
     if not norm:
         return "unmatched", None
 
@@ -452,6 +505,7 @@ def _build_fact_scope_spec(
     running_applicable_ids: Sequence[str],
     is_consolidation: bool,
     max_applicable_fact_ids: int = _MAX_APPLICABLE_FACTS,
+    glossary_terms_ru: Mapping[str, str] | None = None,
     revision: IllustrationSettingsRevision,
     route_id: str,
     reusable: IllustrationScope | None = None,
@@ -477,7 +531,7 @@ def _build_fact_scope_spec(
         default=moment_card.event_position_key,
     )
     display_name = _display_name_at_position(entity, event_pos)
-    request_input = {
+    request_input: dict[str, Any] = {
         "event_id": moment_card.candidate_id,
         "event_position_key": moment_card.event_position_key,
         "event_ru": moment_card.event_ru,
@@ -493,6 +547,14 @@ def _build_fact_scope_spec(
         "running_summary_en": running_summary_en,
         "facts": compact_facts,
     }
+    if glossary_terms_ru:
+        cleaned_gloss = {
+            str(k): str(v)
+            for k, v in glossary_terms_ru.items()
+            if k is not None and str(k).strip() and v is not None and str(v).strip()
+        }
+        if cleaned_gloss:
+            request_input["glossary_terms_ru"] = cleaned_gloss
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.FACT_SCOPE.value,
@@ -560,6 +622,8 @@ def _build_prompt_scope_spec(
     base_fallback_entity_ids: Sequence[str] = (),
     entity_names: Sequence[str] = (),
     scene_location_ru: str | None = None,
+    anchor_quotes: Sequence[str] | None = None,
+    glossary_terms_ru: Mapping[str, str] | None = None,
     revision: IllustrationSettingsRevision,
     route_id: str,
     reusable: IllustrationScope | None = None,
@@ -581,6 +645,22 @@ def _build_prompt_scope_spec(
     }
     if not locations and scene_location_ru and scene_location_ru.strip():
         request_input["scene_location_ru"] = scene_location_ru.strip()[:240]
+    raw_quotes = (
+        [a.quote for a in moment_card.anchors if a.quote and a.quote.strip()]
+        if anchor_quotes is None
+        else [str(q) for q in anchor_quotes if q is not None and str(q).strip()]
+    )
+    cleaned_quotes = [q.strip()[:240] for q in raw_quotes if q.strip()][:3]
+    if cleaned_quotes:
+        request_input["anchor_quotes"] = cleaned_quotes
+    if glossary_terms_ru:
+        cleaned_gloss = {
+            str(k): str(v)
+            for k, v in glossary_terms_ru.items()
+            if k is not None and str(k).strip() and v is not None and str(v).strip()
+        }
+        if cleaned_gloss:
+            request_input["glossary_terms_ru"] = cleaned_gloss
     input_sha256 = canonical_sha(
         {
             "stage": IllustrationScopeStage.PROMPT.value,
@@ -935,6 +1015,12 @@ class IllustrationChapter:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
+        chapter_glossary_terms_ru = _collect_book_glossary_terms_ru(
+            tx,
+            generation.book_id,
+            generation_id=generation.id,
+            max_section_order=entry.order,
+        )
 
         fact_scopes_all = tx.illustrations.list_scopes(
             generation.id, stage=IllustrationScopeStage.FACT_SCOPE, section_id=section_id
@@ -998,6 +1084,7 @@ class IllustrationChapter:
                     design_payloads = [di.raw_payload() for di in design_items]
 
                     display_name = _display_name_at_position(ent, event_pos)
+                    display_name_ru = _display_name_ru_at_position(ent, event_pos, display_name)
                     eng_name = _select_english_name_at_position(ent, event_pos, display_name)
                     fallback_en = eng_name or (
                         "character" if kind_bucket == "person" else "location"
@@ -1025,8 +1112,8 @@ class IllustrationChapter:
                             )
                         app = IllustrationAppearance(
                             entity_id=eid,
-                            name_ru=display_name,
-                            description_ru=display_name,
+                            name_ru=display_name_ru,
+                            description_ru=display_name_ru,
                             description_en=fallback_en,
                             fact_ids=(),
                             assumptions_ru=(),
@@ -1035,48 +1122,142 @@ class IllustrationChapter:
                         (char_apps if kind_bucket == "person" else loc_apps).append(app)
                         continue
 
+                    # Deterministic fast-path for a single clean permanent fact (skips redundant FACT_SCOPE LLM call).
+                    if len(entity_facts) == 1:
+                        single_fact = entity_facts[0]
+                        single_desc_en = str(single_fact.get("description_en", "")).strip()
+                        single_desc_ru = str(single_fact.get("description_ru", "")).strip()
+                        ent_names_for_mono = _entity_names(ent)
+                        mono_ok = (
+                            revision.settings.style != ILLUSTRATION_STYLE_MONOCHROME_INK
+                            or (
+                                find_monochrome_color_word(
+                                    single_desc_en,
+                                    allowed_names=ent_names_for_mono,
+                                    strict_palette=False,
+                                )
+                                is None
+                                and find_monochrome_color_word(
+                                    single_desc_ru,
+                                    allowed_names=ent_names_for_mono,
+                                    strict_palette=False,
+                                )
+                                is None
+                            )
+                        )
+                        if (
+                            str(single_fact.get("temporal_scope", "")) == "permanent"
+                            and single_desc_en
+                            and not has_cyrillic(single_desc_en)
+                            and single_desc_ru
+                            and mono_ok
+                        ):
+                            _, kept_design = resolve_appearance_with_design_fallback(
+                                [single_fact],
+                                design_payloads,
+                                excluded_facts=(),
+                                compact_description_en=single_desc_en,
+                                compact_description_ru=single_desc_ru,
+                            )
+                            for d in kept_design:
+                                dkey = f"{eid}:{d['trait']}"
+                                if dkey in seen_design_keys:
+                                    continue
+                                seen_design_keys.add(dkey)
+                                allowed_dkeys.append(dkey)
+                                available_design_traits.append(
+                                    {
+                                        "key": dkey,
+                                        "entity_id": eid,
+                                        "entity_kind": kind_bucket,
+                                        "trait": str(d["trait"]),
+                                        "description_ru": str(d["description_ru"]),
+                                        "description_en": str(d["description_en"]),
+                                        "assumption_ru": str(d.get("assumption_ru", "")),
+                                    }
+                                )
+                            fid_str = str(single_fact["fact_id"])
+                            allowed_fids.append(fid_str)
+                            app = IllustrationAppearance(
+                                entity_id=eid,
+                                name_ru=display_name_ru,
+                                description_ru=single_desc_ru,
+                                description_en=single_desc_en,
+                                fact_ids=(fid_str,),
+                                assumptions_ru=(),
+                                name_en=eng_name,
+                            )
+                            (char_apps if kind_bucket == "person" else loc_apps).append(app)
+                            continue
+
                     # Pack entity_facts chronologically into bounded pages for FACT_SCOPE folding!
-                    def _build_fs_probe(
+                    def _make_fs_probe(
                         f_page: Sequence[Mapping[str, Any]],
+                        cur_glossary: Mapping[str, str],
                         _card: SelectedMomentCard = card,
                         _ent: Mapping[str, Any] = ent,
                         _display_name: str = display_name,
                     ) -> LLMRequest[Any]:
+                        fs_payload: dict[str, Any] = {
+                            "event_id": _card.candidate_id,
+                            "event_position_key": _card.event_position_key,
+                            "event_ru": _card.event_ru,
+                            "entity_id": str(_ent["entity_id"]),
+                            "entity_name": _display_name,
+                            "entity_kind": str(_ent["entity_kind"]),
+                            "style": revision.settings.style,
+                            "page_index": 0,
+                            "total_pages": 1,
+                            "is_consolidation": False,
+                            "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
+                            "running_summary_ru": "x" * 600,
+                            "running_summary_en": "x" * 600,
+                            "facts": [
+                                {
+                                    "fact_id": str(f["fact_id"]),
+                                    "temporal_scope": str(f["temporal_scope"]),
+                                    "position_key": str(f["position_key"]),
+                                    "is_back_applicable": bool(
+                                        f.get("is_back_applicable", False)
+                                    ),
+                                    "description_ru": str(f["description_ru"]),
+                                    "description_en": str(f["description_en"]),
+                                }
+                                for f in f_page
+                            ],
+                        }
+                        if cur_glossary:
+                            fs_payload["glossary_terms_ru"] = dict(cur_glossary)
                         return IllustrationContext.build_for_kind(
                             kind=LLMResponseKind.ILLUSTRATION_FACT_SCOPE,
                             stage=IllustrationScopeStage.FACT_SCOPE,
-                            input_payload={
-                                "event_id": _card.candidate_id,
-                                "event_position_key": _card.event_position_key,
-                                "event_ru": _card.event_ru,
-                                "entity_id": str(_ent["entity_id"]),
-                                "entity_name": _display_name,
-                                "entity_kind": str(_ent["entity_kind"]),
-                                "style": revision.settings.style,
-                                "page_index": 0,
-                                "total_pages": 1,
-                                "is_consolidation": False,
-                                "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
-                                "running_summary_ru": "x" * 600,
-                                "running_summary_en": "x" * 600,
-                                "facts": [
-                                    {
-                                        "fact_id": str(f["fact_id"]),
-                                        "temporal_scope": str(f["temporal_scope"]),
-                                        "position_key": str(f["position_key"]),
-                                        "is_back_applicable": bool(
-                                            f.get("is_back_applicable", False)
-                                        ),
-                                        "description_ru": str(f["description_ru"]),
-                                        "description_en": str(f["description_en"]),
-                                    }
-                                    for f in f_page
-                                ],
-                            },
+                            input_payload=fs_payload,
                             book_id=snapshot.book_id,
                             conditions_id=snapshot.conditions_id,
                             policy=policy,
                         )
+
+                    bounded_fs_glossary: dict[str, str] = {}
+                    if chapter_glossary_terms_ru:
+                        heaviest_fact = max(
+                            entity_facts,
+                            key=lambda f: (
+                                len(str(f.get("description_ru", "")).encode("utf-8"))
+                                + len(str(f.get("description_en", "")).encode("utf-8"))
+                            ),
+                        )
+                        bounded_fs_glossary = fit_glossary_terms_to_wire_budget(
+                            chapter_glossary_terms_ru,
+                            build_request=lambda g, _hf=heaviest_fact: _make_fs_probe([_hf], g),
+                            sizer=sizer,
+                            target_bytes=policy.initial_target_bytes,
+                        )
+
+                    def _build_fs_probe(
+                        f_page: Sequence[Mapping[str, Any]],
+                        _gloss: Mapping[str, str] = bounded_fs_glossary,
+                    ) -> LLMRequest[Any]:
+                        return _make_fs_probe(f_page, _gloss)
 
                     fact_pages = pack_items_by_wire_budget(
                         entity_facts,
@@ -1111,6 +1292,7 @@ class IllustrationChapter:
                                 running_summary_en=running_en,
                                 running_applicable_ids=accumulated_app_ids,
                                 is_consolidation=False,
+                                glossary_terms_ru=bounded_fs_glossary,
                                 revision=revision,
                                 route_id=route_id,
                             )
@@ -1134,6 +1316,7 @@ class IllustrationChapter:
                                     running_summary_en=running_en,
                                     running_applicable_ids=accumulated_app_ids,
                                     is_consolidation=False,
+                                    glossary_terms_ru=bounded_fs_glossary,
                                     revision=revision,
                                     route_id=route_id,
                                     reusable=reusable,
@@ -1186,49 +1369,77 @@ class IllustrationChapter:
                             if fid in all_registry_facts
                         ]
 
-                        def _build_consol_probe(
+                        def _make_consol_probe(
                             c_page: Sequence[Mapping[str, Any]],
+                            cur_glossary: Mapping[str, str],
                             *,
                             _card: SelectedMomentCard = card,
                             _eid: str = eid,
                             _ent: Mapping[str, Any] = ent,
                             _display_name: str = display_name,
                         ) -> LLMRequest[Any]:
+                            c_payload: dict[str, Any] = {
+                                "event_id": _card.candidate_id,
+                                "event_position_key": _card.event_position_key,
+                                "event_ru": _card.event_ru,
+                                "entity_id": _eid,
+                                "entity_name": _display_name,
+                                "entity_kind": str(_ent["entity_kind"]),
+                                "style": revision.settings.style,
+                                "page_index": 0,
+                                "total_pages": 1,
+                                "is_consolidation": True,
+                                "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
+                                "running_summary_ru": "x" * 600,
+                                "running_summary_en": "x" * 600,
+                                "facts": [
+                                    {
+                                        "fact_id": str(f["fact_id"]),
+                                        "temporal_scope": str(f["temporal_scope"]),
+                                        "position_key": str(f["position_key"]),
+                                        "is_back_applicable": bool(
+                                            f.get("is_back_applicable", False)
+                                        ),
+                                        "description_ru": str(f["description_ru"])[:80],
+                                        "description_en": str(f["description_en"])[:80],
+                                    }
+                                    for f in c_page
+                                ],
+                            }
+                            if cur_glossary:
+                                c_payload["glossary_terms_ru"] = dict(cur_glossary)
                             return IllustrationContext.build_for_kind(
                                 kind=LLMResponseKind.ILLUSTRATION_FACT_SCOPE,
                                 stage=IllustrationScopeStage.FACT_SCOPE,
-                                input_payload={
-                                    "event_id": _card.candidate_id,
-                                    "event_position_key": _card.event_position_key,
-                                    "event_ru": _card.event_ru,
-                                    "entity_id": _eid,
-                                    "entity_name": _display_name,
-                                    "entity_kind": str(_ent["entity_kind"]),
-                                    "style": revision.settings.style,
-                                    "page_index": 0,
-                                    "total_pages": 1,
-                                    "is_consolidation": True,
-                                    "max_applicable_fact_ids": _MAX_APPLICABLE_FACTS,
-                                    "running_summary_ru": "x" * 600,
-                                    "running_summary_en": "x" * 600,
-                                    "facts": [
-                                        {
-                                            "fact_id": str(f["fact_id"]),
-                                            "temporal_scope": str(f["temporal_scope"]),
-                                            "position_key": str(f["position_key"]),
-                                            "is_back_applicable": bool(
-                                                f.get("is_back_applicable", False)
-                                            ),
-                                            "description_ru": str(f["description_ru"])[:80],
-                                            "description_en": str(f["description_en"])[:80],
-                                        }
-                                        for f in c_page
-                                    ],
-                                },
+                                input_payload=c_payload,
                                 book_id=snapshot.book_id,
                                 conditions_id=snapshot.conditions_id,
                                 policy=policy,
                             )
+
+                        bounded_consol_glossary: dict[str, str] = {}
+                        if chapter_glossary_terms_ru and consol_facts:
+                            heaviest_cf = max(
+                                consol_facts,
+                                key=lambda f: (
+                                    len(str(f.get("description_ru", ""))[:80].encode("utf-8"))
+                                    + len(str(f.get("description_en", ""))[:80].encode("utf-8"))
+                                ),
+                            )
+                            bounded_consol_glossary = fit_glossary_terms_to_wire_budget(
+                                chapter_glossary_terms_ru,
+                                build_request=lambda g, _hf=heaviest_cf: _make_consol_probe(
+                                    [_hf], g
+                                ),
+                                sizer=sizer,
+                                target_bytes=policy.initial_target_bytes,
+                            )
+
+                        def _build_consol_probe(
+                            c_page: Sequence[Mapping[str, Any]],
+                            _gloss: Mapping[str, str] = bounded_consol_glossary,
+                        ) -> LLMRequest[Any]:
+                            return _make_consol_probe(c_page, _gloss)
 
                         consol_pages = pack_items_by_wire_budget(
                             consol_facts,
@@ -1269,6 +1480,7 @@ class IllustrationChapter:
                                     running_applicable_ids=page_fids,
                                     is_consolidation=True,
                                     max_applicable_fact_ids=per_page_cap,
+                                    glossary_terms_ru=bounded_consol_glossary,
                                     revision=revision,
                                     route_id=route_id,
                                 )
@@ -1293,6 +1505,7 @@ class IllustrationChapter:
                                         running_applicable_ids=page_fids,
                                         is_consolidation=True,
                                         max_applicable_fact_ids=per_page_cap,
+                                        glossary_terms_ru=bounded_consol_glossary,
                                         revision=revision,
                                         route_id=route_id,
                                         reusable=reusable,
@@ -1393,8 +1606,8 @@ class IllustrationChapter:
                         base_fallback_eids.append(eid)
                     app = IllustrationAppearance(
                         entity_id=eid,
-                        name_ru=display_name,
-                        description_ru="; ".join(desc_ru_clean) or display_name,
+                        name_ru=display_name_ru,
+                        description_ru="; ".join(desc_ru_clean) or display_name_ru,
                         description_en="; ".join(desc_en_clean) or fallback_en,
                         fact_ids=tuple(accumulated_app_ids),
                         assumptions_ru=filter_non_assumption_placeholders(accumulated_assumps),
@@ -1441,6 +1654,72 @@ class IllustrationChapter:
                     if loc_apps
                     else _resolve_scene_location_ru(entry, section_id, card.scene_id)
                 )
+                raw_anchor_quotes = [
+                    a.quote.strip()[:240]
+                    for a in card.anchors
+                    if a.quote and a.quote.strip()
+                ][:3]
+
+                def _build_prompt_probe_payload(
+                    cur_quotes: Sequence[str],
+                    cur_gloss: Mapping[str, str],
+                    _card: SelectedMomentCard = card,
+                    _chars: Sequence[IllustrationAppearance] = char_apps,
+                    _locs: Sequence[IllustrationAppearance] = loc_apps,
+                    _fids: Sequence[str] = allowed_fids,
+                    _dkeys: Sequence[str] = allowed_dkeys,
+                    _dtraits: Sequence[Mapping[str, Any]] = avail_design_traits,
+                    _sloc: str | None = scene_loc_ru,
+                ) -> LLMRequest[Any]:
+                    p_in: dict[str, Any] = {
+                        "moment_id": _card.candidate_id,
+                        "scene_id": _card.scene_id,
+                        "title_ru": _card.title_ru,
+                        "event_ru": _card.event_ru,
+                        "reason_ru": _card.reason_ru,
+                        "style": revision.settings.style,
+                        "characters": [c.to_dict() for c in _chars],
+                        "locations": [loc.to_dict() for loc in _locs],
+                        "allowed_fact_ids": list(_fids),
+                        "allowed_design_keys": list(_dkeys),
+                        "available_design_traits": [thaw(t) for t in _dtraits],
+                    }
+                    if not _locs and _sloc and _sloc.strip():
+                        p_in["scene_location_ru"] = _sloc.strip()[:240]
+                    if cur_quotes:
+                        p_in["anchor_quotes"] = list(cur_quotes)
+                    if cur_gloss:
+                        p_in["glossary_terms_ru"] = dict(cur_gloss)
+                    return IllustrationContext.build_for_kind(
+                        kind=LLMResponseKind.ILLUSTRATION_PROMPT,
+                        stage=IllustrationScopeStage.PROMPT,
+                        input_payload=p_in,
+                        book_id=snapshot.book_id,
+                        conditions_id=snapshot.conditions_id,
+                        policy=policy,
+                    )
+
+                bounded_anchor_quotes: list[str] = []
+                for q in raw_anchor_quotes:
+                    cand_quotes = [*bounded_anchor_quotes, q]
+                    if (
+                        sizer.measure(_build_prompt_probe_payload(cand_quotes, {})).size_bytes
+                        <= policy.initial_target_bytes
+                    ):
+                        bounded_anchor_quotes = cand_quotes
+                    else:
+                        break
+
+                bounded_prompt_glossary: dict[str, str] = {}
+                if chapter_glossary_terms_ru:
+                    bounded_prompt_glossary = fit_glossary_terms_to_wire_budget(
+                        chapter_glossary_terms_ru,
+                        build_request=lambda g, _q=bounded_anchor_quotes: _build_prompt_probe_payload(
+                            _q, g
+                        ),
+                        sizer=sizer,
+                        target_bytes=policy.initial_target_bytes,
+                    )
                 draft = _build_prompt_scope_spec(
                     section_id=section_id,
                     section_order=entry.order,
@@ -1455,6 +1734,8 @@ class IllustrationChapter:
                     base_fallback_entity_ids=base_fallback_eids,
                     entity_names=moment_entity_names,
                     scene_location_ru=scene_loc_ru,
+                    anchor_quotes=bounded_anchor_quotes,
+                    glossary_terms_ru=bounded_prompt_glossary,
                     revision=revision,
                     route_id=route_id,
                 )
@@ -1478,6 +1759,8 @@ class IllustrationChapter:
                         base_fallback_entity_ids=base_fallback_eids,
                         entity_names=moment_entity_names,
                         scene_location_ru=scene_loc_ru,
+                        anchor_quotes=bounded_anchor_quotes,
+                        glossary_terms_ru=bounded_prompt_glossary,
                         revision=revision,
                         route_id=route_id,
                         reusable=reusable,
@@ -1904,6 +2187,22 @@ class IllustrationChapter:
                     )
                     return
                 if is_truncated_error(call_error):
+                    if self._can_continue_activation(
+                        activation_calls_used, scope.id, book_id, policy
+                    ):
+                        with self._uow.transaction() as tx:
+                            tx.illustrations.record_attempt_outcome(
+                                attempt.id,
+                                state=IllustrationAttemptState.FAILED,
+                                outcome={
+                                    "reason_code": IllustrationReasonCode.PROVIDER_TRUNCATED.value
+                                },
+                            )
+                        repair_summary = (
+                            "Предыдущий ответ был обрезан по длине. "
+                            "Верни компактный валидный JSON без повторов и лишних пробелов."
+                        )
+                        continue
                     self._finalize_failure(
                         book_id=book_id,
                         generation_id=generation_id,

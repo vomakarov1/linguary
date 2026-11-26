@@ -8,6 +8,7 @@ error. Export readiness is not required.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -19,13 +20,15 @@ from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import (
     _evidences,
-    _find_end,
+    _hint_anchor_spans,
     _hint_evidence_keys,
     _hint_only_dropped,
     _ids_for,
     _note_evidence_key,
     _note_only_dropped,
+    _preferred_hint_spans,
     block_notes,
+    find_hint_marker_end,
     vocabulary_dedup_key,
 )
 from linguary.application.layout.parts import LayoutPart, compose_parts
@@ -154,6 +157,75 @@ _RUSSIAN_TITLES = {
     glossary_key(translation): translation
     for translation in _TITLE_TRANSLATIONS.values()
 }
+_SHORT_NAME_SKIP_PREFIXES = frozenset(
+    {
+        "mr",
+        "mrs",
+        "miss",
+        "ms",
+        "dr",
+        "professor",
+        "uncle",
+        "aunt",
+        "sir",
+        "lady",
+        "lord",
+        "king",
+        "queen",
+    }
+)
+_SHORT_NAME_STOPWORDS = _SHORT_NAME_SKIP_PREFIXES | frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "she",
+        "he",
+        "her",
+        "his",
+        "they",
+        "this",
+        "that",
+        "from",
+        "also",
+        "only",
+        "note",
+        "name",
+        "short",
+        "see",
+    }
+)
+_SELF_ID_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "boy",
+        "girl",
+        "man",
+        "woman",
+        "kid",
+        "mr",
+        "mrs",
+        "miss",
+        "ms",
+        "dr",
+        "professor",
+        "uncle",
+        "aunt",
+    }
+)
+_LATIN_SHORT_NAME_RE = re.compile(r"\b([A-Z][a-z]+(?:[-'][A-Za-z]+)?)\b")
+_LATIN_SINGLE_NAME_FULL_RE = re.compile(r"^[A-Z][a-z]+(?:[-'][A-Za-z]+)?$")
+_NOTE_EN_PAREN_RU_RE = re.compile(
+    r"\b([A-Z][a-z]+(?:[-'][A-Za-z]+)?)\s*\(\s*(?:сокр(?:ащ(?:[её]нно)?)?\.?\s+)?[«\"']?([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)[»\"']?\s*\)"
+)
+_NOTE_RU_PAREN_EN_RE = re.compile(
+    r"(?<![А-Яа-яЁё])([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)\s*\(\s*[«\"']?([A-Z][a-z]+(?:[-'][A-Za-z]+)?)[»\"']?\s*\)"
+)
+_NOTE_EN_DASH_RU_RE = re.compile(
+    r"[«\"']?\b([A-Z][a-z]+(?:[-'][A-Za-z]+)?)\b[»\"']?\s*[—–-]\s*(?:сокр(?:ащ(?:[её]нно)?)?\.?\s+)?[«\"']?([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)[»\"']?"
+)
 _SPEECH_STYLE_FIRST_SCENE_KEEP = 2
 _SPEECH_STYLE_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _SPEECH_STYLE_TOKEN = re.compile(r"[a-z]+(?:'[a-z]*)*|'[a-z]+", re.IGNORECASE)
@@ -445,6 +517,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     treatments,
                     result,
                     document=document,
+                    section_order=section.order,
                     _index=speaker_index,
                 )
                 if block_facts
@@ -533,12 +606,25 @@ def _speaker_facts(analyses: Sequence[ChapterAnalysis]) -> tuple[ContextFact, ..
 
 
 @dataclass(frozen=True, slots=True)
+class _ShortNameSpec:
+    """Canonical vs common short name for a non-titled PERSON concept."""
+
+    canonical_en: str
+    short_en: str
+    short_ru: str
+
+
+@dataclass(frozen=True, slots=True)
 class _SpeakerIndex:
-    """Pre-indexed user decisions and person candidates for speaker resolution."""
+    """Pre-indexed user decisions, person candidates, and non-spoiler short-name counts."""
 
     language: str
     user_by_key: Mapping[str, str]
     candidate_by_key: Mapping[str, str]
+    short_name_by_key: Mapping[str, _ShortNameSpec]
+    source_names_by_key: Mapping[str, tuple[str, ...]]
+    section_orders: tuple[int, ...]
+    cumulative_counts: tuple[Mapping[str, int], ...]
 
 
 def _inferred_facts_by_block(
@@ -555,6 +641,106 @@ def _inferred_facts_by_block(
     }
 
 
+def _is_valid_short_en(candidate: str, canonical_keys: set[str]) -> bool:
+    stripped = candidate.strip()
+    if len(stripped) < 2 or _LATIN_SINGLE_NAME_FULL_RE.fullmatch(stripped) is None:
+        return False
+    key = glossary_key(stripped)
+    if not key or key in canonical_keys:
+        return False
+    return key.partition(" ")[0] not in _SHORT_NAME_STOPWORDS
+
+
+def _extract_short_name_pair(
+    concept: TermConcept,
+    analyses: Sequence[ChapterAnalysis],
+    language: str,
+) -> tuple[str, str] | None:
+    """Extract an explicit `(short_en, short_ru)` pair for a non-titled PERSON concept."""
+    if concept.type is not ConceptType.PERSON:
+        return None
+    canonical = concept.canonical_source_text.strip()
+    if not canonical:
+        return None
+    first_token = glossary_key(canonical).partition(" ")[0]
+    if first_token in _SHORT_NAME_SKIP_PREFIXES or first_token in _RUSSIAN_TITLES:
+        return None
+    normalized = _normalized_language(language)
+    russian = normalized == "ru"
+    canonical_base = canonical.partition("(")[0].strip() or canonical
+    canonical_keys = {
+        key for key in (glossary_key(canonical), glossary_key(canonical_base)) if key
+    }
+
+    def _valid_target(text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        return not russian or _CYRILLIC.search(stripped) is not None
+
+    candidate_tr: dict[str, str] = {}
+    for analysis in analyses:
+        for candidate in analysis.glossary_candidates:
+            if candidate.type is not ConceptType.PERSON:
+                continue
+            cand_key = glossary_key(candidate.source_text)
+            if not cand_key or cand_key in candidate_tr:
+                continue
+            translation = candidate.suggested_translation.strip()
+            if not _valid_target(translation):
+                continue
+            candidate_tr[cand_key] = translation
+
+    # (a) Explicit short name in parentheses of `canonical_source_text`.
+    if "(" in canonical and ")" in canonical:
+        inside = canonical.partition("(")[2].partition(")")[0].strip()
+        if _is_valid_short_en(inside, canonical_keys):
+            chosen = concept.variant_for(normalized)
+            if chosen is not None and "(" in chosen.text and ")" in chosen.text:
+                inside_ru = chosen.text.partition("(")[2].partition(")")[0].strip()
+                if _valid_target(inside_ru):
+                    return (inside, inside_ru)
+            found_cand = candidate_tr.get(glossary_key(inside))
+            if found_cand is not None:
+                return (inside, found_cand)
+
+    # (b) Explicit `Allie (Элли)` / `Элли (Allie)` / `Allie — Элли` / `Allie - Элли` in `concept.note`.
+    note = concept.note.strip()
+    if note:
+        for pattern in (_NOTE_EN_PAREN_RU_RE, _NOTE_EN_DASH_RU_RE):
+            for match in pattern.finditer(note):
+                short_en = match.group(1).strip()
+                short_ru = match.group(2).strip()
+                if _is_valid_short_en(short_en, canonical_keys) and _valid_target(short_ru):
+                    return (short_en, short_ru)
+        for match in _NOTE_RU_PAREN_EN_RE.finditer(note):
+            short_ru = match.group(1).strip()
+            short_en = match.group(2).strip()
+            if _is_valid_short_en(short_en, canonical_keys) and _valid_target(short_ru):
+                return (short_en, short_ru)
+        # (c) Latin name in `concept.note` matching a `GlossaryCandidate(type=PERSON)` in `analyses`.
+        for match in _LATIN_SHORT_NAME_RE.finditer(note):
+            word = match.group(1).strip()
+            if not _is_valid_short_en(word, canonical_keys):
+                continue
+            found_cand = candidate_tr.get(glossary_key(word))
+            if found_cand is not None:
+                return (word, found_cand)
+    return None
+
+
+def _counts_at(index: _SpeakerIndex, section_order: int | None) -> Mapping[str, int]:
+    """Cumulative name counts across content sections with `order <= section_order`."""
+    if not index.section_orders:
+        return {}
+    if section_order is None:
+        return index.cumulative_counts[-1]
+    pos = bisect_right(index.section_orders, section_order) - 1
+    if pos < 0:
+        return {}
+    return index.cumulative_counts[pos]
+
+
 def _speaker_index(
     concepts: Sequence[TermConcept],
     analyses: Sequence[ChapterAnalysis],
@@ -562,7 +748,13 @@ def _speaker_index(
     document: CanonicalDocument | None,
 ) -> _SpeakerIndex:
     normalized = _normalized_language(language)
+    russian = normalized == "ru"
+    allowed = _content_section_ids(document)
+    ordered_analyses = _analyses_in_reading_order(analyses, document, allowed)
     user_by_key: dict[str, str] = {}
+    short_name_by_key: dict[str, _ShortNameSpec] = {}
+    source_names_sets: dict[str, set[str]] = {}
+    deferred_shorts: list[tuple[str, str, set[str]]] = []
     for concept in concepts:
         key = glossary_key(concept.canonical_source_text)
         if not key or key in user_by_key:
@@ -574,10 +766,44 @@ def _speaker_index(
             target_key = glossary_key(chosen_text)
             if target_key:
                 user_by_key.setdefault(target_key, chosen_text)
-    russian = normalized == "ru"
-    allowed = _content_section_ids(document)
+            canonical_base = (
+                concept.canonical_source_text.partition("(")[0].strip()
+                or concept.canonical_source_text.strip()
+            )
+            base_key = glossary_key(canonical_base)
+            if (
+                "(" in concept.canonical_source_text
+                and base_key
+                and base_key != key
+                and base_key.partition(" ")[0] not in _SHORT_NAME_SKIP_PREFIXES
+            ):
+                base_ru = chosen_text.partition("(")[0].strip() or chosen_text
+                user_by_key.setdefault(base_key, base_ru)
+            pair = _extract_short_name_pair(concept, ordered_analyses, language)
+            names_for_concept = {canonical_base}
+            lookup_keys = [key, base_key, target_key]
+            if pair is not None:
+                short_en, short_ru = pair
+                names_for_concept.add(short_en)
+                spec = _ShortNameSpec(canonical_base, short_en, short_ru)
+                for spec_key in (key, base_key, target_key):
+                    if spec_key:
+                        short_name_by_key.setdefault(spec_key, spec)
+                short_key = glossary_key(short_en)
+                if short_key:
+                    deferred_shorts.append((short_key, short_ru, names_for_concept))
+                short_ru_key = glossary_key(short_ru)
+                if short_ru_key:
+                    deferred_shorts.append((short_ru_key, short_ru, names_for_concept))
+            for lookup_key in lookup_keys:
+                if lookup_key:
+                    source_names_sets.setdefault(lookup_key, set()).update(names_for_concept)
+    for deferred_key, deferred_ru, deferred_names in deferred_shorts:
+        if deferred_key not in user_by_key:
+            user_by_key[deferred_key] = deferred_ru
+            source_names_sets.setdefault(deferred_key, set()).update(deferred_names)
     candidate_by_key: dict[str, str] = {}
-    for analysis in _analyses_in_reading_order(analyses, document, allowed):
+    for analysis in ordered_analyses:
         for candidate in analysis.glossary_candidates:
             if candidate.type is not ConceptType.PERSON:
                 continue
@@ -593,7 +819,54 @@ def _speaker_index(
             target_key = glossary_key(translation)
             if target_key:
                 candidate_by_key.setdefault(target_key, translation)
-    return _SpeakerIndex(normalized, user_by_key, candidate_by_key)
+            source_names_sets.setdefault(key, set()).add(candidate.source_text.strip())
+            if target_key:
+                source_names_sets.setdefault(target_key, set()).add(candidate.source_text.strip())
+
+    section_orders: list[int] = []
+    cumulative_counts: list[dict[str, int]] = []
+    if document is not None and short_name_by_key:
+        needed_names = sorted(
+            {
+                name
+                for spec in short_name_by_key.values()
+                for name in (spec.canonical_en, spec.short_en)
+                if name
+            }
+        )
+        patterns = {
+            name: re.compile(
+                rf"(?<!\w){r'\s+'.join(re.escape(part) for part in name.split())}(?!\w)"
+            )
+            for name in needed_names
+        }
+        running = {name: 0 for name in needed_names}
+        for section in document.ordered_sections:
+            if document.is_front_matter(section) or section.is_notes_only:
+                continue
+            for block in section.ordered_blocks:
+                if not block.text:
+                    continue
+                for name, pattern in patterns.items():
+                    matches = pattern.findall(block.text)
+                    if matches:
+                        running[name] += len(matches)
+            section_orders.append(section.order)
+            cumulative_counts.append(dict(running))
+
+    source_names_by_key = {
+        lookup_key: tuple(sorted(names))
+        for lookup_key, names in source_names_sets.items()
+    }
+    return _SpeakerIndex(
+        normalized,
+        user_by_key,
+        candidate_by_key,
+        short_name_by_key,
+        source_names_by_key,
+        tuple(section_orders),
+        tuple(cumulative_counts),
+    )
 
 
 def _speaker_name(
@@ -603,22 +876,34 @@ def _speaker_name(
     language: str,
     *,
     document: CanonicalDocument | None = None,
+    section_order: int | None = None,
     _index: _SpeakerIndex | None = None,
 ) -> str | None:
     """Russian (or other target) name for `value`, or none when it stays unresolved.
 
     Keys are the whole value, the text before `(`, and the text inside `(...)`.
-    A user decision wins, then a person candidate from a content section, then
-    for Russian a title or kinship prefix plus the same lookup on the remainder.
-    The English source is never returned on its own.
+    A user decision wins (switching to a non-spoiler dominant common short name
+    for non-titled PERSON concepts when `count(short_en) > count(canonical_en)`
+    across sections `<= section_order`), then a person candidate from a content
+    section, then for Russian a title or kinship prefix plus the same lookup on
+    the remainder. The English source is never returned on its own.
     """
     variants = _name_variants(value)
     if not variants:
         return None
     index = _index or _speaker_index(concepts, analyses, language, document)
+    first_token = glossary_key(value).partition(" ")[0]
+    is_titled_value = first_token in _SHORT_NAME_SKIP_PREFIXES or first_token in _RUSSIAN_TITLES
     for variant in variants:
-        found = index.user_by_key.get(glossary_key(variant))
+        key = glossary_key(variant)
+        found = index.user_by_key.get(key)
         if found is not None:
+            if not is_titled_value:
+                spec = index.short_name_by_key.get(key)
+                if spec is not None:
+                    counts = _counts_at(index, section_order)
+                    if counts.get(spec.short_en, 0) > counts.get(spec.canonical_en, 0):
+                        return spec.short_ru
             return found
     for variant in variants:
         found = index.candidate_by_key.get(glossary_key(variant))
@@ -632,6 +917,40 @@ def _speaker_name(
     return None
 
 
+def _part_self_identifies_speaker(
+    part_text: str,
+    speaker_tokens: Sequence[str],
+) -> bool:
+    """Whether `part_text` explicitly introduces the speaker by a non-generic name token."""
+    if not part_text or not speaker_tokens:
+        return False
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in speaker_tokens:
+        for token in _WORD_TOKEN_RE.findall(raw):
+            folded = token.casefold()
+            if len(folded) < 2 or folded in _SELF_ID_STOPWORDS or folded in seen:
+                continue
+            seen.add(folded)
+            tokens.append(token)
+    for tok in tokens:
+        pattern = re.compile(
+            rf"\b(?:my\s+name(?:'s|’s|\s+is)|i(?:'m|’m|\s+am)|call\s+me)\s+{re.escape(tok)}\b",
+            re.IGNORECASE,
+        )
+        if pattern.search(part_text) is not None:
+            return True
+    return False
+
+
+def _speaker_tokens_for_fact(value: str, index: _SpeakerIndex) -> tuple[str, ...]:
+    """Candidate name strings from `fact.value`, matched canonical names, and short names."""
+    raw_names: list[str] = [value]
+    for variant in _name_variants(value):
+        raw_names.extend(index.source_names_by_key.get(glossary_key(variant), ()))
+    return tuple(dict.fromkeys(name for name in raw_names if name and name.strip()))
+
+
 def _speakers_for_block(
     block: DocumentBlock,
     facts: Sequence[ContextFact],
@@ -642,14 +961,16 @@ def _speakers_for_block(
     result: BlockProcessingResult | None = None,
     *,
     document: CanonicalDocument | None = None,
+    section_order: int | None = None,
     _index: _SpeakerIndex | None = None,
 ) -> dict[tuple[int, int], str]:
     """Inferred subject anchors whose shown part opens the line or continues its quote.
 
     Parts follow `compose_parts`, including the single unit used when a whole-block
     translation replaces those parts. Secondary anchors are ignored. A part that
-    starts as narrative, with a quote only later, is absent. The first resolved
-    name keeps a repeated part.
+    starts as narrative, with a quote only later, is absent. Parts where the speaker
+    explicitly introduces themselves are skipped. The first resolved name keeps a
+    repeated part.
     """
     block_facts = [
         fact
@@ -685,14 +1006,22 @@ def _speakers_for_block(
             analyses,
             language,
             document=document,
+            section_order=section_order,
             _index=index,
         )
         if name is None:
             continue
+        speaker_tokens = _speaker_tokens_for_fact(fact.value, index)
         anchor = fact.subject_anchor
         for part in parts:
             bounds = (part.start, part.end)
-            if bounds not in explicit_parts and _part_shows_speaker(block.text, part, anchor.start):
+            if (
+                bounds not in explicit_parts
+                and _part_shows_speaker(block.text, part, anchor.start)
+                and not _part_self_identifies_speaker(
+                    block.text[part.start : part.end], speaker_tokens
+                )
+            ):
                 speakers.setdefault(bounds, name)
     return speakers
 
@@ -1036,13 +1365,27 @@ def _hint_segment_index(
     block: DocumentBlock,
     result: BlockProcessingResult,
     hint: GlossaryHint,
+    *,
+    plan: ContentPlan | None = None,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
 ) -> int | None:
     """Segment index containing `hint`, or None for whole-block or unmatched hints."""
     spans = block.segment_spans
     treatments = result.segment_treatments
     if not treatments or len(treatments) != len(spans):
         return None
-    marker_end = _find_end(block.text, hint.original)
+    evidences = _evidences(result)
+    known = {} if plan is None else {item.id: item for item in plan.difficulties}
+    raw_ids = _ids_for(evidences, _hint_evidence_keys(hint, result.block_id))
+    ids = tuple(item_id for item_id in raw_ids if item_id not in dropped_difficulty_ids)
+    anchor_spans = _hint_anchor_spans(ids, known, result.block_id)
+    preferred_spans = _preferred_hint_spans(block, result)
+    marker_end = find_hint_marker_end(
+        block.text,
+        hint.original,
+        anchor_spans=anchor_spans,
+        preferred_spans=preferred_spans,
+    )
     if marker_end is None:
         return None
     for index, span in enumerate(spans):
@@ -1057,13 +1400,21 @@ def _hint_is_glossary_only(
     hint: GlossaryHint,
     *,
     requires_hints: bool,
+    plan: ContentPlan | None = None,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether `hint` serves an untranslated `GLOSSARY_ONLY` block or segment."""
     if not requires_hints:
         return False
     if result.treatment is BlockTreatment.GLOSSARY_ONLY and not result.segment_treatments:
         return True
-    seg_index = _hint_segment_index(block, result, hint)
+    seg_index = _hint_segment_index(
+        block,
+        result,
+        hint,
+        plan=plan,
+        dropped_difficulty_ids=dropped_difficulty_ids,
+    )
     if seg_index is None:
         return True
     return result.segment_treatments[seg_index].requires_glossary_hints
@@ -1073,6 +1424,9 @@ def _glossary_only_bucket(
     block: DocumentBlock,
     result: BlockProcessingResult,
     hint: GlossaryHint,
+    *,
+    plan: ContentPlan | None = None,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
 ) -> int | None:
     """Bucket key (`None` for whole block, segment index for mixed `GLOSSARY_ONLY` segments)."""
     if result.treatment is BlockTreatment.GLOSSARY_ONLY and not result.segment_treatments:
@@ -1085,7 +1439,13 @@ def _glossary_only_bucket(
     ]
     if len(glossary_segments) == 1:
         return glossary_segments[0]
-    return _hint_segment_index(block, result, hint)
+    return _hint_segment_index(
+        block,
+        result,
+        hint,
+        plan=plan,
+        dropped_difficulty_ids=dropped_difficulty_ids,
+    )
 
 
 def _hint_is_protected_a1(
@@ -1187,11 +1547,22 @@ def _deduplicate_glossary_hints(
             hint, result.block_id, evidences, dropped_difficulty_ids
         )
         hint_glossary_only = _hint_is_glossary_only(
-            block, result, hint, requires_hints=requires_hints
+            block,
+            result,
+            hint,
+            requires_hints=requires_hints,
+            plan=plan,
+            dropped_difficulty_ids=dropped_difficulty_ids,
         )
         glossary_only_by_index[index] = hint_glossary_only
         if hint_glossary_only:
-            bucket_by_index[index] = _glossary_only_bucket(block, result, hint)
+            bucket_by_index[index] = _glossary_only_bucket(
+                block,
+                result,
+                hint,
+                plan=plan,
+                dropped_difficulty_ids=dropped_difficulty_ids,
+            )
 
     is_a2 = isinstance(reader_level, str) and reader_level.strip().lower() == "a2"
     known = {} if plan is None else {item.id: item for item in plan.difficulties}

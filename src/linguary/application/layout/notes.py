@@ -453,6 +453,17 @@ _RU_PAST = (
     ("ыла", "ыть"),
     ("ыл", "ыть"),
 )
+_TAUTOLOGY_WORD_RE = re.compile(r"[а-яa-z0-9]+")
+_TAUTOLOGY_FILLER_STEMS = (
+    "люд",
+    "человек",
+    "вещ",
+    "предмет",
+    "мест",
+    "действ",
+    "состоян",
+    "явлен",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +547,7 @@ def block_notes(
         block.id,
         excluded_hints=omitted_hints,
     )
+    preferred_spans = _preferred_hint_spans(block, result)
     drafts: list[_Draft] = []
     for (hint, strip_note), pronunciation in zip(visible_hints, assigned, strict=True):
         drafts.append(
@@ -549,6 +561,7 @@ def block_notes(
                 result.treatment,
                 strip_note=strip_note,
                 dropped_difficulty_ids=dropped_difficulty_ids,
+                preferred_spans=preferred_spans,
             )
         )
     for index, note in enumerate(result.language_notes):
@@ -720,6 +733,118 @@ def _hint_matches_pronunciation(original: str, quote: str) -> bool:
     return _match_phrase(tokens, 1, rest) == tokens[-1][1]
 
 
+def _preferred_hint_spans(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+) -> tuple[tuple[int, int], ...]:
+    """Segment spans prioritized for unanchored hints: `GLOSSARY_ONLY`, then `READ_AS_IS`."""
+    spans = block.segment_spans
+    treatments = result.segment_treatments
+    if len(spans) <= 1 or not treatments or len(treatments) != len(spans):
+        return ()
+    glossary_spans = [
+        (span.start, span.end)
+        for span, mode in zip(spans, treatments, strict=True)
+        if mode.requires_glossary_hints
+    ]
+    read_spans = [
+        (span.start, span.end)
+        for span, mode in zip(spans, treatments, strict=True)
+        if mode is BlockTreatment.READ_AS_IS
+    ]
+    return tuple((*glossary_spans, *read_spans))
+
+
+def _hint_anchor_spans(
+    ids: Sequence[str],
+    known: Mapping[str, Difficulty],
+    block_id: str,
+) -> tuple[tuple[int, int], ...]:
+    """Anchor `(start, end)` spans in `block_id` for difficulties linked to a hint."""
+    spans: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for item_id in ids:
+        difficulty = known.get(item_id)
+        if difficulty is None:
+            continue
+        for anchor in difficulty.anchors:
+            if anchor.block_id != block_id:
+                continue
+            bounds = (anchor.start, anchor.end)
+            if bounds not in seen:
+                seen.add(bounds)
+                spans.append(bounds)
+    return tuple(spans)
+
+
+def find_hint_marker_end(
+    text: str,
+    original: str,
+    *,
+    anchor_spans: Sequence[tuple[int, int]] = (),
+    preferred_spans: Sequence[tuple[int, int]] = (),
+) -> int | None:
+    """Find marker offset for a glossary hint with anchor and segment priorities.
+
+    Priority 1: explicit `Difficulty` anchor spans in this block (searching
+    `_find_end` inside each valid span first, then falling back to the first
+    valid anchor end).
+    Priority 2: preferred segment spans (`GLOSSARY_ONLY`, then `READ_AS_IS`).
+    Fallback: first match anywhere in `text`.
+    """
+    text_len = len(text)
+    valid_anchors = [
+        (a_start, a_end)
+        for a_start, a_end in anchor_spans
+        if 0 <= a_start < a_end <= text_len
+    ]
+    for a_start, a_end in valid_anchors:
+        local = _find_end(text[a_start:a_end], original)
+        if local is not None:
+            return a_start + local
+    if valid_anchors:
+        return valid_anchors[0][1]
+    for s_start, s_end in preferred_spans:
+        if not (0 <= s_start < s_end <= text_len):
+            continue
+        local = _find_end(text[s_start:s_end], original)
+        if local is not None:
+            return s_start + local
+    return _find_end(text, original)
+
+
+def _words_match_tautology(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return len(left) >= 4 and len(right) >= 4 and left[:4] == right[:4]
+
+
+def _is_tautological_gloss(translation: str, note: str) -> bool:
+    """Whether a short 1-3 word note only restates `translation` plus empty filler stems."""
+    tr_words = _TAUTOLOGY_WORD_RE.findall(translation.casefold().replace("ё", "е"))
+    note_words = _TAUTOLOGY_WORD_RE.findall(note.casefold().replace("ё", "е"))
+    if not tr_words or not (1 <= len(note_words) <= 3):
+        return False
+    significant_tr = [word for word in tr_words if len(word) >= 2] or tr_words
+    matched_indices: set[int] = set()
+    for tr_word in significant_tr:
+        found = next(
+            (
+                idx
+                for idx, note_word in enumerate(note_words)
+                if idx not in matched_indices and _words_match_tautology(tr_word, note_word)
+            ),
+            None,
+        )
+        if found is None:
+            return False
+        matched_indices.add(found)
+    remaining = [
+        note_word for idx, note_word in enumerate(note_words) if idx not in matched_indices
+    ]
+    return all(note_word.startswith(_TAUTOLOGY_FILLER_STEMS) for note_word in remaining)
+
+
 def _hint_draft(
     hint: GlossaryHint,
     pronunciation: PronunciationOccurrence | None,
@@ -731,8 +856,9 @@ def _hint_draft(
     *,
     strip_note: bool = False,
     dropped_difficulty_ids: frozenset[str] = frozenset(),
+    preferred_spans: Sequence[tuple[int, int]] = (),
 ) -> _Draft:
-    """A glossary hint. The marker is the end of the first match of `original`.
+    """A glossary hint. The marker uses explicit anchors, then preferred spans, then `text`.
 
     Evidence keys use the stored hint fields, before the marker search and
     before a leading translation is cut out of the note or `strip_note` hides
@@ -742,7 +868,13 @@ def _hint_draft(
     """
     raw_ids = _ids_for(evidences, _hint_evidence_keys(hint, block_id))
     ids = tuple(item_id for item_id in raw_ids if item_id not in dropped_difficulty_ids)
-    marker_end = _find_end(text, hint.original)
+    anchor_spans = _hint_anchor_spans(ids, known, block_id)
+    marker_end = find_hint_marker_end(
+        text,
+        hint.original,
+        anchor_spans=anchor_spans,
+        preferred_spans=preferred_spans,
+    )
     cleaned_note = "" if strip_note else _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
     verbal = _verbal_infinitive_words(hint.original) is not None
@@ -777,6 +909,13 @@ def _hint_draft(
     for candidate in (translation, pre_infinitive, base_translation):
         if candidate:
             kept_note = _strip_leading_translation(kept_note, candidate)
+    if (
+        kept_note
+        and (lexical or verbal)
+        and not signaled
+        and _is_tautological_gloss(translation, kept_note)
+    ):
+        kept_note = ""
     long = (
         treatment is BlockTreatment.TRANSLATE
         and bool(cleaned_note)
@@ -1311,11 +1450,13 @@ def _plain_lexical(
     ids: Sequence[str],
     known: Mapping[str, Difficulty],
 ) -> bool:
-    """A single word or a short `-ed` phrasal verb without a signal difficulty."""
+    """A single word (including hyphenated) or a short `-ed` phrasal verb without a signal difficulty."""
     if any(item_id in known and known[item_id].kind in _SIGNAL_KINDS for item_id in ids):
         return False
     words = expression_words(original)
     if len(words) == 1:
+        return True
+    if words and len(original.strip().split()) == 1:
         return True
     return (
         len(words) == 2

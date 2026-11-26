@@ -5118,6 +5118,249 @@ async def test_a2_analyze_chapter_lexical_help_channel_omits_byr(stored_book):
     assert 'BYR' not in one_pass_repair
 
 
+async def test_staged_fragment_cache_cleared_on_narrative_and_pedagogical_merge_errors(stored_book):
+    """Merge/chapter-validation errors clear fragment cache of the failing pass kind only."""
+    import json
+    from linguary.application.analysis_merge import AnalysisMergeError
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            'The stranger stepped onto the quiet road.',
+            'Then Voldemort appeared from the mist.',
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    # 1. NARRATIVE merge/chapter validation failure (cross-fragment spoiler_name_leak):
+    # Fragment 0 uses 'Voldemort' which is not in fragment 0's text (so fragment 0 passes locally),
+    # while fragment 1 reveals 'Voldemort' — chapter-wide validation raises AnalysisMergeError
+    # and MUST clear NARRATIVE fragment passes.
+    frag0_nar = json.loads(narrative(('b1',)).content)
+    frag0_nar['scenes'][0]['location'] = 'Quiet Road'
+    frag0_nar['scenes'][0]['participants'] = ['Voldemort']
+    frag1_nar = json.loads(narrative(('b1',)).content)
+    frag1_nar['scenes'][0]['location'] = 'Dark Forest'
+    frag1_nar['scenes'][0]['participants'] = ['Voldemort']
+    frag1_nar['glossary_candidates'] = [
+        dict(
+            source_text='Voldemort',
+            type='person',
+            suggested_translation='Волдеморт',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    with pytest.raises(AnalysisMergeError) as nar_exc:
+        await scenario(
+            uow,
+            FakeLLMClient([FakeReply.of_payload(frag0_nar), FakeReply.of_payload(frag1_nar)]),
+            max_fragment_blocks=1,
+        )(COMMAND)
+    assert nar_exc.value.violation is not None
+    assert nar_exc.value.violation.rule_code == 'spoiler_name_leak'
+    with uow.transaction() as tx:
+        remaining = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+        assert remaining == ()
+
+    # 2. PEDAGOGICAL chapter-wide failure inside _assemble_staged:
+    # Whole-chapter NARRATIVE succeeds and is persisted (`scope_key == ''`).
+    # Pedagogical fragments succeed locally and get cached in `analysis_pass_results`,
+    # then `_assemble_staged` raises `AnalysisMergeError`.
+    # PEDAGOGICAL fragment passes MUST be cleared, while whole-chapter NARRATIVE stays intact!
+    clean_frag0 = json.loads(narrative(('b1',)).content)
+    clean_frag0['scenes'][0]['location'] = 'Quiet Road'
+    clean_frag0['scenes'][0]['participants'] = ['the stranger']
+    clean_frag1 = json.loads(narrative(('b1',)).content)
+    clean_frag1['scenes'][0]['location'] = 'Dark Forest'
+    clean_frag1['scenes'][0]['participants'] = ['Voldemort']
+    clean_frag1['glossary_candidates'] = frag1_nar['glossary_candidates']
+
+    ped_frag0 = pedagogical(('b1',))
+    ped_frag1 = pedagogical(('b1',))
+
+    use_case = scenario(
+        uow,
+        FakeLLMClient([
+            FakeReply.of_payload(clean_frag0),
+            FakeReply.of_payload(clean_frag1),
+            ped_frag0,
+            ped_frag1,
+        ]),
+        max_fragment_blocks=1,
+    )
+    saw_cached_ped_fragments = False
+
+    def _failing_assemble_staged(*args, **kwargs):
+        nonlocal saw_cached_ped_fragments
+        with uow.transaction() as tx:
+            passes_before = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+            saw_cached_ped_fragments = any(
+                p.pass_kind is AnalysisPassKind.PEDAGOGICAL and bool(p.scope_key)
+                for p in passes_before
+            )
+        raise AnalysisMergeError('assembled pedagogical chapter mismatch')
+
+    use_case._assemble_staged = _failing_assemble_staged  # type: ignore[method-assign]
+
+    with pytest.raises(AnalysisMergeError, match='assembled pedagogical chapter mismatch'):
+        await use_case(COMMAND)
+
+    assert saw_cached_ped_fragments is True
+    with uow.transaction() as tx:
+        passes = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+        assert [(p.pass_kind, p.scope_key) for p in passes] == [
+            (AnalysisPassKind.NARRATIVE, ''),
+        ]
+
+
+async def test_a2_vocab_known_names_allie_alias_from_note_and_context_facts(stored_book):
+    """_a2_vocab_known_names_* extracts Latin proper-name aliases from PERSON/PLACE/ORG notes/descriptions and speaker/pronoun_referent context_facts."""
+    import json
+    from linguary.application.llm_dto import (
+        GlossaryCandidateResponse,
+        NarrativeAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.application.use_cases.analyze_chapter import (
+        _a2_vocab_known_names_from_glossary,
+        _a2_vocab_known_names_with_narrative,
+    )
+    from linguary.domain import (
+        ConceptType,
+        GlossaryCandidate,
+        TermConcept,
+        TermStatus,
+        TermVariant,
+    )
+
+    acc = (
+        GlossaryCandidate(
+            id='c1', analysis_id='a1', source_text='Alexandra', type=ConceptType.PERSON,
+            suggested_translation='Александра', confidence=0.95, model_flagged_review=False,
+            requires_review=False,
+            note='Short form: Allie. She is fourteen.',
+            description='Also known as Allie in Everlost.',
+        ),
+        GlossaryCandidate(
+            id='c2', analysis_id='a1', source_text='skinjacker', type=ConceptType.TERM,
+            suggested_translation='скинджекер', confidence=0.95, model_flagged_review=False,
+            requires_review=False,
+            note='See Phantom or Ghost.',
+            description='Term for Shadow spirits.',
+        ),
+    )
+    concepts = (
+        TermConcept(
+            id='t1', book_id=BOOK_ID, type=ConceptType.PERSON, canonical_source_text='Nicholas',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t1', 'ru', 'Николас', TermStatus.APPROVED),),
+            note='Обиходное имя Nick (Ник). The boy from Texas. Only Nick.',
+        ),
+        TermConcept(
+            id='t2', book_id=BOOK_ID, type=ConceptType.FICTIONAL_CONCEPT, canonical_source_text='Afterlights',
+            status=TermStatus.APPROVED,
+            variants=(TermVariant('t2', 'ru', 'Послесветы', TermStatus.APPROVED),),
+            note='Souls trapped in Limbo.',
+        ),
+    )
+
+    from_glossary = _a2_vocab_known_names_from_glossary(acc, concepts, ())
+    assert 'Alexandra' in from_glossary
+    assert 'Allie' in from_glossary
+    assert 'Everlost' in from_glossary
+    assert 'Nicholas' in from_glossary
+    assert 'Nick' in from_glossary
+    assert 'Texas' in from_glossary
+    # Stopwords and non-name types (TERM / FICTIONAL_CONCEPT) must be excluded.
+    for excluded in ('Short', 'She', 'Also', 'The', 'Only', 'See', 'Phantom', 'Ghost', 'Shadow', 'Limbo', 'Souls'):
+        assert excluded not in from_glossary, excluded
+
+    nar = NarrativeAnalysisResponse(
+        translation_instructions='Keep voice.',
+        chapter_summary='Allie talks to Mikey.',
+        glossary_candidates=(
+            GlossaryCandidateResponse(
+                source_text='Michael', type=ConceptType.PERSON, suggested_translation='Майкл',
+                confidence=0.95, model_flagged_review=False,
+                note='From chapter 1, called Mikey.',
+                description='Name used by friends: Mikey.',
+            ),
+            GlossaryCandidateResponse(
+                source_text='deadspot', type=ConceptType.TERM, suggested_translation='мёртвая точка',
+                confidence=0.95, model_flagged_review=False,
+                note='See Trapdoor.',
+            ),
+        ),
+        context_facts=(
+            QuotedContextFactResponse(
+                id='f1', kind='speaker',
+                anchors=(QuotedSourceAnchorResponse('b1', 'said Allie'),),
+                subject_anchor=QuotedSourceAnchorResponse('b1', '“Hi.”'),
+                value='Allie', certainty='explicit',
+            ),
+            QuotedContextFactResponse(
+                id='f2', kind='pronoun_referent',
+                anchors=(QuotedSourceAnchorResponse('b1', 'Lief'),),
+                subject_anchor=QuotedSourceAnchorResponse('b1', 'he'),
+                value='Lief', certainty='explicit',
+            ),
+            QuotedContextFactResponse(
+                id='f3', kind='speaker',
+                anchors=(QuotedSourceAnchorResponse('b1', 'the boy'),),
+                subject_anchor=QuotedSourceAnchorResponse('b1', '“Wait.”'),
+                value='the boy', certainty='inferred',
+            ),
+            QuotedContextFactResponse(
+                id='f4', kind='gender',
+                anchors=(QuotedSourceAnchorResponse('b1', 'he'),),
+                subject_anchor=QuotedSourceAnchorResponse('b1', 'he'),
+                value='Male', certainty='explicit',
+            ),
+        ),
+    )
+    with_nar = _a2_vocab_known_names_with_narrative(from_glossary, nar)
+    assert 'Michael' in with_nar
+    assert 'Mikey' in with_nar
+    assert 'Lief' in with_nar
+    assert 'From' not in with_nar
+    assert 'Name' not in with_nar
+    assert 'Trapdoor' not in with_nar
+    assert 'the boy' not in with_nar
+    assert 'Male' not in with_nar
+
+    # End-to-end A2 staged check: concept 'Alexandra' with note 'Short: Allie' keeps 'Allie is here.' in READ_AS_IS.
+    _, uow, _ = stored_book
+    _store(uow, (_block(0, 'Allie is here.'),))
+    with uow.transaction() as tx:
+        tx.glossary.save(
+            TermConcept(
+                id='t-alex', book_id=BOOK_ID, type=ConceptType.PERSON,
+                canonical_source_text='Alexandra', status=TermStatus.APPROVED,
+                variants=(TermVariant('t-alex', 'ru', 'Александра', TermStatus.APPROVED),),
+                note='Short: Allie.',
+            )
+        )
+    nar_raw = json.loads(narrative(('b1',)).content)
+    nar_raw['scenes'][0]['participants'] = ['Alexandra']
+    ped_reply = pedagogical(
+        ('b1',),
+        summary='Alexandra is here.',
+        treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
+    )
+    result = await scenario(
+        uow,
+        FakeLLMClient([FakeReply.of_payload(nar_raw), ped_reply]),
+        context=builder('a2'),
+    )(COMMAND)
+    assert [i.treatment for i in result.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
+
+
+
 
 
 

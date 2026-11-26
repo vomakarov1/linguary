@@ -15,6 +15,7 @@ from linguary.adapters.llm.openai_compatible import (
     serialize_request,
 )
 from linguary.adapters.llm.rate_limit import LLMRateLimiter, RateLimitedLLMClient
+from linguary.application.illustration_context import MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS
 from linguary.application.ports.illustrations import (
     IllustrationRuntimePort,
     RequestWireSizer,
@@ -56,14 +57,18 @@ def _clean_llm_settings(
     same_primary_model = model.strip() == base_llm.model.strip()
     if same_primary_model:
         reasoning_effort = base_llm.reasoning_effort
+        min_stage_cap = min(
+            effective_max_tokens
+            if effective_max_tokens is not None
+            else policy.max_completion_tokens,
+            policy.max_completion_tokens,
+            MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+        )
         if (
             reasoning_effort is None
             and base_llm.reasoning_max_tokens is not None
             and _is_openrouter_url(base_llm.base_url)
-            and (
-                effective_max_tokens is None
-                or base_llm.reasoning_max_tokens < effective_max_tokens
-            )
+            and base_llm.reasoning_max_tokens < min_stage_cap
         ):
             reasoning_max_tokens = base_llm.reasoning_max_tokens
         else:

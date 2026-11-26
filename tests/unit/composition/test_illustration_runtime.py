@@ -352,3 +352,130 @@ def test_is_incompatible_route_error_classification() -> None:
     assert is_incompatible_route_error(
         _provider_err("generic error with 404 tokens in prompt", status_code=400)
     ) is False
+
+
+async def test_stage_max_completion_tokens_and_reasoning_max_tokens_stage_cap(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustration_context import (
+        MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS,
+        IllustrationContext,
+        _stage_max_completion_tokens,
+    )
+    from linguary.domain.illustrations import IllustrationScopeStage
+
+    assert MIN_ILLUSTRATION_STAGE_COMPLETION_TOKENS == 6144
+    default_policy = IllustrationPolicy()
+    for small_stage in (
+        IllustrationScopeStage.DESIGN,
+        IllustrationScopeStage.SELECTION,
+        IllustrationScopeStage.FACT_SCOPE,
+        IllustrationScopeStage.PROMPT,
+    ):
+        assert _stage_max_completion_tokens(small_stage, default_policy) == 6144
+    for large_stage in (
+        IllustrationScopeStage.EXTRACT,
+        IllustrationScopeStage.ALIAS,
+        IllustrationScopeStage.CANDIDATES,
+    ):
+        assert _stage_max_completion_tokens(large_stage, default_policy) == 8192
+
+    tight_policy = IllustrationPolicy(max_completion_tokens=4096)
+    assert _stage_max_completion_tokens(IllustrationScopeStage.DESIGN, tight_policy) == 4096
+    assert _stage_max_completion_tokens(IllustrationScopeStage.EXTRACT, tight_policy) == 4096
+
+    design_req = IllustrationContext.build_for_kind(
+        kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+        stage=IllustrationScopeStage.DESIGN,
+        input_payload={"entity_id": "ent-1"},
+        book_id="book-1",
+        conditions_id=None,
+        policy=default_policy,
+    )
+    assert design_req.max_completion_tokens == 6144
+
+    extract_req = IllustrationContext.build_for_kind(
+        kind=LLMResponseKind.ILLUSTRATION_EXTRACT,
+        stage=IllustrationScopeStage.EXTRACT,
+        input_payload={"units": []},
+        book_id="book-1",
+        conditions_id=None,
+        policy=default_policy,
+    )
+    assert extract_req.max_completion_tokens == 8192
+
+    # OpenRouter with base_llm.reasoning_max_tokens=8192 (or 6144) must clear reasoning_max_tokens
+    # so serialize_request on DESIGN (max_completion_tokens=6144) never raises LLMConfigurationError.
+    db = tmp_path / "rt-stage-cap.db"
+    apply_migrations(db)
+    uow = SqlAlchemyUnitOfWork.for_engine(create_database_engine(db))
+    limiter = LLMRateLimiter(None, max_concurrency=2)
+    or_llm = LLMSettings(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="deepseek/deepseek-v4.1-flash-1017",
+        api_key="sk-test",
+        max_output_tokens=32768,
+        reasoning_effort=None,
+        reasoning_max_tokens=8192,
+    )
+    rt_settings = _make_runtime_settings(or_llm)
+    runtime = IllustrationRuntime(
+        runtime_settings=rt_settings,
+        rate_limiter=limiter,
+        unit_of_work=uow,
+    )
+    rev = _revision(
+        model_reference="deepseek/deepseek-v4.1-flash-1017",
+        model_prompts="deepseek/deepseek-v4.1-flash-1017",
+        policy=default_policy,
+    )
+    sizer = runtime.sizer_for(rev, LLMCallStage.ILLUSTRATION_REFERENCE)
+    assert sizer.settings.reasoning_max_tokens is None  # type: ignore[attr-defined]
+    wire = json.loads(
+        serialize_request(
+            design_req,
+            sizer.settings,  # type: ignore[attr-defined]
+            include_openrouter_provider=True,
+            explicit_cache=False,
+        )
+    )
+    assert wire["max_completion_tokens"] == 6144
+    assert "reasoning" not in wire
+
+    # Boundary: reasoning_max_tokens == 6144 must also be cleared.
+    rt_settings.publish(
+        rt_settings.prepare(AppSettings(llm=replace(or_llm, reasoning_max_tokens=6144))),
+        revision=2,
+    )
+    sizer_eq = runtime.sizer_for(rev, LLMCallStage.ILLUSTRATION_REFERENCE)
+    assert sizer_eq.settings.reasoning_max_tokens is None  # type: ignore[attr-defined]
+    assert sizer_eq.measure(design_req).size_bytes > 0
+
+    # Valid reasoning_max_tokens < min(effective_max_tokens, policy.max_completion_tokens, 6144) is kept.
+    rt_settings.publish(
+        rt_settings.prepare(AppSettings(llm=replace(or_llm, reasoning_max_tokens=4096))),
+        revision=3,
+    )
+    sizer_ok = runtime.sizer_for(rev, LLMCallStage.ILLUSTRATION_REFERENCE)
+    assert sizer_ok.settings.reasoning_max_tokens == 4096  # type: ignore[attr-defined]
+    assert sizer_ok.measure(design_req).size_bytes > 0
+
+    # Low policy.max_completion_tokens=4096 clears reasoning_max_tokens=4096 too.
+    rev_tight = _revision(
+        model_reference="deepseek/deepseek-v4.1-flash-1017",
+        model_prompts="deepseek/deepseek-v4.1-flash-1017",
+        policy=tight_policy,
+    )
+    sizer_tight = runtime.sizer_for(rev_tight, LLMCallStage.ILLUSTRATION_REFERENCE)
+    assert sizer_tight.settings.reasoning_max_tokens is None  # type: ignore[attr-defined]
+    tight_design_req = IllustrationContext.build_for_kind(
+        kind=LLMResponseKind.ILLUSTRATION_DESIGN,
+        stage=IllustrationScopeStage.DESIGN,
+        input_payload={"entity_id": "ent-1"},
+        book_id="book-1",
+        conditions_id=None,
+        policy=tight_policy,
+    )
+    assert sizer_tight.measure(tight_design_req).size_bytes > 0
+    await runtime.aclose()

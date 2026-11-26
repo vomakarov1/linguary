@@ -75,6 +75,14 @@ _ASSUMPTION_PLACEHOLDER_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+_ASSUMPTION_TECHNICAL_KEY_RE = re.compile(
+    r"(?:"
+    r"\b(?:attire_default|palette_value|description_en|description_ru|"
+    r"used_design_keys|depicted_entity_ids|compact_description_en)\b"
+    r"|characters\[\]"
+    r")",
+    re.IGNORECASE,
+)
 _CLAUSE_STOPWORDS = frozenset(
     {
         "with",
@@ -117,13 +125,15 @@ def dedupe_texts(items: Iterable[str]) -> tuple[str, ...]:
 
 
 def filter_non_assumption_placeholders(items: Sequence[str]) -> tuple[str, ...]:
-    """Drop empty strings and meta-placeholders like 'Допущений нет.', then deduplicate."""
+    """Drop empty strings, meta-placeholders, and technical schema-key leaks, then deduplicate."""
     kept: list[str] = []
     for raw in items:
         cleaned = " ".join(str(raw).split()).strip()
         if not cleaned:
             continue
         if _ASSUMPTION_PLACEHOLDER_RE.match(cleaned):
+            continue
+        if _ASSUMPTION_TECHNICAL_KEY_RE.search(cleaned):
             continue
         kept.append(cleaned)
     return dedupe_texts(kept)
