@@ -956,3 +956,37 @@ def test_adjacent_markers_in_anchor_without_tail_and_css_spacing_rule() -> None:
     pattern = r"a\.lg-ref\s*\+\s*a\.lg-ref\s*\{\s*margin-left\s*:\s*0\.18em\s*;\s*\}"
     assert re.search(pattern, _STYLESHEET)
     assert re.search(pattern, web)
+
+
+def test_unnumbered_note_gets_lg_note_plain_class_and_css_rules() -> None:
+    """WP2: unnumbered notes get `lg-note-plain`; numbered notes do not; CSS has `.center`/`.pagebreak`/`.lg-note-plain`."""
+    block = _block("‘Hello.’")
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(block,),
+    )
+    notes = (
+        _note(None, ("Говорит Петуния.",), marker_end=None),
+        _note(1, ("Привет.",), marker_end=len(block.text)),
+    )
+    root = _chapter(
+        block,
+        layout=_layout(section, {block.id: (_unit(block, notes=notes),)}),
+    )
+    items = _elements(_units(root)[0], "li")
+    assert len(items) == 2
+    assert "lg-note-plain" in _classes(items[0])
+    assert "lg-note-plain" not in _classes(items[1])
+
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    for sheet in (_STYLESHEET, web):
+        assert ".lg-notes > li.lg-note-plain" in sheet
+        assert ".center" in sheet
+        assert ".pagebreak" in sheet
+        assert "p.pagebreak" in sheet
