@@ -2852,7 +2852,13 @@ def _first_name_block_index(
         return None
 
     if lowercase_non_glossary:
-        return scan(require_capitalized=True)
+        cap_pos = scan(require_capitalized=True)
+        if cap_pos is None:
+            return None
+        any_pos = scan(require_capitalized=False)
+        if any_pos is not None and any_pos < cap_pos:
+            return None
+        return cap_pos
     if single_capitalized_generic:
         if scan(require_capitalized=True) is None:
             return None
@@ -2873,9 +2879,15 @@ def _collect_spoiler_name_leaks(
     known_names: Iterable[str],
     glossary_candidates: Sequence[GlossaryCandidateResponse],
     aliases_by_block_id: Mapping[str, str],
+    *,
+    block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]] | None = None,
 ) -> tuple[list[str], list[str]]:
     known = tuple(name for name in known_names if isinstance(name, str) and name.strip())
-    block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
+    resolved_tokens = (
+        block_tokens
+        if block_tokens is not None
+        else _extract_block_spoiler_tokens(ordered_block_ids, texts)
+    )
     details: list[str] = []
     block_ids: list[str] = []
 
@@ -2892,7 +2904,7 @@ def _collect_spoiler_name_leaks(
                 _same_spoiler_name(participant, kn, glossary_candidates) for kn in known
             ):
                 continue
-            first_pos = _first_name_block_index(participant, block_tokens, glossary_candidates)
+            first_pos = _first_name_block_index(participant, resolved_tokens, glossary_candidates)
             if first_pos is not None and first_pos > end_pos:
                 details.append(
                     f"сцена {start_label}..{end_label}: участник «{participant}» появляется позже в главе"
@@ -2907,7 +2919,7 @@ def _collect_spoiler_name_leaks(
         fact_pos = block_order.get(fact.subject_anchor.block_id)
         if fact_pos is None:
             continue
-        first_pos = _first_name_block_index(fact.value, block_tokens, glossary_candidates)
+        first_pos = _first_name_block_index(fact.value, resolved_tokens, glossary_candidates)
         if first_pos is not None and first_pos > fact_pos:
             label = aliases_by_block_id.get(
                 fact.subject_anchor.block_id, fact.subject_anchor.block_id
@@ -3560,6 +3572,7 @@ def validate_narrative_response(
         for fact, anchors, subject_anchor in resolved_facts
     ]
 
+    block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
     spoiler_details, spoiler_blocks = _collect_spoiler_name_leaks(
         scenes,
         mapped_facts,
@@ -3569,6 +3582,7 @@ def validate_narrative_response(
         known_names,
         payload.glossary_candidates,
         scoped_aliases_by_block_id,
+        block_tokens=block_tokens,
     )
     if spoiler_details:
         issues.append(
@@ -3590,6 +3604,8 @@ def validate_narrative_response(
             context_facts=mapped_facts,
             mandatory_facts=mandatory_facts,
             ordered_block_ids=ordered_block_ids,
+            block_tokens=block_tokens,
+            block_order=block_order,
         )
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
@@ -3777,6 +3793,8 @@ def combine_staged_analysis_responses(
     if resolved_blocks:
         texts_by_id = {block.id: block.text for block in resolved_blocks}
         ordered_block_ids = tuple(block.id for block in resolved_blocks)
+        block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts_by_id)
+        block_order = {bid: index for index, bid in enumerate(ordered_block_ids)}
         facts = tuple(
             _explicit_speaker_if_remark_names(
                 fact,
@@ -3787,6 +3805,8 @@ def combine_staged_analysis_responses(
                 context_facts=facts,
                 mandatory_facts=mandatory_facts,
                 ordered_block_ids=ordered_block_ids,
+                block_tokens=block_tokens,
+                block_order=block_order,
             )
             for fact in facts
         )
@@ -4021,6 +4041,16 @@ def content_plan_from_response(
                 )
             except KeyError:
                 raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
+    block_tokens = (
+        _extract_block_spoiler_tokens(ordered_block_ids, texts)
+        if texts is not None and ordered_block_ids
+        else None
+    )
+    block_order = (
+        {bid: index for index, bid in enumerate(ordered_block_ids)}
+        if block_tokens is not None
+        else None
+    )
     facts = []
     for mapped in mapped_facts:
         mapped = _explicit_speaker_if_remark_names(
@@ -4032,6 +4062,8 @@ def content_plan_from_response(
             context_facts=mapped_facts,
             mandatory_facts=mandatory_facts,
             ordered_block_ids=ordered_block_ids,
+            block_tokens=block_tokens,
+            block_order=block_order,
         )
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
@@ -7202,10 +7234,12 @@ def _explicit_speaker_if_remark_names(
     blocks,
     *,
     scenes: Sequence[Scene] = (),
-    glossary_candidates: Sequence[object] = (),
+    glossary_candidates: Sequence[GlossaryCandidateResponse] = (),
     context_facts: Sequence[object] = (),
     mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None = (),
     ordered_block_ids: Sequence[str] = (),
+    block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]] | None = None,
+    block_order: Mapping[str, int] | None = None,
 ):
     """inferred → explicit when the opening remark names the speaker or an unambiguous pronoun."""
     if fact.kind != "speaker" or fact.certainty != "inferred" or not isinstance(fact.value, str):
@@ -7213,7 +7247,19 @@ def _explicit_speaker_if_remark_names(
     text = _fact_block_text(fact.subject_anchor.block_id, texts, blocks)
     if not text:
         return fact
+
+    def _would_leak_spoiler() -> bool:
+        if block_tokens is None or block_order is None:
+            return False
+        fact_pos = block_order.get(fact.subject_anchor.block_id)
+        if fact_pos is None:
+            return False
+        first_pos = _first_name_block_index(fact.value, block_tokens, glossary_candidates)
+        return first_pos is not None and first_pos > fact_pos
+
     if _opening_remark_names_speaker(text, fact.value):
+        if _would_leak_spoiler():
+            return fact
         return replace(fact, certainty="explicit")
     if scenes and _opening_remark_pronoun_resolves_speaker(
         fact,
@@ -7226,6 +7272,8 @@ def _explicit_speaker_if_remark_names(
         blocks=blocks,
         texts=texts,
     ):
+        if _would_leak_spoiler():
+            return fact
         return replace(fact, certainty="explicit")
     return fact
 
@@ -7598,17 +7646,24 @@ def _fact_block_text(block_id, texts, blocks) -> str | None:
 
 
 def _opening_remark_names_speaker(text: str, value: str) -> bool:
-    remark_words = expression_words(_opening_remark(text))
-    if not remark_words:
+    remark = _opening_remark(text)
+    raw_tokens = re.findall(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*", remark)
+    remark_pairs: list[tuple[str, bool]] = []
+    for raw in raw_tokens:
+        is_cap = raw[:1].isupper()
+        for norm in expression_words(raw):
+            remark_pairs.append((norm, is_cap))
+    if not remark_pairs:
         return False
+    remark_words = tuple(word for word, _ in remark_pairs)
     value_words = expression_words(value)
     if value_words and _contains_speaker_phrase(remark_words, value_words):
         return True
     value_titles = set(value_words) & _SPEAKER_TITLES
     conflicting_titles = _SPEAKER_TITLES - value_titles
     for name in _speaker_name_words(value):
-        for index, word in enumerate(remark_words):
-            if word != name:
+        for index, (word, is_cap) in enumerate(remark_pairs):
+            if not is_cap or word != name:
                 continue
             prev = remark_words[index - 1] if index > 0 else None
             if prev in _ADDRESSEE_PREPOSITIONS or prev in conflicting_titles:

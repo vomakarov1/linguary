@@ -850,7 +850,8 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     assert len(resolved_scenes) == 2
 
     # 3. context_facts anti-spoiler: original certainty=='explicit' before first mention fails,
-    #    while original certainty=='inferred' (even if promoted to explicit by pronoun resolution!) passes.
+    #    while original certainty=='inferred' passes and is NOT promoted to explicit before first mention
+    #    (keeping validate_narrative_response idempotent across merge/cache revalidation).
     b1_quote_anchor = QuotedSourceAnchorResponse('b1', '‘Stay back!’')
     b1_remark_anchor = QuotedSourceAnchorResponse('b1', 'he shouted')
     explicit_spoiler_fact = QuotedContextFactResponse(
@@ -872,7 +873,7 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     inferred_pronoun_fact = QuotedContextFactResponse(
         'f-sp-inferred', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'inferred',
     )
-    _, promoted_facts = validate_narrative_response(
+    _, kept_facts = validate_narrative_response(
         NarrativeAnalysisResponse(
             'Keep voice.', 'Summary.',
             context_facts=(inferred_pronoun_fact,),
@@ -891,8 +892,8 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
         sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
         known_names=('Harry',),
     )
-    # Upgraded to explicit AFTER spoiler check!
-    assert promoted_facts[0].certainty == 'explicit'
+    # Anti-spoiler guard keeps inferred before first_pos so repeated validation stays idempotent.
+    assert kept_facts[0].certainty == 'inferred'
 
     # 4. Visual facts: filter out obvious sound/smell/taste markers without failing the chunk,
     #    while preserving visual forms like беззвучно, музыкальные магазины, магазин сладостей.
@@ -2018,6 +2019,317 @@ def test_spoiler_monotonic_first_name_block_index_with_later_capitalized_nicknam
         ),
     )
     assert _first_name_block_index("the dark voldemort", spoiler_tokens, voldemort_glossary) == 1
+
+
+def test_first_name_block_index_lowercase_non_glossary_ignores_sentence_initial_cap() -> None:
+    """Lowercase non-glossary label appearing lowercase before a later capitalized occurrence is not a spoiler."""
+    from linguary.application.analysis_merge import (
+        _extract_block_spoiler_tokens,
+        _first_name_block_index,
+    )
+
+    texts = {
+        **{f"b{i}": f"Filler paragraph {i}." for i in range(150)},
+        "b19": "The first-years followed Professor McGonagall down the corridor.",
+        "b21": "All the first-years looked up at the enchanted ceiling.",
+        "b145": "First-years should follow the prefects to the dormitories.",
+    }
+    ordered = tuple(f"b{i}" for i in range(150))
+    block_tokens = _extract_block_spoiler_tokens(ordered, texts)
+
+    assert _first_name_block_index("first-years", block_tokens, ()) is None
+
+    # Proper name written lowercase without glossary still resolves when there is no earlier lowercase mention.
+    proper_texts = {
+        "b0": "Someone knocked softly at the door.",
+        "b1": "Then Voldemort stepped out of the mist.",
+    }
+    proper_tokens = _extract_block_spoiler_tokens(("b0", "b1"), proper_texts)
+    assert _first_name_block_index("voldemort", proper_tokens, ()) == 1
+
+
+def test_opening_remark_names_speaker_requires_capitalized_single_word_match() -> None:
+    """Single-word speaker lookup in opening remark requires capitalization, while full phrases and proper names match."""
+    from linguary.application.analysis_merge import _opening_remark_names_speaker
+
+    assert (
+        _opening_remark_names_speaker(
+            "What looked like a fat little monk was saying: ‘Forgive and forget, I say, we ought to give him a second chance —’",
+            "Fat Friar",
+        )
+        is False
+    )
+    assert _opening_remark_names_speaker("Hagrid said: ‘Hello’", "Rubeus Hagrid") is True
+    assert _opening_remark_names_speaker("Harry said: ‘Hi’", "Harry Potter") is True
+    assert (
+        _opening_remark_names_speaker(
+            "‘Come along,’ asked Professor McGonagall.",
+            "Professor McGonagall",
+        )
+        is True
+    )
+    assert _opening_remark_names_speaker("‘Listen,’ said Ron to Harry.", "Harry Potter") is False
+    assert _opening_remark_names_speaker("The boy said: ‘Look.’", "the boy") is True
+
+
+def test_explicit_speaker_if_remark_names_blocks_spoiler_promotion_on_both_branches() -> None:
+    """Anti-spoiler guard blocks inferred->explicit promotion in both name and pronoun branches when first_pos > fact_pos."""
+    from linguary.application.analysis_merge import (
+        _explicit_speaker_if_remark_names,
+        _extract_block_spoiler_tokens,
+    )
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+    from linguary.domain.content_plan import ContextFact, Scene, SourceAnchor
+
+    # Branch 1 (name-match): 'Boy' is capitalized in opening remark, matching 'Chocolate Boy',
+    # but distinctive name 'Chocolate Boy' only first appears in b1 (first_pos=1 > fact_pos=0).
+    name_texts = {
+        "b0": "A Boy shouted: ‘Stop right there!’",
+        "b1": "Everyone in the hall called him Chocolate Boy.",
+    }
+    name_order = ("b0", "b1")
+    name_tokens = _extract_block_spoiler_tokens(name_order, name_texts)
+    name_block_order = {"b0": 0, "b1": 1}
+    quote_span = (name_texts["b0"].index("‘"), len(name_texts["b0"]))
+    anchor_b0 = SourceAnchor("b0", quote_span[0], quote_span[1], name_texts["b0"][quote_span[0]:quote_span[1]])
+    name_fact = ContextFact(
+        id="f-name",
+        kind="speaker",
+        anchors=(anchor_b0,),
+        subject_anchor=anchor_b0,
+        value="Chocolate Boy",
+        certainty="inferred",
+    )
+    # Without spoiler context, branch 1 would promote; with block_tokens+block_order it must stay inferred.
+    assert (
+        _explicit_speaker_if_remark_names(
+            name_fact, name_texts, None, ordered_block_ids=name_order
+        ).certainty
+        == "explicit"
+    )
+    kept_name = _explicit_speaker_if_remark_names(
+        name_fact,
+        name_texts,
+        None,
+        ordered_block_ids=name_order,
+        block_tokens=name_tokens,
+        block_order=name_block_order,
+    )
+    assert kept_name.certainty == "inferred"
+
+    # Branch 2 (pronoun-match): 'he said' uniquely resolves to 'Fat Friar' in the scene,
+    # but 'Fat Friar' only first appears in b1 (first_pos=1 > fact_pos=0).
+    pronoun_texts = {
+        "b0": "‘Forgive and forget,’ he said.",
+        "b1": "The Fat Friar bowed politely. ‘Welcome,’ he said.",
+    }
+    pronoun_order = ("b0", "b1")
+    pronoun_tokens = _extract_block_spoiler_tokens(pronoun_order, pronoun_texts)
+    pronoun_block_order = {"b0": 0, "b1": 1}
+    glossary = (
+        GlossaryCandidateResponse(
+            source_text="Fat Friar",
+            type=ConceptType.PERSON,
+            suggested_translation="Толстый Монах",
+            confidence=0.95,
+            model_flagged_review=False,
+            note="Пол: мужской.",
+        ),
+    )
+    scene = Scene(
+        id="s1",
+        order=0,
+        start_block_id="b0",
+        end_block_id="b1",
+        summary="Монах приветствует учеников.",
+        location="Great Hall",
+        participants=("Fat Friar",),
+    )
+    q0_end = pronoun_texts["b0"].index("’") + 1
+    p_anchor_b0 = SourceAnchor("b0", 0, q0_end, pronoun_texts["b0"][:q0_end])
+    pronoun_fact_b0 = ContextFact(
+        id="f-pronoun-b0",
+        kind="speaker",
+        anchors=(p_anchor_b0,),
+        subject_anchor=p_anchor_b0,
+        value="Fat Friar",
+        certainty="inferred",
+    )
+    # Without spoiler context, branch 2 would promote; with block_tokens+block_order it must stay inferred.
+    assert (
+        _explicit_speaker_if_remark_names(
+            pronoun_fact_b0,
+            pronoun_texts,
+            None,
+            scenes=(scene,),
+            glossary_candidates=glossary,
+            ordered_block_ids=pronoun_order,
+        ).certainty
+        == "explicit"
+    )
+    kept_pronoun = _explicit_speaker_if_remark_names(
+        pronoun_fact_b0,
+        pronoun_texts,
+        None,
+        scenes=(scene,),
+        glossary_candidates=glossary,
+        ordered_block_ids=pronoun_order,
+        block_tokens=pronoun_tokens,
+        block_order=pronoun_block_order,
+    )
+    assert kept_pronoun.certainty == "inferred"
+
+    # Non-spoiler position (b1, where first_pos=1 == fact_pos=1) is still promoted to explicit.
+    q1_start = pronoun_texts["b1"].index("‘Welcome,’")
+    q1_end = q1_start + len("‘Welcome,’")
+    p_anchor_b1 = SourceAnchor("b1", q1_start, q1_end, pronoun_texts["b1"][q1_start:q1_end])
+    pronoun_fact_b1 = ContextFact(
+        id="f-pronoun-b1",
+        kind="speaker",
+        anchors=(p_anchor_b1,),
+        subject_anchor=p_anchor_b1,
+        value="Fat Friar",
+        certainty="inferred",
+    )
+    promoted_pronoun = _explicit_speaker_if_remark_names(
+        pronoun_fact_b1,
+        pronoun_texts,
+        None,
+        scenes=(scene,),
+        glossary_candidates=glossary,
+        ordered_block_ids=pronoun_order,
+        block_tokens=pronoun_tokens,
+        block_order=pronoun_block_order,
+    )
+    assert promoted_pronoun.certainty == "explicit"
+
+
+def test_validate_narrative_response_idempotent_across_fragment_merge_and_revalidation() -> None:
+    """Fragment validation -> merge_narrative_fragments -> repeated validate_narrative_response is idempotent."""
+    from linguary.application.analysis_merge import merge_narrative_fragments
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import BlockType, ConceptType, DocumentBlock, SupportStatus
+
+    raw_texts = {
+        "blk-19": "What looked like a fat little monk was saying: ‘Forgive and forget, I say.’",
+        "blk-20": "‘We ought to give him a second chance,’ he said.",
+        "blk-23": "The Fat Friar said: ‘Hope to see you in Hufflepuff!’",
+    }
+    blocks = tuple(
+        DocumentBlock(
+            id=bid,
+            section_id="sec-1",
+            order=idx,
+            type=BlockType.PARAGRAPH,
+            text=text,
+            source_reference=f"p{idx}",
+            support_status=SupportStatus.SUPPORTED,
+        )
+        for idx, (bid, text) in enumerate(raw_texts.items())
+    )
+    order = tuple(raw_texts)
+    frag_aliases = {"b1": "blk-19", "b2": "blk-20", "b3": "blk-23"}
+    frag_visible = {alias: raw_texts[bid] for alias, bid in frag_aliases.items()}
+    glossary = (
+        GlossaryCandidateResponse(
+            source_text="Fat Friar",
+            type=ConceptType.PERSON,
+            suggested_translation="Толстый Монах",
+            confidence=0.95,
+            model_flagged_review=False,
+            note="Пол: мужской.",
+        ),
+    )
+    payload = NarrativeAnalysisResponse(
+        translation_instructions="Сохранять голос автора.",
+        chapter_summary="The ghosts greet the students.",
+        glossary_candidates=glossary,
+        context_facts=(
+            QuotedContextFactResponse(
+                "f19",
+                "speaker",
+                (QuotedSourceAnchorResponse("b1", "‘Forgive and forget, I say.’"),),
+                QuotedSourceAnchorResponse("b1", "‘Forgive and forget, I say.’"),
+                "Fat Friar",
+                "inferred",
+            ),
+            QuotedContextFactResponse(
+                "f20",
+                "speaker",
+                (QuotedSourceAnchorResponse("b2", "‘We ought to give him a second chance,’"),),
+                QuotedSourceAnchorResponse("b2", "‘We ought to give him a second chance,’"),
+                "Fat Friar",
+                "inferred",
+            ),
+            QuotedContextFactResponse(
+                "f23",
+                "speaker",
+                (QuotedSourceAnchorResponse("b3", "‘Hope to see you in Hufflepuff!’"),),
+                QuotedSourceAnchorResponse("b3", "‘Hope to see you in Hufflepuff!’"),
+                "Fat Friar",
+                "inferred",
+            ),
+        ),
+        scenes=(
+            QuotedSceneResponse(
+                "b1",
+                "b3",
+                "Призраки беседуют с первокурсниками.",
+                location="Great Hall",
+                participants=("Fat Friar",),
+            ),
+        ),
+    )
+
+    frag_scenes, frag_facts = validate_narrative_response(
+        payload, frag_aliases, raw_texts, frag_visible, ordered_block_ids=order, blocks=blocks
+    )
+    by_block_frag = {f.subject_anchor.block_id: f.certainty for f in frag_facts}
+    assert by_block_frag == {"blk-19": "inferred", "blk-20": "inferred", "blk-23": "explicit"}
+
+    merged, _, _ = merge_narrative_fragments(
+        [(payload, frag_scenes, frag_facts)], section_blocks=blocks
+    )
+    chapter_aliases = {bid: bid for bid in order}
+    # Chapter-wide validation + second re-validation (as in illustration_source.py:930).
+    ch_scenes_1, ch_facts_1 = validate_narrative_response(
+        merged, chapter_aliases, raw_texts, raw_texts, ordered_block_ids=order, blocks=blocks
+    )
+    ch_scenes_2, ch_facts_2 = validate_narrative_response(
+        merged, chapter_aliases, raw_texts, raw_texts, ordered_block_ids=order, blocks=blocks
+    )
+    assert ch_scenes_1 == ch_scenes_2
+    assert ch_facts_1 == ch_facts_2
+    assert {f.subject_anchor.block_id: f.certainty for f in ch_facts_2} == {
+        "blk-19": "inferred",
+        "blk-20": "inferred",
+        "blk-23": "explicit",
+    }
+
+    # combine_staged_analysis_responses and content_plan_from_response also preserve anti-spoiler certainty.
+    combined = combine_staged_analysis_responses(
+        merged,
+        PedagogicalAnalysisResponse(),
+        resolved_scenes=ch_scenes_1,
+        resolved_blocks=blocks,
+    )
+    assert combined.content_plan is not None
+    assert {f.subject_anchor.block_id: f.certainty for f in combined.content_plan.context_facts} == {
+        "blk-19": "inferred",
+        "blk-20": "inferred",
+        "blk-23": "explicit",
+    }
+    plan = content_plan_from_response(
+        combined, chapter_aliases, raw_texts, visible_texts_by_alias=raw_texts, blocks=blocks
+    )
+    assert plan is not None
+    assert {f.subject_anchor.block_id: f.certainty for f in plan.context_facts} == {
+        "blk-19": "inferred",
+        "blk-20": "inferred",
+        "blk-23": "explicit",
+    }
+
 
 
 

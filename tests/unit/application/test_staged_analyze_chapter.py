@@ -4666,6 +4666,7 @@ async def test_staged_a2_normalization_passes_known_names_fresh_cached_and_assem
     )(COMMAND)
     assert [i.treatment for i in result.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
 
+
     # Cached re-run exercises _assemble_staged with known_names and keeps READ_AS_IS with 0 LLM calls.
     cached_res = await scenario(uow, FakeLLMClient([]), context=ctx)(COMMAND)
     assert cached_res.attempts == 0
@@ -5358,6 +5359,178 @@ async def test_a2_vocab_known_names_allie_alias_from_note_and_context_facts(stor
         context=builder('a2'),
     )(COMMAND)
     assert [i.treatment for i in result.analysis.treatment_plan.items] == [BlockTreatment.READ_AS_IS]
+
+
+async def test_staged_narrative_merge_downgrades_cross_fragment_explicit_spoiler_fact_only(stored_book):
+    """Cross-fragment spoiler_name_leak on explicit speaker fact downgrades only that fact and preserves fragment cache."""
+    import json
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            "The cloaked stranger muttered: ‘Wait in the shadows.’",
+            "Holmes asked: ‘Who goes there?’",
+            "Then Voldemort stepped out into the moonlight.",
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    # 3 single-block fragments (max_fragment_blocks=1):
+    # Fragment 0 ('Wait in the shadows.') has explicit speaker='Voldemort' (absent from frag 0's text -> passes locally).
+    # Fragment 1 ('Who goes there?') has non-spoiler explicit speaker='Holmes'.
+    # Fragment 2 reveals 'Voldemort' in text + glossary -> chapter merge hits cross-fragment spoiler_name_leak.
+    frag0_nar = json.loads(narrative(('b1',)).content)
+    frag0_nar['scenes'][0]['location'] = 'Quiet Road'
+    frag0_nar['scenes'][0]['participants'] = ['the stranger']
+    frag0_nar['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote="‘Wait in the shadows.’")],
+            subject_anchor=dict(block_id='b1', quote="‘Wait in the shadows.’"),
+            value='Voldemort',
+            certainty='explicit',
+        ),
+    ]
+
+    frag1_nar = json.loads(narrative(('b1',)).content)
+    frag1_nar['scenes'][0]['location'] = 'Quiet Road'
+    frag1_nar['scenes'][0]['participants'] = ['Holmes']
+    frag1_nar['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote="‘Who goes there?’")],
+            subject_anchor=dict(block_id='b1', quote="‘Who goes there?’"),
+            value='Holmes',
+            certainty='explicit',
+        ),
+    ]
+
+    frag2_nar = json.loads(narrative(('b1',)).content)
+    frag2_nar['scenes'][0]['location'] = 'Dark Forest'
+    frag2_nar['scenes'][0]['participants'] = ['Voldemort']
+    frag2_nar['glossary_candidates'] = [
+        dict(
+            source_text='Voldemort',
+            type='person',
+            suggested_translation='Волдеморт',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    use_case = scenario(
+        uow,
+        FakeLLMClient([
+            FakeReply.of_payload(frag0_nar),
+            FakeReply.of_payload(frag1_nar),
+            FakeReply.of_payload(frag2_nar),
+            pedagogical(('b1',)),
+            pedagogical(('b1',)),
+            pedagogical(('b1',)),
+        ]),
+        max_fragment_blocks=1,
+    )
+    clear_calls: list[AnalysisPassKind] = []
+    original_clear = use_case._clear_fragment_passes
+
+    def _recording_clear(book_id, section_id, pass_kind):
+        clear_calls.append(pass_kind)
+        return original_clear(book_id, section_id, pass_kind)
+
+    use_case._clear_fragment_passes = _recording_clear  # type: ignore[method-assign]
+    result = await use_case(COMMAND)
+
+    assert clear_calls == []
+    b0_id, b1_id, _b2_id = (b.id for b in section.blocks)
+    by_block = {
+        fact.subject_anchor.block_id: (fact.value, fact.certainty)
+        for fact in result.analysis.content_plan.context_facts
+    }
+    assert by_block == {
+        b0_id: ('Voldemort', 'inferred'),
+        b1_id: ('Holmes', 'explicit'),
+    }
+
+    # Saved narrative pass has the downgraded certainty (and _clear_fragment_passes was never triggered).
+    with uow.transaction() as tx:
+        whole_nar = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.NARRATIVE)
+        assert whole_nar is not None
+        saved_by_block = {
+            item['subject_anchor']['block_id']: (item['value'], item['certainty'])
+            for item in whole_nar.payload['response']['context_facts']
+        }
+        assert saved_by_block == {
+            b0_id: ('Voldemort', 'inferred'),
+            b1_id: ('Holmes', 'explicit'),
+        }
+
+    # Re-running AnalyzeChapter reuses the saved downgraded narrative with 0 LLM calls.
+    cached = await scenario(uow, FakeLLMClient(), max_fragment_blocks=1)(COMMAND)
+    assert cached.attempts == 0
+    assert {
+        fact.subject_anchor.block_id: (fact.value, fact.certainty)
+        for fact in cached.analysis.content_plan.context_facts
+    } == {
+        b0_id: ('Voldemort', 'inferred'),
+        b1_id: ('Holmes', 'explicit'),
+    }
+
+
+async def test_staged_narrative_merge_still_fails_and_clears_cache_for_scene_participant_spoiler(stored_book):
+    """If scenes[].participants also contains a spoiler, downgrading explicit facts does not hide it and cache is cleared."""
+    import json
+    from linguary.application.analysis_merge import AnalysisMergeError
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            "The cloaked stranger muttered: ‘Wait in the shadows.’",
+            "Then Voldemort stepped out into the moonlight.",
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    frag0_nar = json.loads(narrative(('b1',)).content)
+    frag0_nar['scenes'][0]['location'] = 'Quiet Road'
+    frag0_nar['scenes'][0]['participants'] = ['Voldemort']
+    frag0_nar['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote="‘Wait in the shadows.’")],
+            subject_anchor=dict(block_id='b1', quote="‘Wait in the shadows.’"),
+            value='Voldemort',
+            certainty='explicit',
+        ),
+    ]
+
+    frag1_nar = json.loads(narrative(('b1',)).content)
+    frag1_nar['scenes'][0]['location'] = 'Dark Forest'
+    frag1_nar['scenes'][0]['participants'] = ['Voldemort']
+    frag1_nar['glossary_candidates'] = [
+        dict(
+            source_text='Voldemort',
+            type='person',
+            suggested_translation='Волдеморт',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    with pytest.raises(AnalysisMergeError) as exc:
+        await scenario(
+            uow,
+            FakeLLMClient([FakeReply.of_payload(frag0_nar), FakeReply.of_payload(frag1_nar)]),
+            max_fragment_blocks=1,
+        )(COMMAND)
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == 'spoiler_name_leak'
+    with uow.transaction() as tx:
+        assert tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id) == ()
+
 
 
 
