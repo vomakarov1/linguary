@@ -24,7 +24,11 @@ from linguary.application.ports.llm import (
     LLMResponseKind, LLMTransportError,
 )
 from linguary.application.recovery import RecoveryError
-from linguary.composition.book_runtime import route_snapshot
+from linguary.composition.book_runtime import (
+    _operational_llm_overrides,
+    route_snapshot,
+    routes_compatible,
+)
 from linguary.composition.llm import ConfiguredLLMClient
 from linguary.domain import LLMCallStage, ProcessingRunStatus, TaskStatus, TaskType
 from linguary.domain.book_conditions import WorkStateError, thaw
@@ -156,6 +160,10 @@ class CorrectionRuntimeResolver:
             llm.proxy_url,
             llm.api_key,
             getattr(llm, 'debug_llm_payloads', False),
+            getattr(llm, 'timeout_seconds', None),
+            getattr(llm, 'max_attempts', None),
+            getattr(llm, 'input_price_per_mtok', None),
+            getattr(llm, 'output_price_per_mtok', None),
         )
 
     def _fingerprint(self, conditions, snapshot, settings) -> tuple:
@@ -205,15 +213,16 @@ class CorrectionRuntimeResolver:
 
     def settings_for(self, snapshot):
         current = self.runtime.current.settings
-        if route_snapshot(current.llm) != thaw(snapshot.route) or not current.llm.api_key:
+        if not routes_compatible(route_snapshot(current.llm), thaw(snapshot.route)) or not current.llm.api_key:
             raise ConditionsError('route_unavailable')
+        llm_kwargs: dict[str, Any] = {
+            **thaw(snapshot.parameters),
+            'model': snapshot.model,
+            'provider': snapshot.route['provider'],
+            **_operational_llm_overrides(current.llm),
+        }
         try:
-            llm = LLMSettings(
-                **thaw(snapshot.parameters), model=snapshot.model,
-                provider=snapshot.route['provider'], base_url=current.llm.base_url,
-                proxy_mode=current.llm.proxy_mode, proxy_url=current.llm.proxy_url,
-                api_key=current.llm.api_key, debug_llm_payloads=current.llm.debug_llm_payloads,
-            )
+            llm = LLMSettings(**llm_kwargs)
         except (TypeError, ValueError):
             raise ConditionsError('correction_policy_unavailable') from None
         return replace(current, llm=llm)

@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, replace
 from hashlib import sha256
-import os
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -61,16 +60,48 @@ def public_url(value):
     return urlunsplit((parsed.scheme, hostname, parsed.path, '', ''))
 
 
+_OPERATIONAL_LLM_FIELDS = (
+    'base_url',
+    'api_key',
+    'proxy_mode',
+    'proxy_url',
+    'timeout_seconds',
+    'requests_per_minute',
+    'max_attempts',
+    'debug_llm_payloads',
+    'input_price_per_mtok',
+    'output_price_per_mtok',
+)
+
+
+def _operational_llm_overrides(llm: Any) -> dict[str, Any]:
+    overrides = {
+        name: getattr(llm, name)
+        for name in _OPERATIONAL_LLM_FIELDS
+        if hasattr(llm, name)
+    }
+    overrides.setdefault('debug_llm_payloads', False)
+    return overrides
+
+
 def route_snapshot(llm):
-    proxy = {'mode': llm.proxy_mode}
-    if llm.proxy_mode == 'custom':
-        proxy['url'] = public_url(llm.proxy_url)
-    elif llm.proxy_mode == 'auto':
-        # An allowlisted environment fingerprint excludes proxy authentication.
-        proxy['environment'] = {key: public_url(os.environ[key]) if key.lower() != 'no_proxy' else os.environ[key]
-            for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy') if os.environ.get(key)}
-    route = {'provider': llm.provider, 'base_url': public_url(llm.base_url), 'proxy': proxy}
-    return {**route, 'route_id': payload_digest(route)}
+    safe_base_url = public_url(llm.base_url)
+    identity = {'provider': llm.provider, 'base_url': safe_base_url}
+    return {
+        'provider': llm.provider,
+        'base_url': safe_base_url,
+        'proxy': {'mode': llm.proxy_mode},
+        'route_id': payload_digest(identity),
+    }
+
+
+def routes_compatible(
+    current_route: Mapping[str, Any], pinned_route: Mapping[str, Any]
+) -> bool:
+    return (current_route.get('provider'), current_route.get('base_url')) == (
+        pinned_route.get('provider'),
+        pinned_route.get('base_url'),
+    )
 
 
 def conditions_payload(book, settings, revision, profile):
@@ -433,10 +464,16 @@ class BookRuntimeResolver:
         worker = getattr(settings, 'worker', None)
         return (
             llm.base_url,
+            getattr(llm, 'proxy_mode', None),
             llm.proxy_url,
             llm.api_key,
             getattr(worker, 'concurrency', None),
             getattr(llm, 'debug_llm_payloads', False),
+            getattr(llm, 'timeout_seconds', None),
+            getattr(llm, 'requests_per_minute', None),
+            getattr(llm, 'max_attempts', None),
+            getattr(llm, 'input_price_per_mtok', None),
+            getattr(llm, 'output_price_per_mtok', None),
         )
 
     def settings_for(self, conditions):
@@ -471,7 +508,7 @@ class BookRuntimeResolver:
         if payload_digest(payload['prompt_templates']) != payload['prompt_sha256']:
             raise ConditionsError('conditions_unavailable')
         current = self.runtime.current.settings
-        if route_snapshot(current.llm) != thaw(payload['route']):
+        if not routes_compatible(route_snapshot(current.llm), thaw(payload['route'])):
             raise ConditionsError('route_unavailable')
         if not current.llm.api_key:
             raise ConditionsError('route_unavailable')
@@ -480,10 +517,7 @@ class BookRuntimeResolver:
             'staged_analysis': payload.get('staged_analysis', False),
             'narrative_analysis_model': payload['models'].get('analysis_passes', {}).get('narrative', ''),
             'pedagogical_analysis_model': payload['models'].get('analysis_passes', {}).get('pedagogical', ''),
-            'base_url': current.llm.base_url,
-            'proxy_url': current.llm.proxy_url,
-            'api_key': current.llm.api_key,
-            'debug_llm_payloads': getattr(current.llm, 'debug_llm_payloads', False),
+            **_operational_llm_overrides(current.llm),
         }
         llm = LLMSettings(**llm_kwargs)
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
