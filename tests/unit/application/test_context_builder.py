@@ -75,8 +75,28 @@ def test_sound_does_not_translate_components():
         assert 'известных переводов книги' in templates[key]
         assert 'Дурсль' in templates[key]
         assert 'Волан-де-Морт' in templates[key]
-        assert 'Тисовая улица' in templates[key]
+        assert 'Дубовая аллея' in templates[key]
+        assert 'Прайвет-драйв' not in templates[key]
+        assert 'реальное произношение' in templates[key]
     assert 'applied_method=sound' in templates['analysis']
+
+
+def test_wp4_no_privet_drive_and_nested_fields_reminder() -> None:
+    """WP4: removes hardcoded Privet Drive typo, adds phonetic check & nested fields discipline."""
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("sound"),
+    )
+    for key, text in templates.items():
+        if isinstance(text, str):
+            assert "Прайвет-драйв" not in text, f"hardcode remained in {key}"
+    narrative = templates["narrative_analysis"]
+    assert "name_translation_assessment (включая rationale)" in narrative
+    assert "anchor, subject и detail" in narrative
+    assert "model_flagged_review=true" in narrative
 
 
 def test_meaning_keeps_opaque_parts():

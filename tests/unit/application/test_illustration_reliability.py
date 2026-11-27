@@ -935,7 +935,9 @@ def test_context_builder_prompt_additions_format_safely() -> None:
     )
     assert 'type="person"' in formatted
     assert "5–25 блоков" in formatted
-    assert "Прайвет-драйв" in formatted
+    assert "Бейкер-стрит" in formatted
+    assert "Оквуд-лейн" in formatted
+    assert "Прайвет-драйв" not in formatted
     for tmpl in (_TRANSLATION_CONTEXT_V2, _CONTENT_PLAN_PROCESSING_V3):
         assert "speech_style" in tmpl
         assert 'help_kind="explanation"' in tmpl
