@@ -1292,4 +1292,229 @@ async def test_web_lifespan_with_real_worker_pool_shuts_down_cleanly(tmp_path) -
         await app.aclose()
 
 
+def test_cli_glossary_list_and_accept_all_unblock_flagged_terms(tmp_path: Path, capsys) -> None:
+    """WP3: `glossary list --pending-only` and `glossary accept-all` resolve model-flagged items via CLI."""
+    import json
+    from linguary.adapters.config import load_settings
+    from linguary.composition import build_application
+    from linguary.domain import (
+        BlockTreatment,
+        BookStatus,
+        ChapterAnalysis,
+        ConceptType,
+        CoverageStatus,
+        GlossaryCandidate,
+        TreatmentPlan,
+        TreatmentPlanItem,
+    )
+    from dataclasses import replace
+
+    config = _config(tmp_path, llm_model="gpt-test", api_key="test-key")
+    assert main(["--config", str(config), "import", str(SYNTHETIC_EPUB), "--book-id", "book-gl"]) == 0
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        with app.unit_of_work.transaction() as tx:
+            doc = tx.documents.get("book-gl")
+            assert doc is not None
+            section = doc.ordered_sections[0]
+            tx.analyses.save(
+                "book-gl",
+                ChapterAnalysis(
+                    id="an-gl-1",
+                    section_id=section.id,
+                    coverage_status=CoverageStatus.COMPLETE,
+                    treatment_plan=TreatmentPlan(
+                        section_id=section.id,
+                        items=tuple(
+                            TreatmentPlanItem(
+                                block_id=b.id,
+                                treatment=BlockTreatment.TRANSLATE,
+                            )
+                            for b in section.blocks
+                            if b.text.strip()
+                        ),
+                    ),
+                    translation_instructions="",
+                    chapter_summary="Summary.",
+                    glossary_candidates=(
+                        GlossaryCandidate(
+                            id="cand-1",
+                            analysis_id="an-gl-1",
+                            source_text="Privet Drive",
+                            type=ConceptType.PLACE,
+                            suggested_translation="Привит-драйв",
+                            confidence=0.95,
+                            model_flagged_review=True,
+                            requires_review=True,
+                        ),
+                    ),
+                )
+            )
+            book = tx.books.get("book-gl")
+            assert book is not None
+            tx.books.save(replace(book, status=BookStatus.GLOSSARY_REVIEW))
+    finally:
+        import asyncio
+        asyncio.run(app.aclose())
+
+    assert main(["--config", str(config), "glossary", "list", "book-gl", "--pending-only", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["pending"] == 1
+    assert listed["items"][0]["source_text"] == "Privet Drive"
+
+    assert main(["--config", str(config), "glossary", "accept-all", "book-gl", "--json"]) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["accepted_count"] == 1
+    assert accepted["remaining_pending"] == 0
+
+
+def test_cli_corrections_list_resolve_and_export_strict_corrections(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """WP3: `corrections list|resolve` and `export --strict-corrections` enforce awaiting_human gate before writing."""
+    import asyncio
+    import json
+    from dataclasses import replace
+    from linguary.adapters.config import load_settings
+    from linguary.application.use_cases.resolve_correction_candidate import (
+        ResolveCorrectionCommand,
+    )
+    from linguary.cli import app as cli_app
+    from linguary.composition import build_application
+    from linguary.domain import (
+        BookStatus,
+        GlossarySnapshot,
+        LLMSettingsSnapshot,
+        ProcessingRun,
+        ProcessingRunStatus,
+    )
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.correction import CorrectionCandidate
+
+    config = _config(tmp_path, llm_model="gpt-test", api_key="test-key")
+    assert main(["--config", str(config), "import", str(SYNTHETIC_EPUB), "--book-id", "book-corr"]) == 0
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        cond_id = app.book_conditions.freeze_before_analysis("book-corr", expected_settings_revision=0)
+        with app.unit_of_work.transaction() as tx:
+            doc = tx.documents.get("book-corr")
+            assert doc is not None
+            section = doc.ordered_sections[0]
+            block = section.blocks[0]
+            run = ProcessingRun(
+                id="run-corr-1",
+                book_id="book-corr",
+                status=ProcessingRunStatus.ACTIVE,
+                glossary_snapshot=GlossarySnapshot(),
+                llm_settings_snapshot=LLMSettingsSnapshot(provider="openai_compatible", model="gpt-test"),
+            )
+            tx.runs.add(run)
+            payload = {
+                "book_id": "book-corr",
+                "run_id": run.id,
+                "conditions_id": cond_id,
+                "section_id": section.id,
+                "block_id": block.id,
+                "input_sha256": "in-sha-1",
+                "input_generation": 1,
+                "group_id": "grp-1",
+                "proposal_attempt_id": "att-1",
+                "proposed_result": {"translated_text": "Исправленный перевод."},
+            }
+            from linguary.adapters.db.models import CorrectionCandidateRow
+            expected_prop_sha = canonical_sha(payload)
+            tx.work._session.add(
+                CorrectionCandidateRow(
+                    candidate_id="cand-corr-1",
+                    book_id="book-corr",
+                    run_id=run.id,
+                    conditions_id=cond_id,
+                    section_id=section.id,
+                    block_id=block.id,
+                    input_sha256="in-sha-1",
+                    input_generation=1,
+                    proposal_sha256=expected_prop_sha,
+                    payload_json=payload,
+                    group_id="grp-1",
+                    proposal_attempt_id="att-1",
+                    state="awaiting_human",
+                    review_json={"reason": "Проверьте пунктуацию"},
+                )
+            )
+            book = tx.books.get("book-corr")
+            assert book is not None
+            tx.books.save(replace(book, status=BookStatus.READY_TO_EXPORT))
+    finally:
+        asyncio.run(app.aclose())
+
+    assert main(["--config", str(config), "corrections", "list", "book-corr", "--awaiting-only", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert len(listed["items"]) == 1
+    assert listed["items"][0]["candidate_id"] == "cand-corr-1"
+    assert listed["items"][0]["section_id"] == section.id
+    assert listed["items"][0]["proposal_sha256"] == expected_prop_sha
+    assert listed["items"][0]["review_reason"] == "Проверьте пунктуацию"
+
+    out_epub = tmp_path / "strict.epub"
+    strict_code = main(
+        [
+            "--config",
+            str(config),
+            "export",
+            "book-corr",
+            "--output",
+            str(out_epub),
+            "--mode",
+            "structure_only",
+            "--strict-corrections",
+        ]
+    )
+    err_text = capsys.readouterr().err
+    assert strict_code == 1
+    assert "strict-corrections" in err_text
+    assert not out_epub.exists()
+
+    captured_commands: list[ResolveCorrectionCommand] = []
+    orig_build = cli_app.build_application
+
+    def _patched_build(*args, **kwargs):
+        built = orig_build(*args, **kwargs)
+        return replace(
+            built,
+            resolve_correction_candidate=lambda cmd: (
+                captured_commands.append(cmd) or block.id
+            ),
+        )
+
+    monkeypatch.setattr(cli_app, "build_application", _patched_build)
+    resolve_code = main(
+        [
+            "--config",
+            str(config),
+            "corrections",
+            "resolve",
+            "book-corr",
+            "cand-corr-1",
+            "--action",
+            "keep",
+            "--reason",
+            "Оригинал точнее",
+            "--json",
+        ]
+    )
+    resolved = json.loads(capsys.readouterr().out)
+    assert resolve_code == 0
+    assert resolved["action"] == "keep"
+    assert len(captured_commands) == 1
+    assert captured_commands[0].proposal_sha256 == expected_prop_sha
+    assert captured_commands[0].input_sha256 == "in-sha-1"
+    assert captured_commands[0].reason == "Оригинал точнее"
+
+
 
