@@ -6,9 +6,11 @@ Strict line preservation also rejects dropped non-empty lines, and in a poem a
 blank substituted for a text line.
 """
 
+import re
 from typing import overload
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
+from linguary.application.validators.quotes import _outer_unclosed_open
 from linguary.application.validators.treatment import (
     joined_segment_translation,
     planned_segment_modes,
@@ -18,6 +20,21 @@ from linguary.domain.llm_log import Violation
 
 _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–')
 _DIALOGUE_DASHES = ('—', '–', '-')
+_POST_SPEECH_CLOSE_RE = re.compile(r"""[.!?…]["”’'](?=\s)""")
+_EMBEDDED_POST_SPEECH_NARRATIVE_RE = re.compile(r"[.!?…]\s+[—–]\s+[А-ЯЁA-Z]")
+
+
+def _count_post_speech_narrative_sentences(source_text: str) -> int:
+    """Count closing speech quotes after terminal punctuation followed outside quotes by a capitalized sentence."""
+    count = 0
+    for match in _POST_SPEECH_CLOSE_RE.finditer(source_text):
+        after_pos = match.end()
+        if _outer_unclosed_open(source_text, after_pos) is not None:
+            continue
+        rest = source_text[after_pos:].lstrip()
+        if rest and rest[0].isupper():
+            count += 1
+    return count
 
 
 def _check_paragraphs(
@@ -34,8 +51,25 @@ def _check_paragraphs(
     if translated_count > source_count:
         has_speech = any(m in source_text for m in _SPEECH_MARKERS)
         extra_lines = translated_lines[source_count:]
-        if has_speech and extra_lines and all(line.lstrip().startswith(_DIALOGUE_DASHES) for line in extra_lines):
-            return None
+        if has_speech and extra_lines:
+            if all(line.lstrip().startswith(_DIALOGUE_DASHES) for line in extra_lines):
+                return None
+            post_count = _count_post_speech_narrative_sentences(source_text)
+            if post_count > 0 and any(
+                line.lstrip().startswith(_DIALOGUE_DASHES) for line in translated_lines
+            ):
+                non_dash_extra = [
+                    line
+                    for line in extra_lines
+                    if not line.lstrip().startswith(_DIALOGUE_DASHES)
+                ]
+                if (
+                    len(non_dash_extra) <= min(post_count, 2)
+                    and len(extra_lines) <= post_count + 1
+                    and all(line[0].isupper() for line in non_dash_extra)
+                    and _EMBEDDED_POST_SPEECH_NARRATIVE_RE.search(translated_lines[0]) is None
+                ):
+                    return None
         return (
             f"перевод {label} содержит {translated_count} "
             f"абзацев, а оригинал — {source_count}: сохрани исходное число "

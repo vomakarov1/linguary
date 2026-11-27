@@ -338,3 +338,14 @@ def test_correction_prompt_v2_covers_numbers_calques_notes_and_boundary_consiste
     assert "условиям книги" not in prompt
     assert "условия книги" not in prompt
 
+
+def test_correction_prompt_v2_and_a2_dialogue_rules_sync_post_speech_narrative_guidance() -> None:
+    from linguary.application.reader_text import _A2_DIALOGUE_AND_CALQUE_RULES
+
+    for text in (CORRECTION_PROMPT_V2, _A2_DIALOGUE_AND_CALQUE_RULES):
+        assert "— Реплика? — Авторское предложение." in text
+        assert "— Реплика 1.\\nАвторское предложение.\\n— Реплика 2." in text
+        assert "Авторское предложение. — Реплика 2." in text
+        assert "кавычки-ёлочки с начала абзаца" in text
+
+

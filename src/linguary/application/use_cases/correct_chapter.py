@@ -30,13 +30,18 @@ from linguary.application.correction_dto import (
     ChapterCorrectionReviewResponse, CorrectionSnapshotV2, ProposedBlockResponse,
     proposed_block_from_payload, unchanged_reader_texts,
 )
-from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
+from linguary.application.llm_dto import BlockResultResponse, LLMPayloadError, TranslationResultResponse
 from linguary.application.llm_rejections import finalize_response, record_rejection
 from linguary.application.ports.llm import LLMContextCapacityError, LLMRequest, LLMResponseFormatError
 from linguary.application.reader_text import ReaderTextPolicy, source_quote_fragments
 from linguary.application.recovery import RecoveryError
-from linguary.application.retry_policy import ResultValidationError, RetryPolicy
-from linguary.application.validators import TranslationResultValidator
+from linguary.application.retry_policy import (
+    ExpectedBlock,
+    ResultExpectation,
+    ResultValidationError,
+    RetryPolicy,
+)
+from linguary.application.validators import TranslationResultValidator, expectation_for_unit
 from linguary.application.validators.content_plan import (
     resolve_content_coverage,
     resolve_response_evidence,
@@ -652,6 +657,57 @@ def _llm_block_result(
     return out
 
 
+def _batch_expectation(inputs: Any, block_ids: Sequence[str]) -> ResultExpectation:
+    """Build a retry expectation covering every block in the correction batch in order."""
+    originals = {b.id: b for b in inputs.blocks}
+    target_language = inputs.document.target_language
+    analysis = getattr(inputs, 'analysis', None)
+    treatment_plan = getattr(analysis, 'treatment_plan', None) if analysis is not None else None
+    if treatment_plan is not None and block_ids:
+        plan_treatments = {item.block_id: item.treatment for item in treatment_plan.items}
+        if all(
+            bid in originals
+            and bid in plan_treatments
+            and plan_treatments[bid].is_textual
+            for bid in block_ids
+        ):
+            unit = TranslationUnit.of_blocks(
+                id=str(uuid4()),
+                blocks=tuple(originals[bid] for bid in block_ids),
+                plan=treatment_plan,
+            )
+            return expectation_for_unit(unit, target_language=target_language)
+    expected_blocks = []
+    for bid in block_ids:
+        result = inputs.results.get(bid)
+        treatment = getattr(result, 'treatment', None)
+        if treatment is not None and not treatment.is_textual:
+            treatment = None
+        segment_treatments = tuple(getattr(result, 'segment_treatments', ()) or ())
+        expected_blocks.append(
+            ExpectedBlock(
+                block_id=bid,
+                treatment=treatment,
+                segment_treatments=segment_treatments,
+            )
+        )
+    return ResultExpectation(
+        target_language=target_language,
+        blocks=tuple(expected_blocks),
+    )
+
+
+def _with_batch_expectation(error: Exception, batch_expectation: ResultExpectation) -> Exception:
+    """Attach the full-batch expectation to a shallow copy of payload/format/expectationless errors."""
+    if isinstance(error, (LLMPayloadError, LLMResponseFormatError)) or (
+        isinstance(error, ResultValidationError) and getattr(error, 'expectation', None) is None
+    ):
+        copied = copy.copy(error)
+        cast(Any, copied).expectation = batch_expectation
+        return copied
+    return error
+
+
 class CorrectChapter:
     def __init__(self, *, unit_of_work, llm_client, snapshot, validator: TranslationResultValidator,
                  retry_policy=None, sleep=None):
@@ -756,6 +812,7 @@ class CorrectChapter:
                         run_id=inputs.run.id, section_id=command.section_id, manifest=expected,
                         task_id=task.id, task_attempt=task.attempts,
                         input_generation=payload['input_generation'], block_ids=list(block_ids)))
+            batch_expectation = _batch_expectation(inputs, block_ids)
             try:
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionResponse)
@@ -790,7 +847,12 @@ class CorrectChapter:
                             or attempt.context.get('operation_id') != owned_task.operation_id
                             or tuple(attempt.context.get('ordered_block_ids', ())) != block_ids):
                         raise RecoveryError('interrupted')
-                    candidates = self._candidates(tx, current, response.payload)
+                    candidates = self._candidates(
+                        tx,
+                        current,
+                        response.payload,
+                        batch_expectation=_batch_expectation(current, block_ids),
+                    )
                     changed = tuple(r for r in candidates if r != current.results[r.block_id])
                     updated_bindings = {}
                     # Validate the whole group before writing any projection or archive.
@@ -861,8 +923,9 @@ class CorrectChapter:
                     middle = len(block_ids) // 2
                     return (await self._group(command, block_ids[:middle])
                             + await self._group(command, block_ids[middle:]))
+                retry_error = _with_batch_expectation(error, batch_expectation)
                 aliased_error = _alias_error_for_retry(
-                    error,
+                    retry_error,
                     getattr(inputs, 'block_aliases', None),
                     _inputs_difficulty_aliases(inputs),
                     _inputs_fact_aliases(inputs),
@@ -882,9 +945,22 @@ class CorrectChapter:
                 response = None
         raise ResultValidationError('исчерпаны попытки исправления главы')
 
-    def _candidates(self, tx, inputs, response, *, allocate_from_db: bool = True):
+    def _candidates(
+        self,
+        tx,
+        inputs,
+        response,
+        *,
+        allocate_from_db: bool = True,
+        batch_expectation: ResultExpectation | None = None,
+    ):
         from linguary.application.use_cases.export_book import _validate_content_plans
         ids = response.block_ids
+        effective_expectation = (
+            batch_expectation
+            if batch_expectation is not None
+            else _batch_expectation(inputs, ids)
+        )
         all_results = tuple(inputs.results.values())
         used_note_ids = {note.id for result in all_results for note in result.language_notes}
         if isinstance(inputs.snapshot, CorrectionSnapshotV2):
@@ -949,6 +1025,7 @@ class CorrectChapter:
                 unit=unit,
                 target_language=inputs.document.target_language,
                 note_id_factory=notes,
+                expectation=effective_expectation,
                 mandatory_glossary=mandatory_glossary,
                 validation_policy=validation_policy,
                 protected_quotes=section_quote_fragments,
@@ -1300,6 +1377,7 @@ class CorrectChapterV2(CorrectChapter):
                 request, context = self._call(tx, inputs, task, payload,
                     base_request, ordinal, kind='correction_request')
                 expected = inputs.manifest
+            batch_expectation = _batch_expectation(inputs, block_ids)
             try:
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionV2Response)
@@ -1324,7 +1402,12 @@ class CorrectChapterV2(CorrectChapter):
                     current_materialized = response.payload.materialize_for(current.results)
                     if current_materialized != response.payload:
                         response = replace(response, payload=current_materialized)
-                    prepared = self._candidates(tx, current, response.payload)
+                    prepared = self._candidates(
+                        tx,
+                        current,
+                        response.payload,
+                        batch_expectation=_batch_expectation(current, block_ids),
+                    )
                     raw = {b.block_id: b for b in response.payload.blocks}
                     candidates, unchanged = [], []
                     for result in prepared:
@@ -1404,8 +1487,9 @@ class CorrectChapterV2(CorrectChapter):
                 if isinstance(error, LLMResponseFormatError) and error.truncated and len(block_ids) > 1:
                     middle = len(block_ids) // 2
                     return await self._propose_group(command, block_ids[:middle]) + await self._propose_group(command, block_ids[middle:])
+                retry_error = _with_batch_expectation(error, batch_expectation)
                 aliased_error = _alias_error_for_retry(
-                    error,
+                    retry_error,
                     getattr(inputs, 'block_aliases', None),
                     _inputs_difficulty_aliases(inputs),
                     _inputs_fact_aliases(inputs),
