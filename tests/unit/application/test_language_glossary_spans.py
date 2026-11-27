@@ -194,3 +194,17 @@ def test_glossary_validator_preserves_hyphenated_terms_and_lowercase_non_proper_
     assert _warnings("He wore half-moon glasses.", "Он носил очки-половинки.", glossary) == ()
     missing_moon = _warnings("The full Moon rose.", "Полное светило взошло.", glossary)
     assert any("'moon'" in w for w in missing_moon)
+
+    # Lowercase-initial PERSON/PLACE/ORGANIZATION entries also match sentence-initial capitalization.
+    proper_lower = (
+        GlossarySnapshotEntry(
+            source_text="van Helsing",
+            translation="ван Хельсинг",
+            type=ConceptType.PERSON,
+            status=TermStatus.APPROVED,
+        ),
+    )
+    missing_vh = _warnings("Van Helsing walked in.", "Профессор вошёл в комнату.", proper_lower)
+    assert any("'van Helsing'" in w for w in missing_vh)
+    assert _warnings("Van Helsing walked in.", "Ван Хельсинг вошёл в комнату.", proper_lower) == ()
+

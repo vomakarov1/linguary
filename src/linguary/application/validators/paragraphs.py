@@ -21,7 +21,28 @@ from linguary.domain.llm_log import Violation
 _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–')
 _DIALOGUE_DASHES = ('—', '–', '-')
 _POST_SPEECH_CLOSE_RE = re.compile(r"""[.!?…]["”’'](?=\s)""")
-_EMBEDDED_POST_SPEECH_NARRATIVE_RE = re.compile(r"[.!?…]\s+[—–]\s+[А-ЯЁA-Z]")
+_INLINE_DIALOGUE_TRANSITION_RE = re.compile(r"([,!?.…])\s+[—–]\s+([А-ЯЁA-Zа-яёa-z])")
+
+
+def _count_embedded_post_speech_narratives(line: str) -> int:
+    """Count inline `. — <Capital>` transitions that start a post-speech narrative rather than resuming speech after lowercase attribution."""
+    state = "speech" if line.lstrip().startswith(_DIALOGUE_DASHES) else "narrative"
+    embedded = 0
+    for match in _INLINE_DIALOGUE_TRANSITION_RE.finditer(line):
+        punct, next_char = match.group(1), match.group(2)
+        if state == "speech":
+            if next_char.islower():
+                state = "attribution"
+            elif punct in ".!?…" and next_char.isupper():
+                embedded += 1
+                state = "post_narrative"
+        elif state == "attribution":
+            if (punct in ".!?…" and next_char.isupper()) or (punct == "," and next_char.islower()):
+                state = "speech"
+        elif state == "post_narrative":
+            if punct in ".!?…" and next_char.isupper():
+                state = "speech"
+    return embedded
 
 
 def _count_post_speech_narrative_sentences(source_text: str) -> int:
@@ -63,11 +84,14 @@ def _check_paragraphs(
                     for line in extra_lines
                     if not line.lstrip().startswith(_DIALOGUE_DASHES)
                 ]
+                embedded_narrative = sum(
+                    _count_embedded_post_speech_narratives(line)
+                    for line in translated_lines[:source_count]
+                )
                 if (
-                    len(non_dash_extra) <= min(post_count, 2)
+                    len(non_dash_extra) + embedded_narrative <= min(post_count, 2)
                     and len(extra_lines) <= post_count + 1
                     and all(line[0].isupper() for line in non_dash_extra)
-                    and _EMBEDDED_POST_SPEECH_NARRATIVE_RE.search(translated_lines[0]) is None
                 ):
                     return None
         return (

@@ -98,7 +98,10 @@ def route_snapshot(llm):
 def routes_compatible(
     current_route: Mapping[str, Any], pinned_route: Mapping[str, Any]
 ) -> bool:
-    return (current_route.get('provider'), current_route.get('base_url')) == (
+    provider = current_route.get('provider')
+    if not provider:
+        return False
+    return (provider, current_route.get('base_url')) == (
         pinned_route.get('provider'),
         pinned_route.get('base_url'),
     )

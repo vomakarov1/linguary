@@ -3423,3 +3423,68 @@ def test_speech_style_subject_anchor_block_fallback_in_pattern_and_book_cap() ->
     assert [n for n in _notes(layout, b6.id) if n.origin != "speaker"] == []
 
 
+def test_speech_style_fallback_does_not_ignore_multispeaker_owner_block() -> None:
+    """If owner block has 2 speakers and a sibling anchor block has 1 speaker, fallback stays ambiguous."""
+    from linguary.application.layout.book import _repeated_speech_style_ids
+    from linguary.domain.content_plan import Scene
+
+    b0 = _block("c1", 0, "First Harry line.")
+    b1 = _block("c1", 1, "Second Harry line.")
+    b2 = _block("c1", 2, "Owner line with two speakers.")
+    b3 = _block("c1", 3, "Sibling line with one speaker.")
+    a0 = SourceAnchor(b0.id, 0, 5, "First")
+    a1 = SourceAnchor(b1.id, 0, 6, "Second")
+    a2a = SourceAnchor(b2.id, 0, 5, "Owner")
+    a2b = SourceAnchor(b2.id, 6, 10, "line")
+    a3 = SourceAnchor(b3.id, 0, 7, "Sibling")
+    f0 = ContextFact("f0", "speaker", (a0,), a0, "Harry", "explicit")
+    f1 = ContextFact("f1", "speaker", (a1,), a1, "Harry", "explicit")
+    f2a = ContextFact("f2a", "speaker", (a2a,), a2a, "Hagrid", "explicit")
+    f2b = ContextFact("f2b", "speaker", (a2b,), a2b, "Harry", "explicit")
+    f3 = ContextFact("f3", "speaker", (a3,), a3, "Harry", "explicit")
+    d0 = Difficulty(
+        "d-h0",
+        (SourceAnchor(b0.id, 6, 11, "Harry"),),
+        b0.id,
+        "speech_style",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-h0", "Explain"),),
+    )
+    d1 = Difficulty(
+        "d-h1",
+        (SourceAnchor(b1.id, 7, 12, "Harry"),),
+        b1.id,
+        "speech_style",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-h1", "Explain"),),
+    )
+    # 3rd difficulty in the same scene: anchored on b2 (2 speakers) + b3 (1 speaker Harry).
+    # Without the fix, b2 is skipped and d-ambig is misattributed to Harry -> dropped as 3rd in scene 1!
+    d_ambig = Difficulty(
+        "d-ambig",
+        (SourceAnchor(b2.id, 11, 15, "with"), SourceAnchor(b3.id, 8, 12, "line")),
+        b2.id,
+        "speech_style",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-ambig", "Explain"),),
+    )
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(d0, d1, d_ambig),
+        context_facts=(f0, f1, f2a, f2b, f3),
+        scenes=(Scene("sc-1", 0, b0.id, b3.id, "Scene 1"),),
+    )
+    sec = _section("c1", 0, "Ch 1", (b0, b1, b2, b3))
+    dropped = _repeated_speech_style_ids(
+        _document((sec,)),
+        (_analysis("a1", sec.id, plan=plan),),
+        plan.context_facts,
+    )
+    assert "d-ambig" not in dropped.get(sec.id, frozenset())
+
+
+

@@ -1204,13 +1204,15 @@ class IllustrationChapter:
                             ru_parts: list[str] = []
                             all_local_perm = True
                             for f_item in entity_facts:
-                                f_sec = _parse_section_order(f_item.get("position_key"))
+                                f_pos = str(f_item.get("position_key") or "")
+                                f_sec = _parse_section_order(f_pos)
                                 d_en = str(f_item.get("description_en", "")).strip()
                                 d_ru = str(f_item.get("description_ru", "")).strip()
                                 if (
                                     str(f_item.get("temporal_scope", "")) != "permanent"
                                     or f_sec is None
                                     or f_sec > entry.order
+                                    or f_pos > event_pos
                                     or not d_en
                                     or has_cyrillic(d_en)
                                     or not d_ru

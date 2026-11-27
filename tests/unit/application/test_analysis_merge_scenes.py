@@ -2331,6 +2331,17 @@ def test_validate_narrative_response_idempotent_across_fragment_merge_and_revali
     }
 
 
+def test_opening_remark_names_speaker_handles_unicode_and_hyphens() -> None:
+    """`_opening_remark_names_speaker` preserves Unicode letters and per-word capitalization across hyphens."""
+    from linguary.application.analysis_merge import _opening_remark_names_speaker
+
+    assert _opening_remark_names_speaker('Éowyn said, "Stand back!"', "Éowyn") is True
+    assert _opening_remark_names_speaker('A well-fat monk said, "Hello!"', "Fat Friar") is False
+    assert _opening_remark_names_speaker('Well-fat monk said, "Hello!"', "Fat Friar") is False
+    assert _opening_remark_names_speaker('A non-Harry voice said, "Hello!"', "Harry Potter") is True
+
+
+
 
 
 

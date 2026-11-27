@@ -28,7 +28,7 @@ _BLOCK_ALIAS_RE = re.compile(r"^b\d+$")
 _SEGMENT_ID_RE = re.compile(r"#s\d+$")
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 _SPEECH_BUBBLE_RE = re.compile(
-    r"\b(?:speech|thought|text|comic)\s+(?:balloon|bubble|box|caption)s?\b",
+    r"\b(?:speech|thought|text|comic)[\s-]+(?:balloon|bubble|box|caption)s?\b",
     re.IGNORECASE,
 )
 _MONOCHROME_COLOR_EN_RE = re.compile(

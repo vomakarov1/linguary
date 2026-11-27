@@ -3840,3 +3840,24 @@ def test_post_speech_narrative_paragraph_allows_1_line_and_3_line_and_rejects_ab
     assert paragraph_violation("b1", source_text=ollivander_source, translated_text=too_many_non_dash) is not None
     assert paragraph_violation("b1", source_text="‘Yes.’ ‘No.’", translated_text="— Да.\nАвторский текст.\n— Нет.") is not None
 
+    # Mid-line lowercase attribution + resumed speech on line 1 must NOT block valid 3-line layout.
+    mid_attr_source = (
+        "‘Ah, yes,’ said Mr Ollivander. ‘I remember every wand I’ve ever sold, Mr Potter.’ "
+        "He pulled a long tape measure from his pocket. "
+        "‘Which is your wand arm?’"
+    )
+    mid_attr_three_line = (
+        "— А, да, — сказал мистер Олливандер. — Я помню каждую палочку, которую когда-либо продал, мистер Поттер.\n"
+        "Он вытащил из кармана длинную измерительную ленту.\n"
+        "— Какой рукой вы держите палочку?"
+    )
+    mid_attr_absorbed = (
+        "— А, да, — сказал мистер Олливандер. — Я помню каждую палочку. "
+        "— Он вытащил из кармана длинную измерительную ленту. "
+        "— Какой рукой вы держите палочку?\n"
+        "Гарри вытянул правую руку."
+    )
+    assert paragraph_violation("b1", source_text=mid_attr_source, translated_text=mid_attr_three_line) is None
+    assert paragraph_violation("b1", source_text=mid_attr_source, translated_text=mid_attr_absorbed) is not None
+
+

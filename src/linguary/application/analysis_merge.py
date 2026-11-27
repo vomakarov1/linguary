@@ -7647,7 +7647,7 @@ def _fact_block_text(block_id, texts, blocks) -> str | None:
 
 def _opening_remark_names_speaker(text: str, value: str) -> bool:
     remark = _opening_remark(text)
-    raw_tokens = re.findall(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’-]*", remark)
+    raw_tokens = re.findall(r"\w+(?:['’]\w+)*", remark)
     remark_pairs: list[tuple[str, bool]] = []
     for raw in raw_tokens:
         is_cap = raw[:1].isupper()

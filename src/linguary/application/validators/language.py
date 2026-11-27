@@ -326,6 +326,9 @@ def _source_term_spans(
         if article_match is not None:
             article, tail = article_match.group(1), article_match.group(2)
             base = rf"(?i:{re.escape(article)})\s+{re.escape(tail)}"
+        elif term[0].islower():
+            cap_term = term[0].upper() + term[1:]
+            base = rf"(?:{re.escape(term)}|{re.escape(cap_term)})"
         else:
             base = re.escape(term)
         upper_term = term.upper()

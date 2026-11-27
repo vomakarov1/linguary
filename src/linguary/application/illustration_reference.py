@@ -2439,13 +2439,11 @@ class IllustrationReference:
                     continue
                 glossary_links[ckey] = concept.id
                 glossary_source_keys.add(ckey)
-                concept_status = getattr(getattr(concept, "status", None), "value", "")
+                raw_concept_status = getattr(concept, "status", None)
+                concept_status = str(getattr(raw_concept_status, "value", raw_concept_status) or "")
                 ru_var = concept.variant_for("ru")
-                ru_status = (
-                    getattr(getattr(ru_var, "status", None), "value", "")
-                    if ru_var is not None
-                    else ""
-                )
+                raw_ru_status = getattr(ru_var, "status", None) if ru_var is not None else None
+                ru_status = str(getattr(raw_ru_status, "value", raw_ru_status) or "")
                 if concept_status in {"approved", "locked"} or ru_status in {"approved", "locked"}:
                     approved_glossary_keys.add(ckey)
         glossary_source_keys_frozen = frozenset(glossary_source_keys)

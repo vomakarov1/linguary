@@ -1833,7 +1833,7 @@ def _repeated_speech_style_ids(
                 fallback_keys: set[str] = set()
                 for block_id in candidate_blocks:
                     speakers_in_block = block_speakers.get(block_id)
-                    if speakers_in_block and len(speakers_in_block) == 1:
+                    if speakers_in_block:
                         fallback_keys.update(speakers_in_block)
                 if len(fallback_keys) == 1:
                     matched_keys = list(fallback_keys)

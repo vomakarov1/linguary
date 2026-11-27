@@ -3161,9 +3161,9 @@ async def test_multi_permanent_fact_scope_fast_path_guards(tmp_path: Path) -> No
             _fact_item("f-fr-4", "ent-frank", section_order=0, temporal_scope="permanent", desc_ru="Борода", desc_en="Short beard"),
             # Grace: 5 local permanent facts -> MUST call FACT_SCOPE (> 4)!
             *[_fact_item(f"f-gr-{i}", "ent-grace", section_order=0, temporal_scope="permanent", desc_ru=f"Черта {i}", desc_en=f"Trait {i}") for i in range(5)],
-            # Henry: 2 permanent facts, one from future chapter (back_applicable=True) -> MUST call FACT_SCOPE (not local)!
-            _fact_item("f-he-1", "ent-henry", section_order=0, temporal_scope="permanent", desc_ru="Худой", desc_en="Slender"),
-            _fact_item("f-he-2", "ent-henry", section_order=5, temporal_scope="permanent", back_applicable=True, reveals_future_spoiler=False, desc_ru="Шрам", desc_en="Scar"),
+            # Henry: 2 permanent facts, one from a LATER block in the SAME chapter (back_applicable=True) -> MUST call FACT_SCOPE!
+            _fact_item("f-he-1", "ent-henry", section_order=0, block_order=0, temporal_scope="permanent", desc_ru="Худой", desc_en="Slender"),
+            _fact_item("f-he-2", "ent-henry", section_order=0, block_order=9, temporal_scope="permanent", back_applicable=True, reveals_future_spoiler=False, desc_ru="Шрам", desc_en="Scar"),
             # Iris: 2 local permanent facts exceeding 400 chars in EN -> MUST call FACT_SCOPE!
             _fact_item("f-ir-1", "ent-iris", section_order=0, temporal_scope="permanent", desc_ru="Плащ", desc_en="A" * 220),
             _fact_item("f-ir-2", "ent-iris", section_order=0, temporal_scope="permanent", desc_ru="Сапоги", desc_en="B" * 220),
@@ -3403,6 +3403,8 @@ async def test_prompt_speech_bubble_rejected_and_repaired(tmp_path: Path) -> Non
     assert find_speech_bubble_term("A dramatic speech balloon floats above him.") == "speech balloon"
     assert find_speech_bubble_term("With thought bubbles and comic captions.") == "thought bubbles"
     assert find_speech_bubble_term("A text box in the corner.") == "text box"
+    assert find_speech_bubble_term("A dramatic speech-bubble floats above him.") == "speech-bubble"
+    assert find_speech_bubble_term("A text-box in the corner.") == "text-box"
     assert find_speech_bubble_term("A lantern glows softly above the wooden table.") is None
 
     prompt_calls = 0
