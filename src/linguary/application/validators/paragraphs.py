@@ -6,9 +6,11 @@ Strict line preservation also rejects dropped non-empty lines, and in a poem a
 blank substituted for a text line.
 """
 
+import re
 from typing import overload
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
+from linguary.application.validators.quotes import _outer_unclosed_open
 from linguary.application.validators.treatment import (
     joined_segment_translation,
     planned_segment_modes,
@@ -18,6 +20,42 @@ from linguary.domain.llm_log import Violation
 
 _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–')
 _DIALOGUE_DASHES = ('—', '–', '-')
+_POST_SPEECH_CLOSE_RE = re.compile(r"""[.!?…]["”’'](?=\s)""")
+_INLINE_DIALOGUE_TRANSITION_RE = re.compile(r"([,!?.…])\s+[—–]\s+([А-ЯЁA-Zа-яёa-z])")
+
+
+def _count_embedded_post_speech_narratives(line: str) -> int:
+    """Count inline `. — <Capital>` transitions that start a post-speech narrative rather than resuming speech after lowercase attribution."""
+    state = "speech" if line.lstrip().startswith(_DIALOGUE_DASHES) else "narrative"
+    embedded = 0
+    for match in _INLINE_DIALOGUE_TRANSITION_RE.finditer(line):
+        punct, next_char = match.group(1), match.group(2)
+        if state == "speech":
+            if next_char.islower():
+                state = "attribution"
+            elif punct in ".!?…" and next_char.isupper():
+                embedded += 1
+                state = "post_narrative"
+        elif state == "attribution":
+            if (punct in ".!?…" and next_char.isupper()) or (punct == "," and next_char.islower()):
+                state = "speech"
+        elif state == "post_narrative":
+            if punct in ".!?…" and next_char.isupper():
+                state = "speech"
+    return embedded
+
+
+def _count_post_speech_narrative_sentences(source_text: str) -> int:
+    """Count closing speech quotes after terminal punctuation followed outside quotes by a capitalized sentence."""
+    count = 0
+    for match in _POST_SPEECH_CLOSE_RE.finditer(source_text):
+        after_pos = match.end()
+        if _outer_unclosed_open(source_text, after_pos) is not None:
+            continue
+        rest = source_text[after_pos:].lstrip()
+        if rest and rest[0].isupper():
+            count += 1
+    return count
 
 
 def _check_paragraphs(
@@ -34,8 +72,28 @@ def _check_paragraphs(
     if translated_count > source_count:
         has_speech = any(m in source_text for m in _SPEECH_MARKERS)
         extra_lines = translated_lines[source_count:]
-        if has_speech and extra_lines and all(line.lstrip().startswith(_DIALOGUE_DASHES) for line in extra_lines):
-            return None
+        if has_speech and extra_lines:
+            if all(line.lstrip().startswith(_DIALOGUE_DASHES) for line in extra_lines):
+                return None
+            post_count = _count_post_speech_narrative_sentences(source_text)
+            if post_count > 0 and any(
+                line.lstrip().startswith(_DIALOGUE_DASHES) for line in translated_lines
+            ):
+                non_dash_extra = [
+                    line
+                    for line in extra_lines
+                    if not line.lstrip().startswith(_DIALOGUE_DASHES)
+                ]
+                embedded_narrative = sum(
+                    _count_embedded_post_speech_narratives(line)
+                    for line in translated_lines[:source_count]
+                )
+                if (
+                    len(non_dash_extra) + embedded_narrative <= min(post_count, 2)
+                    and len(extra_lines) <= post_count + 1
+                    and all(line[0].isupper() for line in non_dash_extra)
+                ):
+                    return None
         return (
             f"перевод {label} содержит {translated_count} "
             f"абзацев, а оригинал — {source_count}: сохрани исходное число "

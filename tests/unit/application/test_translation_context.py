@@ -2741,6 +2741,107 @@ def test_regeneration_input_lists_segments() -> None:
     assert translated.request.block_aliases == tuple(translated.block_ids_by_alias.items())
 
 
+def test_shape_instructions_verse_paragraphs_across_chapter_and_glossary_only_reminder() -> None:
+    """WP7: whole-chapter verse detection adds literal-translation rule for PARAGRAPH verse and GLOSSARY_ONLY reminder."""
+    from linguary.application.context_builder import (
+        _GLOSSARY_ONLY_HINTS_RULE,
+        _VERSE_PARAGRAPH_TRANSLATION_RULE,
+        snapshot_prompt_templates,
+    )
+    from linguary.domain.content_plan import ContentPlan
+
+    verse_blocks = (
+        make_block(order=0, text="‘Oh, you may not think I’m pretty,"),
+        make_block(order=1, text="But don’t judge on what you see,"),
+        make_block(order=2, text="I’ll eat myself if you can find"),
+        make_block(order=3, text="A smarter hat than me.’"),
+    )
+    glossary_block = make_block(order=4, text="He frowned at the odd cauldron.")
+    segmented_block = _span_block(
+        order=5,
+        text="Alpha went home. Beta stayed.",
+        cuts=(len("Alpha went home. "),),
+    )
+    section = make_section((*verse_blocks, glossary_block, segmented_block))
+    document = make_document(section)
+    glossary = make_snapshot()
+
+    # Even a single-block unit containing only one verse line detects the stanza across the whole chapter.
+    single_verse_unit = make_unit((verse_blocks[1],), treatments=(BlockTreatment.TRANSLATE,))
+    v3_plan = ContentPlan(version=3, profile="content-plan-v3")
+    v3_builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+    verse_ctx = v3_builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=single_verse_unit,
+        analysis=replace(make_analysis(single_verse_unit), content_plan=v3_plan),
+        glossary=glossary,
+    )
+    assert _VERSE_PARAGRAPH_TRANSLATION_RULE in verse_ctx.request.instructions
+    assert _POEM_TRANSLATION_RULE not in verse_ctx.request.instructions
+    assert _GLOSSARY_ONLY_HINTS_RULE not in verse_ctx.request.instructions
+
+    # Mixed unit with GLOSSARY_ONLY + segmented block places GLOSSARY_ONLY rule BEFORE segment rule.
+    mixed_unit = TranslationUnit.of_blocks(
+        id="unit-mixed-wp7",
+        blocks=(glossary_block, segmented_block),
+        plan=TreatmentPlan(
+            SECTION_ID,
+            (
+                TreatmentPlanItem(glossary_block.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItem(
+                    segmented_block.id,
+                    BlockTreatment.TRANSLATE,
+                    (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+                    (0, 1),
+                ),
+            ),
+        ),
+    )
+    mixed_ctx = v3_builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=mixed_unit,
+        analysis=replace(make_analysis(mixed_unit), content_plan=v3_plan),
+        glossary=glossary,
+    )
+    assert _GLOSSARY_ONLY_HINTS_RULE in mixed_ctx.request.instructions
+    assert mixed_ctx.request.instructions.endswith("\n\n" + _SEGMENT_TRANSLATION_RULE)
+    assert (
+        mixed_ctx.request.instructions.index(_GLOSSARY_ONLY_HINTS_RULE)
+        < mixed_ctx.request.instructions.index(_SEGMENT_TRANSLATION_RULE)
+    )
+    assert "[b1] режим GLOSSARY_ONLY\n" in mixed_ctx.request.input_text
+
+    # english_help=True skips both PARAGRAPH verse translation rule and Russian GLOSSARY_ONLY reminder.
+    eh_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        english_help=True,
+    )
+    eh_builder = ContextBuilder(
+        prompt_templates=eh_templates,
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    )
+    eh_unit = make_unit(
+        (verse_blocks[1], glossary_block),
+        treatments=(BlockTreatment.GLOSSARY_ONLY, BlockTreatment.GLOSSARY_ONLY),
+    )
+    eh_ctx = eh_builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=eh_unit,
+        analysis=replace(make_analysis(eh_unit), content_plan=v3_plan),
+        glossary=glossary,
+    )
+    assert _VERSE_PARAGRAPH_TRANSLATION_RULE not in eh_ctx.request.instructions
+    assert _GLOSSARY_ONLY_HINTS_RULE not in eh_ctx.request.instructions
+
+
+
 
 
 

@@ -32,6 +32,7 @@ from linguary.domain import (
     ProcessingRun,
     ProcessingTask,
     TaskIdentity,
+    TaskType,
     TermConcept,
     TaskError,
 )
@@ -276,6 +277,11 @@ class TaskRepository(Protocol):
 
     def list_for_book(self, book_id: str) -> tuple[ProcessingTask, ...]:
         """Tasks for the book in order of creation."""
+
+    def list_for_scope(
+        self, book_id: str, task_type: TaskType, scope_id: str
+    ) -> tuple[ProcessingTask, ...]:
+        """Tasks for a book, type, and scope in order of creation."""
 
     def delete(self, task_id: str) -> None:
         """Deletes task along with its idempotency key.

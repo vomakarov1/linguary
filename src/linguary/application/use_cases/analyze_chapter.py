@@ -44,6 +44,8 @@ from linguary.application.analysis_merge import (
     AnalysisMergeError,
     ChapterFragment,
     FragmentAnalysis,
+    _extract_block_spoiler_tokens,
+    _first_name_block_index,
     before_you_read_entries,
     content_plan_from_response,
     validate_content_plan,
@@ -579,16 +581,48 @@ class AnalyzeChapter:
                 )
                 enforce_v7 = self._should_enforce_v7_name_policy(command, conditions=conditions)
                 merged_name_policy = self._name_translation_policy if enforce_v7 else None
-                scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
-                    ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
-                    mandatory_facts=glossary_context_constraints(concepts),
-                    blocks=blocks, source_offsets=True,
-                    source_language=document.source_language,
-                    target_language=document.target_language,
-                    language_detector=self._language_detector,
-                    known_names=known_names,
-                    name_translation_policy=merged_name_policy,
-                    enforce_strict_gender_subject=enforce_v7)
+                ordered_block_ids = tuple(aliases)
+                mandatory_facts = glossary_context_constraints(concepts)
+                try:
+                    scenes, facts = validate_narrative_response(
+                        narrative, aliases, texts, visible,
+                        ordered_block_ids=ordered_block_ids, is_notes_only=is_notes_only,
+                        mandatory_facts=mandatory_facts,
+                        blocks=blocks, source_offsets=True,
+                        source_language=document.source_language,
+                        target_language=document.target_language,
+                        language_detector=self._language_detector,
+                        known_names=known_names,
+                        name_translation_policy=merged_name_policy,
+                        enforce_strict_gender_subject=enforce_v7,
+                    )
+                except AnalysisMergeError as error:
+                    if (
+                        error.violation is None
+                        or error.violation.rule_code != "spoiler_name_leak"
+                    ):
+                        raise
+                    downgraded = _downgrade_spoiler_explicit_facts(
+                        narrative,
+                        aliases=aliases,
+                        texts=texts,
+                        ordered_block_ids=ordered_block_ids,
+                    )
+                    if downgraded is None:
+                        raise
+                    scenes, facts = validate_narrative_response(
+                        downgraded, aliases, texts, visible,
+                        ordered_block_ids=ordered_block_ids, is_notes_only=is_notes_only,
+                        mandatory_facts=mandatory_facts,
+                        blocks=blocks, source_offsets=True,
+                        source_language=document.source_language,
+                        target_language=document.target_language,
+                        language_detector=self._language_detector,
+                        known_names=known_names,
+                        name_translation_policy=merged_name_policy,
+                        enforce_strict_gender_subject=enforce_v7,
+                    )
+                    narrative = downgraded
             except (AnalysisMergeError, DomainError, ResultValidationError):
                 self._clear_fragment_passes(
                     command.book_id, command.section_id, AnalysisPassKind.NARRATIVE
@@ -3087,6 +3121,42 @@ def _suggestion_key(suggestion: TermConcept | GlossaryCandidate, language: str) 
         variant = suggestion.variant_for(language)
         return (glossary_key(suggestion.canonical_source_text), variant.text if variant else '', suggestion.note)
     return (glossary_key(suggestion.source_text), suggestion.suggested_translation, suggestion.note)
+
+
+def _downgrade_spoiler_explicit_facts(
+    narrative: NarrativeAnalysisResponse,
+    *,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    ordered_block_ids: Sequence[str],
+) -> NarrativeAnalysisResponse | None:
+    """Downgrade only explicit speaker/pronoun_referent facts whose name first appears later."""
+    block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
+    block_order = {bid: index for index, bid in enumerate(ordered_block_ids)}
+    changed = False
+    updated_facts = []
+    for fact in narrative.context_facts:
+        if (
+            fact.certainty == "explicit"
+            and fact.kind in {"speaker", "pronoun_referent"}
+            and fact.value
+        ):
+            resolved_block_id = aliases.get(
+                fact.subject_anchor.block_id, fact.subject_anchor.block_id
+            )
+            fact_pos = block_order.get(resolved_block_id)
+            if fact_pos is not None:
+                first_pos = _first_name_block_index(
+                    fact.value, block_tokens, narrative.glossary_candidates
+                )
+                if first_pos is not None and first_pos > fact_pos:
+                    updated_facts.append(replace(fact, certainty="inferred"))
+                    changed = True
+                    continue
+        updated_facts.append(fact)
+    if not changed:
+        return None
+    return replace(narrative, context_facts=tuple(updated_facts))
 
 
 def _prepare_staged_payload(

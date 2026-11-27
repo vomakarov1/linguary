@@ -62,6 +62,10 @@ _INDECLINABLE_YOU_KNOW_WHO = re.compile(
 #: Word tokens used for Russian inflection-aware mandatory glossary matching.
 _TERM_WORD = re.compile(r"[А-ЯЁа-яёA-Za-z0-9]+")
 _PARENS = re.compile(r"\([^)]*\)")
+_CASE_SENSITIVE_CONCEPT_TYPES = frozenset(
+    {ConceptType.PERSON, ConceptType.PLACE, ConceptType.ORGANIZATION}
+)
+_LEADING_ARTICLE = re.compile(r"^(the|an?)\s+(.+)$", re.IGNORECASE)
 _ADJ_ENDINGS = (
     "ая", "яя", "ое", "ее", "ые", "ие", "ый", "ий", "ой",
     "ую", "юю", "ым", "им", "ом", "ем",
@@ -267,10 +271,31 @@ def _glossary_mismatch_warnings(
 ) -> list[str]:
     """Flags mandatory glossary terms present in `source_text` but missing from `translated_text`."""
     warnings: list[str] = []
-    for entry in mandatory_glossary:
+    ordered_entries = sorted(
+        mandatory_glossary,
+        key=lambda entry: (
+            -len(entry.source_text.strip()),
+            not entry.status.is_user_decision,
+            entry.source_text,
+        ),
+    )
+    covered_spans: list[tuple[int, int]] = []
+    for entry in ordered_entries:
         source_term = entry.source_text.strip()
-        if not source_term or not _source_contains_term(source_text, source_term):
+        if not source_term:
             continue
+        spans = _source_term_spans(source_text, source_term, entry_type=entry.type)
+        uncovered = [
+            span
+            for span in spans
+            if not any(
+                covered_start <= span[0] and span[1] <= covered_end
+                for covered_start, covered_end in covered_spans
+            )
+        ]
+        if not uncovered:
+            continue
+        covered_spans.extend(uncovered)
         if not _translation_contains_term(translated_text, entry.translation):
             glossary_kind = (
                 "обязательным глоссарием"
@@ -284,8 +309,38 @@ def _glossary_mismatch_warnings(
     return warnings
 
 
-def _source_contains_term(source_text: str, term: str) -> bool:
-    return bool(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", source_text, re.IGNORECASE))
+def _source_term_spans(
+    source_text: str,
+    term: str,
+    *,
+    entry_type: ConceptType | None,
+) -> list[tuple[int, int]]:
+    """Match spans of `term` in `source_text` with hyphen-safe and case/article-aware boundaries."""
+    if not term:
+        return []
+    left = r"(?<!\w)" if term.startswith("-") else r"(?<![\w-])"
+    right = r"(?!\w)" if term.endswith("-") else r"(?![\w-])"
+    case_sensitive = (entry_type in _CASE_SENSITIVE_CONCEPT_TYPES) or term[0].isupper()
+    if case_sensitive:
+        article_match = _LEADING_ARTICLE.match(term)
+        if article_match is not None:
+            article, tail = article_match.group(1), article_match.group(2)
+            base = rf"(?i:{re.escape(article)})\s+{re.escape(tail)}"
+        elif term[0].islower():
+            cap_term = term[0].upper() + term[1:]
+            base = rf"(?:{re.escape(term)}|{re.escape(cap_term)})"
+        else:
+            base = re.escape(term)
+        upper_term = term.upper()
+        body = rf"(?:{base}|{re.escape(upper_term)})" if upper_term != term else base
+        flags = 0
+    else:
+        body = re.escape(term)
+        flags = re.IGNORECASE
+    return [
+        (match.start(), match.end())
+        for match in re.finditer(rf"{left}{body}{right}", source_text, flags)
+    ]
 
 
 def _translation_contains_term(translated_text: str, expected_translation: str) -> bool:

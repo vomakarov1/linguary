@@ -34,6 +34,7 @@ _MAX_COMPACT_DESC = 600
 _MAX_QUOTE = 2000
 _MAX_LIST = 32
 _MAX_COVERED_IDS = 256
+_MAX_PROMPT_USED_FACT_IDS = 128
 _MAX_ANCHORS = 16
 _MAX_ALIAS_PAIRS = 16
 
@@ -367,7 +368,7 @@ class IllustrationPromptSchema(_VersionedIllustrationBase):
             "в scene_composition_en (без дублей; все владельцы used_fact_ids и used_design_keys должны входить сюда)."
         ),
     )
-    used_fact_ids: list[str] = Field(max_length=_MAX_LIST)
+    used_fact_ids: list[str] = Field(max_length=_MAX_PROMPT_USED_FACT_IDS)
     used_design_keys: list[str] = Field(max_length=_MAX_LIST)
     assumptions_ru: list[str] = Field(max_length=_MAX_LIST)
 

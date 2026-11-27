@@ -2303,6 +2303,7 @@ def test_task_store_claim_retries_transient_sqlite_busy(tmp_path, monkeypatch: p
         assert len(begins) == 10
         assert len(rollbacks) >= 10
 
+        script["remaining"] = 0
         store.enqueue(TaskIdentity(book_id=book_id, task_type=TaskType.QUALITY_REVIEW))
         sleeps.clear()
         rollbacks.clear()

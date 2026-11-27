@@ -652,3 +652,31 @@ def test_dialogue_validator_allows_embedded_quote_in_narrative_and_rejects_line_
         )
         is not None
     )
+
+
+def test_dialogue_validator_allows_ollivander_1_line_and_3_line_and_rejects_2_line_inline_dash() -> None:
+    """WP4: speech + post-speech authorial sentence + speech passes in 1-line and 3-line forms under strict_v3."""
+    ollivander_source = (
+        "‘Well, now – Mr Potter. Let me see.’ "
+        "He pulled a long tape measure with silver markings out of his pocket. "
+        "‘Which is your wand arm?’"
+    )
+    one_line = (
+        "— Что ж, мистер Поттер. Посмотрим. "
+        "— Он вынул из кармана длинную рулетку с серебряными делениями. "
+        "— Какой рукой вы держите палочку?"
+    )
+    three_line = (
+        "— Что ж, мистер Поттер. Посмотрим.\n"
+        "Он вынул из кармана длинную рулетку с серебряными делениями.\n"
+        "— Какой рукой вы держите палочку?"
+    )
+    two_line_bad = (
+        "— Что ж, мистер Поттер. Посмотрим.\n"
+        "Он вынул из кармана длинную рулетку. — Какой рукой вы держите палочку?"
+    )
+
+    assert _check(one_line, source_text=ollivander_source, strict_v3=True) is None
+    assert _check(three_line, source_text=ollivander_source, strict_v3=True) is None
+    assert _check(two_line_bad, source_text=ollivander_source, strict_v3=True) is not None
+

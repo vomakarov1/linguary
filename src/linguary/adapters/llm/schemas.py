@@ -215,7 +215,13 @@ class BlockResultSchema(_ResponseModel):
     source_block_id: str = Field(min_length=1)
     treatment: TextualTreatment
     translated_text: str | None
-    glossary_hints: list[GlossaryHintSchema]
+    glossary_hints: list[GlossaryHintSchema] = Field(
+        description=(
+            "Словарные подсказки к блоку: обязателен непустой список (минимум 1 подсказка) "
+            "для каждого блока в режиме GLOSSARY_ONLY и для смешанного блока с сегментом GLOSSARY_ONLY; "
+            "для READ_AS_IS всегда []"
+        ),
+    )
     # Пустой список сохраняет проверку состава по режиму блока.
     segments: list[SegmentTranslationSchema] = Field(default_factory=list)
 
@@ -291,7 +297,15 @@ class TranslationResultSchema(_ResponseModel):
         schema = super().model_json_schema(*args, **kwargs)
         if cls is not TranslationResultSchema:
             return schema
-        return _omit_wire_fields(schema, _V1_TRANSLATION_FIELDS)
+        wire = _omit_wire_fields(schema, _V1_TRANSLATION_FIELDS)
+        defs = wire.get("$defs")
+        if isinstance(defs, dict):
+            block_def = defs.get("BlockResultSchema")
+            if isinstance(block_def, dict):
+                props = block_def.get("properties")
+                if isinstance(props, dict) and isinstance(props.get("glossary_hints"), dict):
+                    props["glossary_hints"].pop("description", None)
+        return wire
 
 
 __all__ = [

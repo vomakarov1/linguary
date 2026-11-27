@@ -3723,3 +3723,135 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
     finally:
         engine.dispose()
 
+
+def test_epub_adjacent_footnote_markers_order_and_css_regression(tmp_path: Path) -> None:
+    """Exported EPUB keeps paired footnote superscripts in ascending order and spaces adjacent refs."""
+    from linguary.application.layout.book import ChapterLayout
+    from linguary.application.layout.legend import LayoutFeatures
+    from linguary.application.layout.notes import LayoutNote
+
+    chapter_id = "sec-wp6"
+    resource = "hp01_wp6_en-gb.html"
+    text = "He wore half-moon spectacles and watched the Sorting Hat."
+    mid = _span_end(text, "half-moon")
+    end = len(text)
+    block = _paragraph(chapter_id, resource, 0, 1, text)
+    section = DocumentSection(
+        id=chapter_id,
+        document_id=_BOOK_ID,
+        title="Chapter 7 - The Sorting Hat",
+        order=0,
+        source_resource_path=resource,
+        blocks=(block,),
+    )
+    document = CanonicalDocument(
+        id=_BOOK_ID,
+        metadata=BookMetadata(title="Harry Potter and the Philosopher's Stone"),
+        source_language="en",
+        target_language="ru",
+        sections=(section,),
+    )
+    unit = LayoutUnit(
+        block_id=block.id,
+        start=0,
+        end=end,
+        translation="Он носил очки-половинки и смотрел на Распределяющую шляпу.",
+        speaker=None,
+        notes=(
+            NumberedNote(
+                1,
+                LayoutNote(
+                    labels=(),
+                    term="half-moon",
+                    ipa=None,
+                    variant=None,
+                    body=("в форме полумесяца",),
+                    marker_end=mid,
+                    origin="glossary_hint",
+                    difficulty_kinds=(),
+                ),
+            ),
+            NumberedNote(
+                2,
+                LayoutNote(
+                    labels=("Слово.",),
+                    term="half-moon",
+                    ipa=None,
+                    variant=None,
+                    body=("пояснение к форме очков",),
+                    marker_end=mid,
+                    origin="language_note",
+                    difficulty_kinds=(),
+                ),
+            ),
+            NumberedNote(
+                3,
+                LayoutNote(
+                    labels=(),
+                    term="Sorting Hat",
+                    ipa=None,
+                    variant=None,
+                    body=("Распределяющая шляпа",),
+                    marker_end=end,
+                    origin="glossary_hint",
+                    difficulty_kinds=(),
+                ),
+            ),
+            NumberedNote(
+                4,
+                LayoutNote(
+                    labels=("Реалия.",),
+                    term="Sorting Hat",
+                    ipa=None,
+                    variant=None,
+                    body=("волшебная шляпа Хогвартса",),
+                    marker_end=end,
+                    origin="language_note",
+                    difficulty_kinds=(),
+                ),
+            ),
+        ),
+        continues=False,
+        ends_paragraph=True,
+        lines=False,
+    )
+    layout = BookLayout(
+        chapters={
+            chapter_id: ChapterLayout(
+                section_id=chapter_id,
+                number=1,
+                units={block.id: (unit,)},
+                who_is_who=(),
+                review=(),
+            )
+        },
+        legend=(),
+        ipa_key=(),
+        who_is_who=(),
+        features=LayoutFeatures(
+            has_translation=True,
+            has_notes=True,
+            labels=frozenset({"Слово.", "Реалия."}),
+            has_ipa=False,
+            has_poems=False,
+            has_speakers=False,
+            sections=frozenset(),
+        ),
+    )
+    target = tmp_path / "wp6-adjacent-footnotes.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=document,
+            target_path=str(target),
+            block_results={},
+            layout=layout,
+        )
+    )
+    pages = _read_pages(target)
+    rendered_unit = _unit(pages, "half-moon spectacles")
+    assert _ref_superscripts(rendered_unit) == ["1", "2", "3", "4"]
+    with ZipFile(target) as archive:
+        css = archive.read("OEBPS/linguary.css").decode("utf-8")
+    assert re.search(r"a\.lg-ref\s*\+\s*a\.lg-ref\s*\{\s*margin-left\s*:\s*0\.18em\s*;\s*\}", css)
+
+

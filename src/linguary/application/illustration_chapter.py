@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from linguary.application.analysis_pass_cache import encode_illustration_pass
+from linguary.application.context_builder import textual_blocks
 from linguary.application.illustration_context import (
     IllustrationContext,
     _collect_book_glossary_terms_ru,
@@ -51,6 +52,7 @@ from linguary.application.illustration_validation import (
     dedupe_texts,
     filter_non_assumption_placeholders,
     find_monochrome_color_word,
+    find_speech_bubble_term,
     has_cyrillic,
     resolve_insert_after_block_id,
     validate_moment,
@@ -99,13 +101,27 @@ from linguary.domain.illustrations import (
     IllustrationSettingsRevision,
     IllustrationValidationError,
     RegistryItem,
+    format_position_key,
 )
 from linguary.domain.llm_log import LLMCallStage
 
 _MAX_APPLICABLE_FACTS = 32
+_MAX_FAST_PATH_PERMANENT_FACTS = 4
+_MAX_FAST_PATH_DESC_EN = 400
+_MAX_FAST_PATH_DESC_RU = 600
 _DEFAULT_ZERO_UNRESOLVED_RU = (
     "Не удалось однозначно определить образы ключевых участников для выбранных моментов главы."
 )
+
+
+def _parse_section_order(position_key: Any) -> int | None:
+    """Parse section order prefix from canonical `SSSSSS:BBBBBB:CCCCCCCC` position key."""
+    if not isinstance(position_key, str) or not position_key:
+        return None
+    sec_part = position_key.split(":", 1)[0]
+    if not (sec_part.isascii() and sec_part.isdigit()):
+        return None
+    return int(sec_part)
 
 
 def _default_id() -> str:
@@ -1015,12 +1031,21 @@ class IllustrationChapter:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
+        moment_priority_keys: set[str] = set()
+        for _card, _chars, _locs in bound_moments:
+            for ent in (*_chars, *_locs):
+                for raw_name in _entity_names(ent):
+                    k = glossary_key(raw_name)
+                    if k:
+                        moment_priority_keys.add(k)
         chapter_glossary_terms_ru = _collect_book_glossary_terms_ru(
             tx,
             generation.book_id,
             generation_id=generation.id,
             max_section_order=entry.order,
+            priority_keys=frozenset(moment_priority_keys),
         )
+        block_order_by_id = {b.id: idx for idx, b in enumerate(textual_blocks(section))}
 
         fact_scopes_all = tx.illustrations.list_scopes(
             generation.id, stage=IllustrationScopeStage.FACT_SCOPE, section_id=section_id
@@ -1046,6 +1071,14 @@ class IllustrationChapter:
 
         for card, char_entities, loc_entities in bound_moments:
             event_pos = max(a.position_key for a in card.anchors)
+            start_idx = (
+                block_order_by_id.get(card.scene_start_block_id)
+                if card.scene_start_block_id
+                else None
+            )
+            scene_start_pos = format_position_key(
+                entry.order, start_idx if start_idx is not None else 0, 0
+            )
             char_apps: list[IllustrationAppearance] = []
             loc_apps: list[IllustrationAppearance] = []
             allowed_fids: list[str] = []
@@ -1069,7 +1102,15 @@ class IllustrationChapter:
                         include_back_applicable=True,
                     )
                     entity_facts = sorted(
-                        [fi.raw_payload() for fi in fact_items],
+                        [
+                            fp
+                            for fi in fact_items
+                            if (fp := fi.raw_payload()) is not None
+                            and (
+                                str(fp.get("temporal_scope", "")) != "episodic"
+                                or (scene_start_pos <= str(fp.get("position_key", "")) <= event_pos)
+                            )
+                        ],
                         key=lambda f: (str(f["position_key"]), str(f["fact_id"])),
                     )
                     for ef in entity_facts:
@@ -1122,42 +1163,98 @@ class IllustrationChapter:
                         (char_apps if kind_bucket == "person" else loc_apps).append(app)
                         continue
 
-                    # Deterministic fast-path for a single clean permanent fact (skips redundant FACT_SCOPE LLM call).
-                    if len(entity_facts) == 1:
-                        single_fact = entity_facts[0]
-                        single_desc_en = str(single_fact.get("description_en", "")).strip()
-                        single_desc_ru = str(single_fact.get("description_ru", "")).strip()
+                    # Deterministic fast-path for clean permanent facts (skips redundant FACT_SCOPE LLM call):
+                    # - 1 permanent fact (including back-applicable) without Cyrillic/color violations
+                    # - 2..4 local permanent facts (section_order <= entry.order) within compact length bounds
+                    if 1 <= len(entity_facts) <= _MAX_FAST_PATH_PERMANENT_FACTS:
                         ent_names_for_mono = _entity_names(ent)
-                        mono_ok = (
-                            revision.settings.style != ILLUSTRATION_STYLE_MONOCHROME_INK
-                            or (
-                                find_monochrome_color_word(
-                                    single_desc_en,
-                                    allowed_names=ent_names_for_mono,
-                                    strict_palette=False,
+                        fast_path_ok = False
+                        joined_en = ""
+                        joined_ru = ""
+                        if len(entity_facts) == 1:
+                            single_fact = entity_facts[0]
+                            joined_en = str(single_fact.get("description_en", "")).strip()
+                            joined_ru = str(single_fact.get("description_ru", "")).strip()
+                            mono_ok = (
+                                revision.settings.style != ILLUSTRATION_STYLE_MONOCHROME_INK
+                                or (
+                                    find_monochrome_color_word(
+                                        joined_en,
+                                        allowed_names=ent_names_for_mono,
+                                        strict_palette=False,
+                                    )
+                                    is None
+                                    and find_monochrome_color_word(
+                                        joined_ru,
+                                        allowed_names=ent_names_for_mono,
+                                        strict_palette=False,
+                                    )
+                                    is None
                                 )
-                                is None
-                                and find_monochrome_color_word(
-                                    single_desc_ru,
-                                    allowed_names=ent_names_for_mono,
-                                    strict_palette=False,
-                                )
-                                is None
                             )
-                        )
-                        if (
-                            str(single_fact.get("temporal_scope", "")) == "permanent"
-                            and single_desc_en
-                            and not has_cyrillic(single_desc_en)
-                            and single_desc_ru
-                            and mono_ok
-                        ):
+                            fast_path_ok = bool(
+                                str(single_fact.get("temporal_scope", "")) == "permanent"
+                                and joined_en
+                                and not has_cyrillic(joined_en)
+                                and joined_ru
+                                and mono_ok
+                            )
+                        else:
+                            en_parts: list[str] = []
+                            ru_parts: list[str] = []
+                            all_local_perm = True
+                            for f_item in entity_facts:
+                                f_pos = str(f_item.get("position_key") or "")
+                                f_sec = _parse_section_order(f_pos)
+                                d_en = str(f_item.get("description_en", "")).strip()
+                                d_ru = str(f_item.get("description_ru", "")).strip()
+                                if (
+                                    str(f_item.get("temporal_scope", "")) != "permanent"
+                                    or f_sec is None
+                                    or f_sec > entry.order
+                                    or f_pos > event_pos
+                                    or not d_en
+                                    or has_cyrillic(d_en)
+                                    or not d_ru
+                                ):
+                                    all_local_perm = False
+                                    break
+                                en_parts.append(d_en)
+                                ru_parts.append(d_ru)
+                            if all_local_perm:
+                                joined_en = "; ".join(dict.fromkeys(en_parts))
+                                joined_ru = "; ".join(dict.fromkeys(ru_parts))
+                                mono_ok = (
+                                    revision.settings.style != ILLUSTRATION_STYLE_MONOCHROME_INK
+                                    or (
+                                        find_monochrome_color_word(
+                                            joined_en,
+                                            allowed_names=ent_names_for_mono,
+                                            strict_palette=False,
+                                        )
+                                        is None
+                                        and find_monochrome_color_word(
+                                            joined_ru,
+                                            allowed_names=ent_names_for_mono,
+                                            strict_palette=False,
+                                        )
+                                        is None
+                                    )
+                                )
+                                fast_path_ok = bool(
+                                    joined_en
+                                    and joined_ru
+                                    and len(joined_en) <= _MAX_FAST_PATH_DESC_EN
+                                    and len(joined_ru) <= _MAX_FAST_PATH_DESC_RU
+                                    and mono_ok
+                                )
+                        if fast_path_ok:
                             _, kept_design = resolve_appearance_with_design_fallback(
-                                [single_fact],
+                                entity_facts,
                                 design_payloads,
                                 excluded_facts=(),
-                                compact_description_en=single_desc_en,
-                                compact_description_ru=single_desc_ru,
+                                compact_description_en=joined_en,
+                                compact_description_ru=joined_ru,
                             )
                             for d in kept_design:
                                 dkey = f"{eid}:{d['trait']}"
@@ -1176,14 +1273,14 @@ class IllustrationChapter:
                                         "assumption_ru": str(d.get("assumption_ru", "")),
                                     }
                                 )
-                            fid_str = str(single_fact["fact_id"])
-                            allowed_fids.append(fid_str)
+                            fids_tuple = tuple(str(f["fact_id"]) for f in entity_facts)
+                            allowed_fids.extend(fids_tuple)
                             app = IllustrationAppearance(
                                 entity_id=eid,
                                 name_ru=display_name_ru,
-                                description_ru=single_desc_ru,
-                                description_en=single_desc_en,
-                                fact_ids=(fid_str,),
+                                description_ru=joined_ru,
+                                description_en=joined_en,
+                                fact_ids=fids_tuple,
                                 assumptions_ru=(),
                                 name_en=eng_name,
                             )
@@ -2495,6 +2592,15 @@ class IllustrationChapter:
                 return _ValidationOutcome(
                     ok=False,
                     repair_reason="scene_composition_en должен быть написан строго на английском языке без кириллицы",
+                )
+            bubble_term = find_speech_bubble_term(payload.scene_composition_en)
+            if bubble_term is not None:
+                return _ValidationOutcome(
+                    ok=False,
+                    repair_reason=(
+                        f"в scene_composition_en запрещены комиксные речевые облачка и подписи ({bubble_term}); "
+                        "опиши сцену и эмоции героев чисто визуально без речевых облачков и надписей"
+                    ),
                 )
             if revision.settings.style == ILLUSTRATION_STYLE_MONOCHROME_INK:
                 raw_names = scope.summary.get("entity_names")

@@ -645,3 +645,37 @@ def test_selection_candidates_and_prompt_strict_schema_descriptions_and_depicted
     missing_depicted = {k: v for k, v in valid_prompt.items() if k != "depicted_entity_ids"}
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.ILLUSTRATION_PROMPT, json.dumps(missing_depicted))
+
+
+def test_illustration_prompt_used_fact_ids_cap_128_and_required_in_strict_schema() -> None:
+    prompt_strict = strict_json_schema(
+        schema_for(LLMResponseKind.ILLUSTRATION_PROMPT, contract_version=1)
+    )
+    assert "used_fact_ids" in prompt_strict["required"]
+    used_fids_prop = prompt_strict["properties"]["used_fact_ids"]
+    assert "minItems" not in used_fids_prop
+    assert "default" not in used_fids_prop
+
+    base = _valid_json_for(LLMResponseKind.ILLUSTRATION_PROMPT)
+    dto_48 = parse_payload(
+        LLMResponseKind.ILLUSTRATION_PROMPT,
+        json.dumps({**base, "used_fact_ids": [f"f-{i}" for i in range(48)]}),
+    )
+    assert len(dto_48.used_fact_ids) == 48
+
+    dto_128 = parse_payload(
+        LLMResponseKind.ILLUSTRATION_PROMPT,
+        json.dumps({**base, "used_fact_ids": [f"f-{i}" for i in range(128)]}),
+    )
+    assert len(dto_128.used_fact_ids) == 128
+
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(
+            LLMResponseKind.ILLUSTRATION_PROMPT,
+            json.dumps({**base, "used_fact_ids": [f"f-{i}" for i in range(129)]}),
+        )
+
+    missing_used = {k: v for k, v in base.items() if k != "used_fact_ids"}
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.ILLUSTRATION_PROMPT, json.dumps(missing_used))
+

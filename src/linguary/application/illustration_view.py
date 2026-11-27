@@ -1060,6 +1060,13 @@ def build_illustration_view(
         )
 
 
+_DEFAULT_VISIBLE_REGISTRY_KINDS: tuple[IllustrationRegistryKind, ...] = (
+    IllustrationRegistryKind.ENTITY,
+    IllustrationRegistryKind.FACT,
+    IllustrationRegistryKind.DESIGN,
+)
+
+
 def build_illustration_registry_view(
     unit_of_work: UnitOfWork,
     book_id: str,
@@ -1118,13 +1125,32 @@ def build_illustration_registry_view(
             ):
                 is_current = False
 
-        rows, total = tx.illustrations.query_registry_items(
-            target_generation.id,
-            entity_id=entity_id,
-            kind=kind,
-            offset=offset,
-            limit=limit,
-        )
+        if kind is None:
+            try:
+                rows, total = tx.illustrations.query_registry_items(
+                    target_generation.id,
+                    entity_id=entity_id,
+                    kind=None,
+                    kinds=_DEFAULT_VISIBLE_REGISTRY_KINDS,
+                    offset=offset,
+                    limit=limit,
+                )
+            except TypeError:
+                rows, total = tx.illustrations.query_registry_items(
+                    target_generation.id,
+                    entity_id=entity_id,
+                    kind=None,
+                    offset=offset,
+                    limit=limit,
+                )
+        else:
+            rows, total = tx.illustrations.query_registry_items(
+                target_generation.id,
+                entity_id=entity_id,
+                kind=kind,
+                offset=offset,
+                limit=limit,
+            )
         items = tuple(
             IllustrationRegistryItemView(
                 kind=row.kind.value,

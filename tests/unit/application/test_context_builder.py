@@ -4178,3 +4178,19 @@ def test_a2_v3_dialogue_dash_prompt_rule_plural_you_and_noun_infinitive_guard() 
     assert "не ставь «— » в той же строке после точки" not in _TRANSLATION_INSTRUCTIONS
     assert "не ставь «— » в той же строке после точки" not in _SEGMENT_TRANSLATION_RULE
 
+
+def test_narrative_prompt_forbids_rhymed_verse_and_schema_describes_glossary_hints() -> None:
+    """WP7: narrative instructions ban rhymed verse requests; BlockResultSchema.glossary_hints has description without minItems."""
+    from linguary.adapters.llm.schemas import BlockResultSchema
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    assert "никогда не требуй рифмованного или стихотворного перевода" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "подстрочник без рифмы" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    schema = BlockResultSchema.model_json_schema()
+    hints_prop = schema["properties"]["glossary_hints"]
+    assert "GLOSSARY_ONLY" in hints_prop.get("description", "")
+    assert "minItems" not in hints_prop
+    assert "glossary_hints" in schema["required"]
+
+

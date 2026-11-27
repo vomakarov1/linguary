@@ -3782,3 +3782,82 @@ def test_result_validator_v3_allows_embedded_quote_in_narrative_and_rejects_line
     err_dash = rejection(bad_dash, unit=single_unit, validation_policy="v3")
     assert err_dash.violation is not None
     assert err_dash.violation.rule_code == "dialogue_punctuation"
+
+
+def test_post_speech_narrative_paragraph_allows_1_line_and_3_line_and_rejects_absorbed_neighbor() -> None:
+    """WP4: post-speech authorial sentences pass in 1-line dash or 3-line layout; absorbed neighbors fail."""
+    from linguary.application.validators.paragraphs import (
+        _count_post_speech_narrative_sentences,
+        paragraph_violation,
+    )
+
+    ollivander_source = (
+        "‘Well, now – Mr Potter. Let me see.’ "
+        "He pulled a long tape measure with silver markings out of his pocket. "
+        "‘Which is your wand arm?’"
+    )
+    assert _count_post_speech_narrative_sentences(ollivander_source) == 1
+    assert _count_post_speech_narrative_sentences("‘Yes.’ ‘No.’") == 0
+    assert _count_post_speech_narrative_sentences('‘He said, “Wait.” Next.’') == 0
+    assert _count_post_speech_narrative_sentences('"Hello," he said. "How are you?"') == 0
+
+    one_line = (
+        "— Что ж, мистер Поттер. Посмотрим. "
+        "— Он вынул из кармана длинную рулетку с серебряными делениями. "
+        "— Какой рукой вы держите палочку?"
+    )
+    three_line = (
+        "— Что ж, мистер Поттер. Посмотрим.\n"
+        "Он вынул из кармана длинную рулетку с серебряными делениями.\n"
+        "— Какой рукой вы держите палочку?"
+    )
+    absorbed_neighbor = (
+        "— Что ж, мистер Поттер. Посмотрим. "
+        "— Он вынул из кармана длинную рулетку с серебряными делениями. "
+        "— Какой рукой вы держите палочку?\n"
+        "Гарри вытянул правую руку."
+    )
+    lowercase_extra = (
+        "— Что ж, мистер Поттер. Посмотрим.\n"
+        "он вынул из кармана рулетку.\n"
+        "— Какой рукой вы держите палочку?"
+    )
+    too_many_non_dash = (
+        "— Что ж, мистер Поттер. Посмотрим.\n"
+        "Он вынул из кармана рулетку.\n"
+        "Гарри замер."
+    )
+
+    block = make_block(order=0, text=ollivander_source)
+    unit = make_unit((block,))
+    assert paragraph_violation("b1", source_text=ollivander_source, translated_text=one_line) is None
+    assert paragraph_violation("b1", source_text=ollivander_source, translated_text=three_line) is None
+    assert validate(make_response((make_block_result(block, translated_text=one_line),)), unit=unit, validation_policy="v3")[0].translated_text == one_line
+    assert validate(make_response((make_block_result(block, translated_text=three_line),)), unit=unit, validation_policy="v3")[0].translated_text == three_line
+
+    assert paragraph_violation("b1", source_text=ollivander_source, translated_text=absorbed_neighbor) is not None
+    assert paragraph_violation("b1", source_text=ollivander_source, translated_text=lowercase_extra) is not None
+    assert paragraph_violation("b1", source_text=ollivander_source, translated_text=too_many_non_dash) is not None
+    assert paragraph_violation("b1", source_text="‘Yes.’ ‘No.’", translated_text="— Да.\nАвторский текст.\n— Нет.") is not None
+
+    # Mid-line lowercase attribution + resumed speech on line 1 must NOT block valid 3-line layout.
+    mid_attr_source = (
+        "‘Ah, yes,’ said Mr Ollivander. ‘I remember every wand I’ve ever sold, Mr Potter.’ "
+        "He pulled a long tape measure from his pocket. "
+        "‘Which is your wand arm?’"
+    )
+    mid_attr_three_line = (
+        "— А, да, — сказал мистер Олливандер. — Я помню каждую палочку, которую когда-либо продал, мистер Поттер.\n"
+        "Он вытащил из кармана длинную измерительную ленту.\n"
+        "— Какой рукой вы держите палочку?"
+    )
+    mid_attr_absorbed = (
+        "— А, да, — сказал мистер Олливандер. — Я помню каждую палочку. "
+        "— Он вытащил из кармана длинную измерительную ленту. "
+        "— Какой рукой вы держите палочку?\n"
+        "Гарри вытянул правую руку."
+    )
+    assert paragraph_violation("b1", source_text=mid_attr_source, translated_text=mid_attr_three_line) is None
+    assert paragraph_violation("b1", source_text=mid_attr_source, translated_text=mid_attr_absorbed) is not None
+
+

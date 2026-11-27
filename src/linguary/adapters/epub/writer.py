@@ -183,6 +183,10 @@ a.lg-ref {
   color: inherit;
 }
 
+a.lg-ref + a.lg-ref {
+  margin-left: 0.18em;
+}
+
 a.lg-ref sup,
 .lg-num {
   font-size: 0.7em;

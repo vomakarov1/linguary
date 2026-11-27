@@ -99,11 +99,15 @@ def dispatch_scope_task(
     if resolved_book_id is None:
         raise ValueError(f"не удалось определить book_id для поколения {generation_id}")
 
-    prior_tasks = [
-        t
-        for t in tx.tasks.list_for_book(resolved_book_id)
-        if t.task_type is task_type and t.scope_id == scope.id
-    ]
+    list_for_scope = getattr(tx.tasks, "list_for_scope", None)
+    if callable(list_for_scope):
+        prior_tasks = list(list_for_scope(resolved_book_id, task_type, scope.id))
+    else:
+        prior_tasks = [
+            t
+            for t in tx.tasks.list_for_book(resolved_book_id)
+            if t.task_type is task_type and t.scope_id == scope.id
+        ]
     max_activation = max(
         (_parse_activation_suffix(t.operation_id, generation_id) for t in prior_tasks),
         default=0,

@@ -2986,3 +2986,425 @@ def test_materialize_for_rejects_null_translation_without_list_edits_on_translat
     assert materialized_go.language_notes == ()
 
 
+@pytest.mark.asyncio
+async def test_wp4_batch_expectation_repair_on_10_blocks_3_blocks_and_payload_error(monkeypatch):
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS,
+        ChapterCorrectionResponse,
+        ChapterCorrectionV2Response,
+        CorrectedBlockResponse,
+        CorrectionIssue,
+        CorrectionSnapshot,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+        UnchangedBlockResponse,
+    )
+    from linguary.application.use_cases import correct_chapter as cc_mod
+    from linguary.application.use_cases.correct_chapter import CorrectChapter, _batch_expectation
+    from linguary.domain import ProcessingTask
+
+    def _build_env(num_blocks: int, *, v2: bool):
+        texts = tuple(f"Sentence number {i}." for i in range(1, num_blocks + 1))
+        section = make_analysis_section(texts=texts)
+        doc = make_analysis_document((section,))
+        blocks = section.blocks
+        plan = TreatmentPlan.of_treatments(
+            section.id,
+            tuple((b.id, BlockTreatment.TRANSLATE) for b in blocks),
+        )
+        analysis = ChapterAnalysis.create(
+            id=f"analysis-{num_blocks}",
+            section_id=section.id,
+            treatment_plan=plan,
+            translation_instructions="",
+            chapter_summary="",
+            expected_block_ids=tuple(b.id for b in blocks),
+        )
+        params = {
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 2,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        }
+        if v2:
+            snapshot = CorrectionSnapshotV2(
+                model="gpt-test",
+                route={
+                    "provider": "openai_compatible",
+                    "base_url": "https://example.test/v1",
+                    "proxy": {"mode": "direct"},
+                    "route_id": "r1",
+                },
+                parameters=params,
+                prompt="Propose.",
+                review_prompt="Review.",
+                versions=CORRECTION_VERSIONS_V2,
+            )
+        else:
+            snapshot = CorrectionSnapshot(
+                model="gpt-test",
+                route={
+                    "provider": "openai_compatible",
+                    "base_url": "https://example.test/v1",
+                    "proxy": {"mode": "direct"},
+                    "route_id": "r1",
+                },
+                parameters=params,
+                prompt="Correct.",
+                versions=CORRECTION_VERSIONS,
+            )
+        results = {
+            b.id: BlockProcessingResult(
+                block_id=b.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=f"Предложение номер {i}.",
+            )
+            for i, b in enumerate(blocks, start=1)
+        }
+        cond_id = str(uuid4())
+        run_id = str(uuid4())
+        task_id = str(uuid4())
+        bindings = {
+            b.id: {
+                "book_id": doc.id,
+                "conditions_id": cond_id,
+                "attempt_id": str(uuid4()),
+                "artifact_revision_id": str(uuid4()),
+            }
+            for b in blocks
+        }
+        generations = {b.id: 1 for b in blocks}
+        run = SimpleNamespace(id=run_id, glossary_snapshot=GlossarySnapshot())
+        conditions = SimpleNamespace(id=cond_id, payload={"schema_version": 1, "versions": {"validators": 3}})
+        inputs = CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=blocks,
+            results=results,
+            bindings=bindings,
+            input_generations=generations,
+        )
+        expected_identity = correction_task_identity(
+            book_id=doc.id,
+            run_id=run.id,
+            section_id=section.id,
+            input_generation="gen-1",
+            policy_version=snapshot.policy_version,
+        )
+        task = ProcessingTask(
+            id=task_id,
+            book_id=doc.id,
+            task_type=TaskType.CHAPTER_CORRECTION,
+            scope_id=section.id,
+            status=TaskStatus.RUNNING,
+            attempts=1,
+            operation_id=expected_identity.operation_id,
+            policy_version=snapshot.policy_version,
+        )
+        task_binding = {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "payload_json": {
+                "run_id": run.id,
+                "section_id": section.id,
+                "input_generation": "gen-1",
+            },
+        }
+        attempts: dict[str, SimpleNamespace] = {}
+        stored_bindings: dict[tuple[str, str], dict] = {("task", task.id): task_binding}
+        fake_tx = SimpleNamespace(
+            tasks=SimpleNamespace(get=lambda tid: task if tid == task.id else None),
+            results=SimpleNamespace(replace_results=lambda *_a, **_kw: None),
+            work=SimpleNamespace(
+                get_binding=lambda kind, eid: stored_bindings.get((kind, eid)),
+                bind=lambda kind, eid, **kw: stored_bindings.__setitem__(
+                    (kind, eid), {"payload_json": kw.get("payload", {}), **kw}
+                ),
+                get_attempt=lambda aid: attempts.get(aid),
+                transition_attempt=lambda aid, state, **_kw: setattr(attempts[aid], "state", state),
+                archive_artifacts=lambda items: tuple(str(uuid4()) for _ in items),
+                replace_result_binding=lambda *_a, **_kw: None,
+                stale_reviews=lambda *_a, **_kw: None,
+                add_correction_candidates=lambda *_a, **_kw: None,
+                replace_correction_checks=lambda *_a, **_kw: None,
+                list_correction_candidates=lambda *_a, **_kw: (),
+            ),
+        )
+        return doc, section, blocks, inputs, snapshot, task, attempts, fake_tx
+
+    monkeypatch.setattr(cc_mod, "task_matches_inputs", lambda *_a, **_kw: True)
+    monkeypatch.setattr(cc_mod, "record_rejection", lambda *_a, **_kw: None)
+    monkeypatch.setattr(cc_mod, "finalize_response", lambda *_a, **_kw: None)
+
+    # 1) 10-block V2 batch: validation error on 1 block (b3) -> repair asks for full batch array.
+    doc10, sec10, blocks10, inputs10, snap10, task10, attempts10, tx10 = _build_env(10, v2=True)
+    monkeypatch.setattr(cc_mod, "correction_inputs", lambda *_a, **_kw: inputs10)
+    seen_requests_10: list = []
+
+    class _Client10Validation:
+        async def generate(self, request):
+            seen_requests_10.append(request)
+            ctx = request.call_context
+            attempts10[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                state="validated",
+                task_id=task10.id,
+                run_id=inputs10.run.id,
+                conditions_id=inputs10.conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task10.attempts,
+                    "operation_id": task10.operation_id,
+                },
+            )
+            if len(seen_requests_10) == 1:
+                bad_issue = CorrectionIssue(
+                    field_path="translated_text",
+                    source_quote="Sentence number 3.",
+                    current_evidence=CurrentQuoteEvidence(field_path="translated_text", quote="Предложение номер 3."),
+                    problem="Опечатка",
+                    minimal_fix_reason="Исправить",
+                )
+                payload = ChapterCorrectionV2Response(
+                    blocks=tuple(
+                        ProposedBlockResponse(
+                            block_id=b.id,
+                            translated_text="Первая строка.\nЛишняя вторая строка.",
+                            glossary_hints=(),
+                            language_notes=(),
+                            issues=(bad_issue,),
+                        )
+                        if i == 2
+                        else UnchangedBlockResponse(b.id)
+                        for i, b in enumerate(blocks10)
+                    )
+                )
+            else:
+                payload = ChapterCorrectionV2Response(
+                    blocks=tuple(UnchangedBlockResponse(b.id) for b in blocks10)
+                )
+            return LLMResponse(
+                payload=payload,
+                raw_content='{"blocks": []}',
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler10 = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(tx10)),
+        llm_client=_Client10Validation(),
+        snapshot=snap10,
+        validator=make_validator(),
+    )
+    checked10 = await handler10._propose_group(
+        CorrectChapterCommand(doc10.id, sec10.id, task10.id),
+        tuple(b.id for b in blocks10),
+    )
+    assert checked10 == 10
+    assert len(seen_requests_10) == 2
+    repair10 = seen_requests_10[1].repair_instructions[-1]
+    assert "верни полный массив всех блоков из исходного запроса" in repair10
+    assert "- b3:" in repair10
+    assert "Верни результат ровно для этих блоков" not in repair10
+
+    # 2) 10-block V2 batch: LLMPayloadError from validate_for() -> repair lists all 10 blocks.
+    seen_requests_payload: list = []
+
+    class _Client10PayloadError:
+        async def generate(self, request):
+            seen_requests_payload.append(request)
+            ctx = request.call_context
+            attempts10[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                state="validated",
+                task_id=task10.id,
+                run_id=inputs10.run.id,
+                conditions_id=inputs10.conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task10.attempts,
+                    "operation_id": task10.operation_id,
+                },
+            )
+            if len(seen_requests_payload) == 1:
+                # Model returned only 1 block instead of 10 -> validate_for raises LLMPayloadError.
+                payload = ChapterCorrectionV2Response(
+                    blocks=(UnchangedBlockResponse(blocks10[2].id),)
+                )
+            else:
+                payload = ChapterCorrectionV2Response(
+                    blocks=tuple(UnchangedBlockResponse(b.id) for b in blocks10)
+                )
+            return LLMResponse(
+                payload=payload,
+                raw_content='{"blocks": [{"block_id": "b3", "status": "unchanged"}]}',
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler10_payload = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(tx10)),
+        llm_client=_Client10PayloadError(),
+        snapshot=snap10,
+        validator=make_validator(),
+    )
+    checked_payload = await handler10_payload._propose_group(
+        CorrectChapterCommand(doc10.id, sec10.id, task10.id),
+        tuple(b.id for b in blocks10),
+    )
+    assert checked_payload == 10
+    assert len(seen_requests_payload) == 2
+    repair_payload = seen_requests_payload[1].repair_instructions[-1]
+    assert "Верни результат ровно для этих блоков" in repair_payload
+    for idx in range(1, 11):
+        assert f"- b{idx}:" in repair_payload
+
+    # 3) 3-block V2 batch: validation error on 1 of 3 blocks -> all 3 blocks listed in repair.
+    doc3, sec3, blocks3, inputs3, snap3, task3, attempts3, tx3 = _build_env(3, v2=True)
+    monkeypatch.setattr(cc_mod, "correction_inputs", lambda *_a, **_kw: inputs3)
+    seen_requests_3: list = []
+
+    class _Client3Validation:
+        async def generate(self, request):
+            seen_requests_3.append(request)
+            ctx = request.call_context
+            attempts3[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                state="validated",
+                task_id=task3.id,
+                run_id=inputs3.run.id,
+                conditions_id=inputs3.conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task3.attempts,
+                    "operation_id": task3.operation_id,
+                },
+            )
+            if len(seen_requests_3) == 1:
+                issue = CorrectionIssue(
+                    field_path="translated_text",
+                    source_quote="Sentence number 2.",
+                    current_evidence=CurrentQuoteEvidence(field_path="translated_text", quote="Предложение номер 2."),
+                    problem="Опечатка",
+                    minimal_fix_reason="Исправить",
+                )
+                payload = ChapterCorrectionV2Response(
+                    blocks=(
+                        UnchangedBlockResponse(blocks3[0].id),
+                        ProposedBlockResponse(
+                            block_id=blocks3[1].id,
+                            translated_text="Первая строка.\nВторая лишняя.",
+                            glossary_hints=(),
+                            language_notes=(),
+                            issues=(issue,),
+                        ),
+                        UnchangedBlockResponse(blocks3[2].id),
+                    )
+                )
+            else:
+                payload = ChapterCorrectionV2Response(
+                    blocks=tuple(UnchangedBlockResponse(b.id) for b in blocks3)
+                )
+            return LLMResponse(
+                payload=payload,
+                raw_content='{"blocks": []}',
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler3 = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(tx3)),
+        llm_client=_Client3Validation(),
+        snapshot=snap3,
+        validator=make_validator(),
+    )
+    checked3 = await handler3._propose_group(
+        CorrectChapterCommand(doc3.id, sec3.id, task3.id),
+        tuple(b.id for b in blocks3),
+    )
+    assert checked3 == 3
+    repair3 = seen_requests_3[1].repair_instructions[-1]
+    assert "- b1:" in repair3 and "- b2:" in repair3 and "- b3:" in repair3
+
+    # 4) V1 CorrectChapter._group: LLMPayloadError attaches full batch_expectation.
+    doc_v1, sec_v1, blocks_v1, inputs_v1, snap_v1, task_v1, attempts_v1, tx_v1 = _build_env(3, v2=False)
+    monkeypatch.setattr(cc_mod, "correction_inputs", lambda *_a, **_kw: inputs_v1)
+    seen_requests_v1: list = []
+
+    class _ClientV1Payload:
+        async def generate(self, request):
+            seen_requests_v1.append(request)
+            ctx = request.call_context
+            attempts_v1[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                state="validated",
+                task_id=task_v1.id,
+                run_id=inputs_v1.run.id,
+                conditions_id=inputs_v1.conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task_v1.attempts,
+                    "operation_id": task_v1.operation_id,
+                },
+            )
+            if len(seen_requests_v1) == 1:
+                payload = ChapterCorrectionResponse(
+                    blocks=(
+                        CorrectedBlockResponse(
+                            block_id=blocks_v1[0].id,
+                            translated_text="Предложение номер 1.",
+                            glossary_hints=(),
+                            language_notes=(),
+                        ),
+                    )
+                )
+            else:
+                payload = ChapterCorrectionResponse(
+                    blocks=tuple(UnchangedBlockResponse(b.id) for b in blocks_v1)
+                )
+            return LLMResponse(
+                payload=payload,
+                raw_content='{"blocks": []}',
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler_v1 = CorrectChapter(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(tx_v1)),
+        llm_client=_ClientV1Payload(),
+        snapshot=snap_v1,
+        validator=make_validator(),
+    )
+    checked_v1 = await handler_v1._group(
+        CorrectChapterCommand(doc_v1.id, sec_v1.id, task_v1.id),
+        tuple(b.id for b in blocks_v1),
+    )
+    assert checked_v1 == 3
+    repair_v1 = seen_requests_v1[1].repair_instructions[-1]
+    assert "- b1:" in repair_v1 and "- b2:" in repair_v1 and "- b3:" in repair_v1
+
+    # 5) _batch_expectation fallback when inputs.analysis is None.
+    no_analysis_inputs = SimpleNamespace(
+        blocks=blocks3,
+        document=doc3,
+        analysis=None,
+        results=inputs3.results,
+    )
+    fallback_exp = _batch_expectation(no_analysis_inputs, tuple(b.id for b in blocks3))
+    assert fallback_exp.target_language == doc3.target_language
+    assert fallback_exp.block_ids == tuple(b.id for b in blocks3)
+    assert all(b.treatment is BlockTreatment.TRANSLATE for b in fallback_exp.blocks)
+
+
+

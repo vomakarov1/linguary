@@ -24,7 +24,11 @@ from linguary.application.ports.llm import (
     LLMResponseKind, LLMTransportError,
 )
 from linguary.application.recovery import RecoveryError
-from linguary.composition.book_runtime import route_snapshot
+from linguary.composition.book_runtime import (
+    _operational_llm_overrides,
+    route_snapshot,
+    routes_compatible,
+)
 from linguary.composition.llm import ConfiguredLLMClient
 from linguary.domain import LLMCallStage, ProcessingRunStatus, TaskStatus, TaskType
 from linguary.domain.book_conditions import WorkStateError, thaw
@@ -84,7 +88,7 @@ GLOSSARY_ONLY — подсказок и null вместо перевода, READ
 3) фактическую точность заметок (language_notes и glossary_hints.note), соответствие цитат оригиналу и правильное русское грамматическое согласование в тексте заметок;
 4) грамматический род животных, существ и местоимений в переводе;
 5) последовательный регистр обращения «ты/вы» между одними и теми же персонажами;
-6) стыки соседних блоков — согласованность пунктуации прямой речи, обращений и связности реплик на границе абзацев.
+6) стыки соседних блоков — согласованность пунктуации прямой речи, обращений и связности реплик на границе абзацев; если в одном абзаце после реплики идёт самостоятельное авторское предложение, оформляй его в одну строку через длинное тире с прописной буквы («— Реплика? — Авторское предложение.») либо с переносом строк (если после авторского предложения речь продолжается — три строки «— Реплика 1.\\nАвторское предложение.\\n— Реплика 2.», но не две строки вида «Авторское предложение. — Реплика 2.» и не кавычки-ёлочки с начала абзаца).
 Если доказуемого дефекта нет, верни unchanged."""
 
 CORRECTION_REVIEW_PROMPT = """Оцени каждое неизменяемое предложение исправления (candidate) по
@@ -156,6 +160,10 @@ class CorrectionRuntimeResolver:
             llm.proxy_url,
             llm.api_key,
             getattr(llm, 'debug_llm_payloads', False),
+            getattr(llm, 'timeout_seconds', None),
+            getattr(llm, 'max_attempts', None),
+            getattr(llm, 'input_price_per_mtok', None),
+            getattr(llm, 'output_price_per_mtok', None),
         )
 
     def _fingerprint(self, conditions, snapshot, settings) -> tuple:
@@ -205,15 +213,16 @@ class CorrectionRuntimeResolver:
 
     def settings_for(self, snapshot):
         current = self.runtime.current.settings
-        if route_snapshot(current.llm) != thaw(snapshot.route) or not current.llm.api_key:
+        if not routes_compatible(route_snapshot(current.llm), thaw(snapshot.route)) or not current.llm.api_key:
             raise ConditionsError('route_unavailable')
+        llm_kwargs: dict[str, Any] = {
+            **thaw(snapshot.parameters),
+            'model': snapshot.model,
+            'provider': snapshot.route['provider'],
+            **_operational_llm_overrides(current.llm),
+        }
         try:
-            llm = LLMSettings(
-                **thaw(snapshot.parameters), model=snapshot.model,
-                provider=snapshot.route['provider'], base_url=current.llm.base_url,
-                proxy_mode=current.llm.proxy_mode, proxy_url=current.llm.proxy_url,
-                api_key=current.llm.api_key, debug_llm_payloads=current.llm.debug_llm_payloads,
-            )
+            llm = LLMSettings(**llm_kwargs)
         except (TypeError, ValueError):
             raise ConditionsError('correction_policy_unavailable') from None
         return replace(current, llm=llm)

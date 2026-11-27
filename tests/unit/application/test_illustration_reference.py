@@ -915,7 +915,7 @@ def test_design_large_entity_facts_bounded_deterministically_and_closed_traits_b
 
 
 async def test_alias_blocking_batched_and_same_name_not_identity(tmp_path: Path) -> None:
-    # 7 mentions named "John" -> C(7, 2) = 21 pairs -> must batch into <=16 pairs per ALIAS request.
+    # 7 mentions named "John" -> star + chain = 2*7 - 3 = 11 pairs -> fits in 1 ALIAS batch (<=16).
     # Model returns "different" for all pairs -> same name MUST NOT merge into one entity!
     sections = [
         (f"sec-{i}", f"Chapter {i}", [(f"b-{i}", f"John number {i} spoke quietly.")])
@@ -966,8 +966,8 @@ async def test_alias_blocking_batched_and_same_name_not_identity(tmp_path: Path)
     ref, gen_id = _create_and_plan(harness)
     await _drain_ref_tasks(harness, ref)
 
-    assert sum(alias_batch_sizes) == 21
-    assert len(alias_batch_sizes) == 2
+    assert sum(alias_batch_sizes) == 11
+    assert len(alias_batch_sizes) == 1
     assert all(1 <= sz <= 16 for sz in alias_batch_sizes)
     with harness.uow.transaction() as tx:
         entities, total = tx.illustrations.query_registry_items(
@@ -2756,6 +2756,418 @@ async def test_extract_composite_split_preserves_canonical_uuids_and_realiases_c
             gen_id, kind=IllustrationRegistryKind.FACT
         )
         assert {f.raw_payload()["block_id"] for f in facts_reg} == {uuid_b1, uuid_b2}
+
+
+async def test_alias_blocking_batches_over_16_on_12_same_name_mentions(tmp_path: Path) -> None:
+    # 12 mentions named "John" -> star + chain = 2*12 - 3 = 21 pairs -> 2 batches [16, 5].
+    sections = [
+        (f"sec-{i}", f"Chapter {i}", [(f"b-{i}", f"John number {i} spoke quietly.")])
+        for i in range(12)
+    ]
+    alias_batch_sizes: list[int] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            mentions = []
+            covered = []
+            for u in data["units"]:
+                covered.append(u["source_unit_id"])
+                blk = u["blocks"][0]
+                mentions.append(
+                    IllustrationMentionDTO(
+                        mention_id=f"m-{blk['block_id']}",
+                        name="John",
+                        entity_kind="person",
+                        alias_of_hint=None,
+                        quote_block_id=blk["block_id"],
+                        quote="John",
+                    )
+                )
+            return IllustrationExtractResponse(
+                mentions=tuple(mentions),
+                facts=(),
+                covered_source_unit_ids=tuple(covered),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            pairs = data["pairs"]
+            alias_batch_sizes.append(len(pairs))
+            return IllustrationAliasResponse(
+                decisions=tuple(
+                    IllustrationAliasDecisionDTO(
+                        pair_id=p["pair_id"], verdict="different", evidence_fact_ids=()
+                    )
+                    for p in pairs
+                )
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(f"unexpected {req.kind}")
+
+    harness = _seed_book_with_narrative(
+        tmp_path, sections_blocks=sections, handler=_handler, book_id="book-12-johns"
+    )
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    assert alias_batch_sizes == [16, 5]
+    assert sum(alias_batch_sizes) == 21
+    with harness.uow.transaction() as tx:
+        entities, total = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.ENTITY
+        )
+        assert total == 12 and len(entities) == 12
+
+
+def test_build_alias_candidate_pairs_linear_star_chain_homonym_hint_and_anon_dedup() -> None:
+    # 1. k=68 identical-name mentions -> exactly 2*68 - 3 = 133 pairs (linear, not C(68,2)=2278).
+    mentions_68 = [
+        {
+            "mention_key": f"m-{i:03d}",
+            "name": "Harry",
+            "entity_kind": "person",
+            "position_key": format_position_key(i // 10, i % 10, 0),
+        }
+        for i in range(68)
+    ]
+    fact_counts = {"m-042": 5}
+    pairs_68 = build_alias_candidate_pairs(mentions_68, fact_counts=fact_counts)
+    assert len(pairs_68) == 133
+    # Permuting input order produces identical pairs!
+    assert build_alias_candidate_pairs(list(reversed(mentions_68)), fact_counts=fact_counts) == pairs_68
+    # m-042 has the most facts so it is the star anchor connected to all 67 others.
+    anchor_neighbors = {b if a == "m-042" else a for a, b in pairs_68 if "m-042" in (a, b)}
+    assert len(anchor_neighbors) == 67
+
+    # 2. Homonym on anchor: anchor is different from all group[1:], while chain links group[1:] together.
+    small_6 = [
+        {
+            "mention_key": f"p-{i}",
+            "name": "George",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, i, 0),
+        }
+        for i in range(6)
+    ]
+    pairs_6 = build_alias_candidate_pairs(small_6, fact_counts={"p-0": 3})
+    assert len(pairs_6) == 2 * 6 - 3
+    diff_edges = [p for p in pairs_6 if "p-0" in p]
+    same_edges = [p for p in pairs_6 if "p-0" not in p]
+    clusters = resolve_verdict_graph_clusters(
+        [m["mention_key"] for m in small_6],
+        same_edges=same_edges,
+        diff_edges=diff_edges,
+    )
+    assert ("p-0",) in clusters
+    assert ("p-1", "p-2", "p-3", "p-4", "p-5") in clusters
+
+    # 3. alias_of_hint on a lower-ranked group member is preserved in cross-group reps.
+    hint_mentions = [
+        {
+            "mention_key": f"boy-{i}",
+            "name": "the boy",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, i, 0),
+            **({"alias_of_hint": "Harry Potter"} if i == 5 else {}),
+        }
+        for i in range(6)
+    ] + [
+        {
+            "mention_key": "hp-0",
+            "name": "Harry Potter",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, 10, 0),
+        }
+    ]
+    hint_pairs = build_alias_candidate_pairs(hint_mentions)
+    assert ("boy-5", "hp-0") in hint_pairs
+
+    # 4. Anonymous descriptor context blocking deduplicates repeated neighbor names.
+    anon_mentions: list[dict[str, Any]] = [
+        {
+            "mention_key": "m-anon",
+            "name": "the giant",
+            "entity_kind": "person",
+            "position_key": format_position_key(0, 10, 0),
+        }
+    ]
+    for i in range(10):
+        anon_mentions.append(
+            {
+                "mention_key": f"m-harry-{i:02d}",
+                "name": "Harry",
+                "entity_kind": "person",
+                "position_key": format_position_key(0, 11 + i, 0),
+            }
+        )
+    for j in range(3):
+        anon_mentions.append(
+            {
+                "mention_key": f"m-other-{j}",
+                "name": f"Friend{j}",
+                "entity_kind": "person",
+                "position_key": format_position_key(0, 30 + j, 0),
+            }
+        )
+    anon_pairs = build_alias_candidate_pairs(anon_mentions)
+    anon_targets = {b if a == "m-anon" else a for a, b in anon_pairs if "m-anon" in (a, b)}
+    assert anon_targets == {"m-harry-00", "m-other-0", "m-other-1", "m-other-2"}
+
+
+async def test_suggested_glossary_localizes_entity_without_design_explosion_and_dedupes_chapters(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.analysis_pass_cache import decode_pass, encode_pass
+    from linguary.application.illustration_context import (
+        _collect_book_glossary_terms_ru,
+        collect_book_glossary_entries,
+    )
+    from linguary.application.llm_dto import GlossaryCandidateResponse, NarrativeAnalysisResponse
+    from linguary.domain import (
+        AnalysisPassKind,
+        AnalysisPassResult,
+        ChapterAnalysis,
+        CoverageStatus,
+        GlossaryCandidate,
+        TreatmentPlan,
+    )
+    from linguary.domain.glossary import ConceptType, TermConcept, TermStatus, TermVariant
+
+    design_entity_ids: list[str] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_EXTRACT:
+            u = data["units"][0]
+            blk = u["blocks"][0]
+            if blk["block_id"] == "b-0":
+                return IllustrationExtractResponse(
+                    mentions=(
+                        IllustrationMentionDTO(
+                            "m-quirrell", "Quirrell", "person", None, "b-0", "Quirrell"
+                        ),
+                        IllustrationMentionDTO(
+                            "m-dumbledore", "Dumbledore", "person", None, "b-0", "Dumbledore"
+                        ),
+                    ),
+                    facts=(),
+                    covered_source_unit_ids=(u["source_unit_id"],),
+                    complete=True,
+                )
+            return IllustrationExtractResponse(
+                mentions=(),
+                facts=(),
+                covered_source_unit_ids=(u["source_unit_id"],),
+                complete=True,
+            )
+        if req.kind is LLMResponseKind.ILLUSTRATION_ALIAS:
+            return IllustrationAliasResponse(decisions=())
+        if req.kind is LLMResponseKind.ILLUSTRATION_DESIGN:
+            design_entity_ids.append(str(data["entity_id"]))
+            return IllustrationDesignResponse(entity_id=data["entity_id"], traits=())
+        raise AssertionError(req.kind)
+
+    harness = _seed_book_with_narrative(
+        tmp_path,
+        sections_blocks=[
+            ("sec-0", "Ch 1", [("b-0", "Quirrell spoke with Dumbledore.")]),
+            ("sec-1", "Ch 2", [("b-1", "Later in the corridor.")]),
+        ],
+        handler=_handler,
+        book_id="book-suggested-gloss",
+    )
+
+    # Seed:
+    # - Dumbledore: APPROVED in tx.glossary -> triggers DESIGN + localized
+    # - Quirrell: ONLY in ChapterAnalysis (suggested) -> localized, MUST NOT trigger DESIGN!
+    # - Also test chapter dedup: sec-0 has BOTH ChapterAnalysis ("Квиррелл") and NARRATIVE pass;
+    #   sec-1 has ChapterAnalysis ("Квиррел"). Frequency without double counting: tie (1 vs 1) -> sec-0 wins ("Квиррелл")!
+    with harness.uow.transaction() as tx:
+        tx.glossary.save(
+            TermConcept(
+                id="c-dumbledore",
+                book_id=harness.book_id,
+                type=ConceptType.PERSON,
+                canonical_source_text="Dumbledore",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant(
+                        concept_id="c-dumbledore",
+                        language="ru",
+                        text="Дамблдор",
+                        status=TermStatus.APPROVED,
+                    ),
+                ),
+            )
+        )
+        # Put conflicting candidate "Квиррел" into sec-0 NARRATIVE pass to prove ChapterAnalysis
+        # deduplicates sec-0 (without dedup, "Квиррел" would have count 2 and beat "Квиррелл"!).
+        pass_sec0 = next(
+            p
+            for p in tx.analyses.list_passes_for_book(
+                harness.book_id, pass_kind=AnalysisPassKind.NARRATIVE, scope_key=""
+            )
+            if p.section_id == "sec-0"
+        )
+        dec0 = decode_pass(pass_sec0.payload, pass_kind=AnalysisPassKind.NARRATIVE)
+        assert isinstance(dec0, NarrativeAnalysisResponse)
+        enc0 = encode_pass(
+            NarrativeAnalysisResponse(
+                translation_instructions=dec0.translation_instructions,
+                chapter_summary=dec0.chapter_summary,
+                glossary_candidates=(
+                    GlossaryCandidateResponse(
+                        source_text="Quirrell",
+                        type=ConceptType.PERSON,
+                        suggested_translation="Квиррел",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                    ),
+                ),
+                context_facts=dec0.context_facts,
+                scenes=dec0.scenes,
+            )
+        )
+        enc0["input_suggestions"] = list(pass_sec0.payload["input_suggestions"])
+        enc0["input_context"] = dict(pass_sec0.payload["input_context"])
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=pass_sec0.id,
+                book_id=pass_sec0.book_id,
+                section_id=pass_sec0.section_id,
+                pass_kind=pass_sec0.pass_kind,
+                scope_key=pass_sec0.scope_key,
+                input_sha256=pass_sec0.input_sha256,
+                output_sha256=canonical_sha(enc0),
+                conditions_id=pass_sec0.conditions_id,
+                attempt_id=pass_sec0.attempt_id,
+                payload=enc0,
+            )
+        )
+        pass_sec1 = next(
+            p
+            for p in tx.analyses.list_passes_for_book(
+                harness.book_id, pass_kind=AnalysisPassKind.NARRATIVE, scope_key=""
+            )
+            if p.section_id == "sec-1"
+        )
+        enc1 = dict(pass_sec1.payload)
+        enc1["input_context"] = {**dict(pass_sec1.payload["input_context"]), "parallel_batch": True}
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=pass_sec1.id,
+                book_id=pass_sec1.book_id,
+                section_id=pass_sec1.section_id,
+                pass_kind=pass_sec1.pass_kind,
+                scope_key=pass_sec1.scope_key,
+                input_sha256=pass_sec1.input_sha256,
+                output_sha256=canonical_sha(enc1),
+                conditions_id=pass_sec1.conditions_id,
+                attempt_id=pass_sec1.attempt_id,
+                payload=enc1,
+            )
+        )
+        tx.analyses.save(
+            harness.book_id,
+            ChapterAnalysis(
+                id="an-sec-0",
+                section_id="sec-0",
+                coverage_status=CoverageStatus.COMPLETE,
+                treatment_plan=TreatmentPlan(section_id="sec-0"),
+                translation_instructions="",
+                chapter_summary="Ch 1",
+                glossary_candidates=(
+                    GlossaryCandidate(
+                        id="gc-q0",
+                        analysis_id="an-sec-0",
+                        source_text="Quirrell",
+                        type=ConceptType.PERSON,
+                        suggested_translation="Квиррелл",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                        requires_review=False,
+                    ),
+                    GlossaryCandidate(
+                        id="gc-d0",
+                        analysis_id="an-sec-0",
+                        source_text="Dumbledore",
+                        type=ConceptType.PERSON,
+                        suggested_translation="Дамблдор-кандидат",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                        requires_review=False,
+                    ),
+                ),
+            )
+        )
+        tx.analyses.save(
+            harness.book_id,
+            ChapterAnalysis(
+                id="an-sec-1",
+                section_id="sec-1",
+                coverage_status=CoverageStatus.COMPLETE,
+                treatment_plan=TreatmentPlan(section_id="sec-1"),
+                translation_instructions="",
+                chapter_summary="Ch 2",
+                glossary_candidates=(
+                    GlossaryCandidate(
+                        id="gc-q1",
+                        analysis_id="an-sec-1",
+                        source_text="Quirrell",
+                        type=ConceptType.PERSON,
+                        suggested_translation="Квиррел",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                        requires_review=False,
+                    ),
+                    GlossaryCandidate(
+                        id="gc-f1",
+                        analysis_id="an-sec-1",
+                        source_text="FutureTerm",
+                        type=ConceptType.FICTIONAL_CONCEPT,
+                        suggested_translation="Будущий термин",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                        requires_review=False,
+                    ),
+                ),
+            )
+        )
+
+        # Verify collect_book_glossary_entries directly (approved > suggested, anti-spoiler, priority_keys).
+        all_entries = collect_book_glossary_entries(tx, harness.book_id)
+        assert all_entries["dumbledore"] == ("Dumbledore", "Дамблдор")
+        assert all_entries["quirrell"] == ("Quirrell", "Квиррелл")
+        assert all_entries["futureterm"] == ("FutureTerm", "Будущий термин")
+
+        ch0_entries = collect_book_glossary_entries(tx, harness.book_id, max_section_order=0)
+        assert "quirrell" in ch0_entries
+        assert "futureterm" not in ch0_entries
+
+        # priority_keys guarantees a suggested key beats non-priority keys when limit=1!
+        prio_terms = _collect_book_glossary_terms_ru(
+            tx,
+            harness.book_id,
+            max_section_order=0,
+            priority_keys=frozenset({"quirrell"}),
+            limit=1,
+        )
+        assert prio_terms == {"Quirrell": "Квиррелл"}
+
+    ref, gen_id = _create_and_plan(harness)
+    await _drain_ref_tasks(harness, ref)
+
+    with harness.uow.read_transaction() as tx:
+        entities, _ = tx.illustrations.query_registry_items(
+            gen_id, kind=IllustrationRegistryKind.ENTITY
+        )
+        by_name = {e.raw_payload()["canonical_name"]: e.raw_payload() for e in entities}
+        assert by_name["Dumbledore"]["glossary_translation_ru"] == "Дамблдор"
+        assert by_name["Quirrell"]["glossary_translation_ru"] == "Квиррелл"
+        # Only APPROVED Dumbledore triggered DESIGN; suggested-only Quirrell did NOT!
+        assert design_entity_ids == [by_name["Dumbledore"]["entity_id"]]
+
 
 
 

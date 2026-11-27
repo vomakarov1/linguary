@@ -72,6 +72,7 @@ from linguary.application.llm_dto import (
 )
 from linguary.application.ports.llm import LLMRequest, LLMResponseKind
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
+from linguary.application.verse import detect_verse_stanza_runs
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, canonical_sha
 from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
@@ -204,7 +205,7 @@ value, certainty (explicit, inferred, unknown). При unknown укажи value=
 В subject_anchor передай block_id и дословную quote субъекта из видимого текста этого блока, а не пересказ и не подставленное имя из другого места: для kind=speaker в subject_anchor указывай саму реплику в кавычках (или её начало в кавычках), а авторскую ремарку (said ... и т. п.) и другие основания помещай в anchors; для kind=gender и kind=pronoun_referent в subject_anchor указывай местоимение или именную группу, о которой факт, а подтверждающие фрагменты — в anchors.
 Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя у анонимных обозначений (the stranger, the giant и т. п.) до первого называния персонажа по имени в тексте.
 В glossary_candidates.note указывай только внутренние переводческие пометы: обязательный грамматический род персонажей (если неочевиден по форме), грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также точные правила склоняемости имён и фамилий — указывай несклоняемость только для действительно несклоняемых заимствованных имён и фамилий (имена на гласные вроде Элли, Мэри; женские фамилии на согласный в русском не склоняются, а мужские фамилии на согласный в русском склоняются всегда). Для составных иноязычных топонимов вроде «Прайвет-драйв» указывай грамматический род и склоняемость строго по нормам русского языка. Эти внутренние пометы не копируй в заметки читателю.
-В translation_instructions оформляй указания кратко — 3–8 общих правил на главу/фрагмент отдельными строками вида «- ...»: фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»). Запрещено превращать translation_instructions в пофразовый или поблочный подстрочник отдельных реплик. Не пиши формулировок о границах фрагмента вроде «в начале/конце фрагмента», «до конца фрагмента», «без подстановки имени из других глав» или «остаётся неназванным» без указания сюжетной границы — формулируй ограничения строго по сюжетной границе (например, до первого называния имени в тексте). Не дублируй здесь переводы имён и терминов из глоссария — при необходимости просто сошлись на глоссарий. Не ссылайся в translation_instructions на служебные метки блоков (b1, b8, b51 и т. п.) — описывай место через событие, сцену или цитату.
+В translation_instructions оформляй указания кратко — 3–8 общих правил на главу/фрагмент отдельными строками вида «- ...»: фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»). Запрещено превращать translation_instructions в пофразовый или поблочный подстрочник отдельных реплик. Не пиши формулировок о границах фрагмента вроде «в начале/конце фрагмента», «до конца фрагмента», «без подстановки имени из других глав» или «остаётся неназванным» без указания сюжетной границы — формулируй ограничения строго по сюжетной границе (например, до первого называния имени в тексте). Не дублируй здесь переводы имён и терминов из глоссария — при необходимости просто сошлись на глоссарий. Не ссылайся в translation_instructions на служебные метки блоков (b1, b8, b51 и т. п.) — описывай место через событие, сцену или цитату. Для стихов, песен и гимнов никогда не требуй рифмованного или стихотворного перевода — указывай только точный смысловой построчный подстрочник без рифмы.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, укажи start=null и end=null. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -1399,7 +1400,21 @@ class ContextBuilder:
         # Контракт 1: нет плана и нет english_help. Строгая схема v1 не принимает segments.
         contract_version = 4 if self._english_help else version
         segment_lines = contract_version != 1
-        shape = _shape_instructions(unit, segment_lines=segment_lines)
+        verse_block_ids = (
+            frozenset()
+            if self._english_help
+            else frozenset(
+                verse_block.id
+                for run in detect_verse_stanza_runs(textual_blocks(section))
+                for verse_block in run
+            )
+        )
+        shape = _shape_instructions(
+            unit,
+            segment_lines=segment_lines,
+            english_help=self._english_help,
+            verse_block_ids=verse_block_ids,
+        )
         if shape:
             instructions = instructions.rstrip() + "\n\n" + shape
         if unit.section_id != section.id:
@@ -2984,6 +2999,17 @@ _SEGMENT_TRANSLATION_RULE = (
     "«— » в последующих сегментах того же монолога."
 )
 
+# Только для запроса с блоками GLOSSARY_ONLY при segment_lines and not english_help.
+_GLOSSARY_ONLY_HINTS_RULE = (
+    "Для каждого блока в режиме GLOSSARY_ONLY обязательно верни не менее 1 словарной подсказки в glossary_hints."
+)
+
+# Только для запроса с PARAGRAPH-строками стихотворной строфы/двустишия (not english_help).
+_VERSE_PARAGRAPH_TRANSLATION_RULE = (
+    "Стихотворные строки и строфы в этом фрагменте переводи точным смысловым построчным подстрочником "
+    "без рифмы (не пытайся рифмовать в ущерб смыслу и деталям оригинала) и с единым обращением «ты»/«вы»."
+)
+
 # Только для запроса, в котором есть блок POEM. В тексте модели остаётся `\n\n`.
 _POEM_TRANSLATION_RULE = (
     "Стихотворный блок переводи построчно, без рифмы, с тем же числом строк, "
@@ -2991,12 +3017,33 @@ _POEM_TRANSLATION_RULE = (
 )
 
 
-def _shape_instructions(unit: TranslationUnit, *, segment_lines: bool) -> str:
-    """Дополнение инструкции: сегменты и стихи только когда они есть в запросе.
+def _shape_instructions(
+    unit: TranslationUnit,
+    *,
+    segment_lines: bool,
+    english_help: bool = False,
+    verse_block_ids: frozenset[str] = frozenset(),
+) -> str:
+    """Дополнение инструкции: GLOSSARY_ONLY, стихи и сегменты только когда они есть в запросе.
 
     Контракт 1 не показывает строки сегментов и не просит поле segments.
     """
     parts: list[str] = []
+    if (
+        segment_lines
+        and not english_help
+        and any(item.treatment is BlockTreatment.GLOSSARY_ONLY for item in unit.items)
+    ):
+        parts.append(_GLOSSARY_ONLY_HINTS_RULE)
+    if (
+        not english_help
+        and verse_block_ids
+        and any(
+            item.block.type is BlockType.PARAGRAPH and item.block.id in verse_block_ids
+            for item in unit.items
+        )
+    ):
+        parts.append(_VERSE_PARAGRAPH_TRANSLATION_RULE)
     if segment_lines and any(len(item.block.segments) >= 2 for item in unit.items):
         parts.append(_SEGMENT_TRANSLATION_RULE)
     if any(item.block.type is BlockType.POEM for item in unit.items):

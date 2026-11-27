@@ -1151,9 +1151,19 @@ def test_illustrations_prepare_on_stale_omits_return_generation_id_and_alias_ver
             assert len(prepare_forms) == 1
             # On stale generation, prepare form MUST NOT carry return_generation_id of the stale gen!
             assert prepare_forms[0].xpath('.//input[@name="return_generation_id"]') == []
-            # ALIAS_DECISION verdicts rendered in Russian (no raw English enum)
-            assert "один и тот же образ" in r.text
-            assert "разные образы" in r.text
+            # Default view without registry_kind hides noisy ALIAS_DECISION records!
+            assert "один и тот же образ" not in r.text
+            assert "разные образы" not in r.text
             assert "same_entity" not in r.text
+
+            # Explicit registry_kind=alias_decision shows ALIAS_DECISION verdicts in Russian (no raw English enum).
+            r_alias = client.get(
+                f"/books/book-st/illustrations?generation_id={gen.id}&registry_kind=alias_decision",
+                headers=HTML_HEADERS,
+            )
+            assert r_alias.status_code == 200
+            assert "один и тот же образ" in r_alias.text
+            assert "разные образы" in r_alias.text
+            assert "same_entity" not in r_alias.text
     finally:
         asyncio.run(app.aclose())
