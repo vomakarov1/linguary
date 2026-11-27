@@ -1,10 +1,10 @@
 """SQLite-backed task queue: enqueueing, claiming, and persisting outcomes (ALG-02).
 
-Encapsulates blocking database operations. Task claiming is the only place in the application
-where a transaction opens with an explicit `BEGIN IMMEDIATE`: the writer acquires a write lock
-immediately before candidate inspection, preventing two workers from reading the same row as available.
-The conditional update verifying updated row count serves as a second barrier: even if a transaction
-were ever opened deferred, a task claimed concurrently would not be claimed twice.
+Encapsulates blocking database operations. Write operations (`enqueue`, `claim_next_pending`,
+`save`) open explicit `BEGIN IMMEDIATE` transactions with bounded transient lock retry so
+SQLite acquires the writer lock up front instead of upgrading a deferred read lock and failing
+immediately under contention. The conditional update verifying updated row count in claiming
+serves as a second barrier so a task claimed concurrently can never be claimed twice.
 
 Task state transitions are performed by domain entities: this adapter is responsible for atomicity, not business rules.
 """
@@ -79,63 +79,18 @@ class SqliteTaskStore:
         """Task queue with default session factory for the given engine."""
         return cls(create_session_factory(engine), id_factory=id_factory)
 
-    def enqueue(self, identity: TaskIdentity) -> ProcessingTask:
-        """Enqueues a task; reenqueuing an existing identity creates no duplicates."""
-        existing = self._find(identity)
-        if existing is not None:
-            if existing.status is TaskStatus.PENDING:
-                self.notify_work_available()
-            return existing
-        task = ProcessingTask(
-            id=self._id_factory(),
-            book_id=identity.book_id,
-            task_type=identity.task_type,
-            scope_id=identity.scope_id,
-            operation_id=identity.operation_id,
-            policy_version=identity.policy_version,
-        )
-        try:
-            with self._session_factory.begin() as session:
-                SqlAlchemyTaskRepository(session).add(task)
-        except IntegrityError:
-            # The key was claimed by another writer between lookup and insert: the queue is idempotent
-            # on identity, so return the already-enqueued task.
-            stored = self._find(identity)
-            if stored is None:
-                raise
-            if stored.status is TaskStatus.PENDING:
-                self.notify_work_available()
-            return stored
-        self.notify_work_available()
-        return task
-
-    def claim_next_pending(self) -> ProcessingTask | None:
-        """Claims the next `pending` task, transitioning it to `running` (ALG-02)."""
-        with self._session_factory() as read_session:
-            if self._next_pending(read_session) is None:
-                return None
+    def _run_immediate_write[T](self, action: Callable[[Session], T]) -> T:
+        """Execute a short write transaction under `BEGIN IMMEDIATE` with bounded lock retry."""
         session = self._session_factory()
         try:
-            # A busy writer lock is transient. Roll back and retry the claim itself;
-            # do not replay the caller's work, matching unit_of_work transaction startup.
+            # A busy writer lock is transient. Roll back and retry the write itself;
+            # matches unit_of_work transaction startup backoff and retry count.
             for attempt in range(1, 11):
                 try:
                     session.connection().exec_driver_sql(_BEGIN_IMMEDIATE)
-                    candidate = self._next_pending(session)
-                    if candidate is None:
-                        session.commit()
-                        return None
-                    claimed = candidate.start()
-                    updated = session.execute(
-                        update(ProcessingTaskRow)
-                        .where(
-                            ProcessingTaskRow.id == claimed.id,
-                            ProcessingTaskRow.status == TaskStatus.PENDING.value,
-                        )
-                        .values(status=claimed.status.value, attempts=claimed.attempts)
-                    )
+                    result = action(session)
                     session.commit()
-                    return claimed if cast(CursorResult[Any], updated).rowcount == 1 else None
+                    return result
                 except OperationalError as error:
                     session.rollback()
                     message = str(error).lower()
@@ -146,8 +101,73 @@ class SqliteTaskStore:
                             "база данных занята после ограниченного повтора"
                         ) from None
                     sleep(min(0.005 * attempt, 0.02))
+                except BaseException:
+                    session.rollback()
+                    raise
         finally:
             session.close()
+        raise AssertionError("unreachable")
+
+    def enqueue(self, identity: TaskIdentity) -> ProcessingTask:
+        """Enqueues a task; reenqueuing an existing identity creates no duplicates."""
+        task_id: str | None = None
+
+        def _insert(session: Session) -> tuple[ProcessingTask, bool]:
+            nonlocal task_id
+            repository = SqlAlchemyTaskRepository(session)
+            existing = repository.find_by_identity(identity)
+            if existing is not None:
+                return existing, False
+            if task_id is None:
+                task_id = self._id_factory()
+            task = ProcessingTask(
+                id=task_id,
+                book_id=identity.book_id,
+                task_type=identity.task_type,
+                scope_id=identity.scope_id,
+                operation_id=identity.operation_id,
+                policy_version=identity.policy_version,
+            )
+            repository.add(task)
+            return task, True
+
+        try:
+            task, created = self._run_immediate_write(_insert)
+        except IntegrityError:
+            # The key was claimed by another writer between lookup and insert: the queue is idempotent
+            # on identity, so return the already-enqueued task.
+            stored = self._find(identity)
+            if stored is None:
+                raise
+            if stored.status is TaskStatus.PENDING:
+                self.notify_work_available()
+            return stored
+        if created or task.status is TaskStatus.PENDING:
+            self.notify_work_available()
+        return task
+
+    def claim_next_pending(self) -> ProcessingTask | None:
+        """Claims the next `pending` task, transitioning it to `running` (ALG-02)."""
+        with self._session_factory() as read_session:
+            if self._next_pending(read_session) is None:
+                return None
+
+        def _claim(session: Session) -> ProcessingTask | None:
+            candidate = self._next_pending(session)
+            if candidate is None:
+                return None
+            claimed = candidate.start()
+            updated = session.execute(
+                update(ProcessingTaskRow)
+                .where(
+                    ProcessingTaskRow.id == claimed.id,
+                    ProcessingTaskRow.status == TaskStatus.PENDING.value,
+                )
+                .values(status=claimed.status.value, attempts=claimed.attempts)
+            )
+            return claimed if cast(CursorResult[Any], updated).rowcount == 1 else None
+
+        return self._run_immediate_write(_claim)
 
     def save(self, task: ProcessingTask) -> ProcessingTask:
         """Persists task state and returns its effective state.
@@ -157,7 +177,8 @@ class SqliteTaskStore:
         its outcome, so the passed task is returned for canceled work. If a newer operation
         superseded the task, its stored superseded state is returned.
         """
-        with self._session_factory.begin() as session:
+
+        def _save(session: Session) -> ProcessingTask:
             repository = SqlAlchemyTaskRepository(session)
             try:
                 repository.save(task)
@@ -169,6 +190,8 @@ class SqliteTaskStore:
                     return current
                 raise
             return task
+
+        return self._run_immediate_write(_save)
 
     def list_running(self) -> tuple[ProcessingTask, ...]:
         """Tasks currently in `running` state in creation order."""

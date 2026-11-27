@@ -16,6 +16,8 @@ from linguary.adapters.runtime import (
     TaskWorkerPool,
     WorkerSettings,
 )
+from linguary.adapters.runtime import worker as worker_module
+from linguary.application.ports.persistence import PersistenceError
 from linguary.application.task_runner import TaskHandler, TaskRunner
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.domain.book_conditions import BookConditions
@@ -415,3 +417,129 @@ async def test_worker_pool_wakes_thread_safely_on_enqueue_with_long_idle_delay(
     pool.notify()
     task_queue.notify_work_available()
     assert WorkerSettings().idle_delay_seconds == 0.5
+
+
+async def test_drain_recovers_from_transient_lock_errors_and_resets_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_drain_worker` retries transient lock errors, resets counters after success, and drains all tasks."""
+    sleep_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(round(delay, 4))
+
+    monkeypatch.setattr(worker_module.asyncio, "sleep", fake_sleep)
+
+    task_1 = ProcessingTask(
+        id="t-1", book_id=BOOK_ID, task_type=TaskType.ANALYZE_CHAPTER, scope_id="s-1"
+    )
+    task_2 = ProcessingTask(
+        id="t-2", book_id=BOOK_ID, task_type=TaskType.ANALYZE_CHAPTER, scope_id="s-2"
+    )
+    # 6 transient locks before task_1, then 6 more before task_2 (> 10 total, < 10 consecutive).
+    outcomes: list[ProcessingTask | Exception | None] = [
+        *[PersistenceError("база данных занята") for _ in range(6)],
+        task_1,
+        *[PersistenceError("база данных занята после ограниченного повтора") for _ in range(6)],
+        task_2,
+        None,
+    ]
+
+    class _FlakyRunner:
+        async def run_next(self) -> ProcessingTask | None:
+            item = outcomes.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    pool = TaskWorkerPool(_FlakyRunner())  # type: ignore[arg-type]
+    finished = await pool.drain()
+
+    assert finished == (task_1, task_2)
+    expected_batch = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+    assert sleep_delays == [*expected_batch, *expected_batch]
+
+
+async def test_drain_raises_after_consecutive_lock_error_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_drain_worker` fails on the 10th consecutive transient lock error."""
+    sleep_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(round(delay, 4))
+
+    monkeypatch.setattr(worker_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(worker_module, "monotonic", lambda: 100.0)
+
+    calls = 0
+
+    class _LockedRunner:
+        async def run_next(self) -> ProcessingTask | None:
+            nonlocal calls
+            calls += 1
+            raise PersistenceError("база данных занята")
+
+    pool = TaskWorkerPool(_LockedRunner())  # type: ignore[arg-type]
+    with pytest.raises(PersistenceError, match="база данных занята"):
+        await pool.drain()
+
+    assert calls == 10
+    assert sleep_delays == [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45]
+
+
+async def test_drain_raises_when_monotonic_lock_deadline_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_drain_worker` fails once monotonic wait reaches 30s even before 10 consecutive locks."""
+    sleep_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(round(delay, 4))
+
+    times = iter([1000.0, 1015.0, 1030.0])
+    monkeypatch.setattr(worker_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(worker_module, "monotonic", lambda: next(times))
+
+    calls = 0
+
+    class _SlowLockedRunner:
+        async def run_next(self) -> ProcessingTask | None:
+            nonlocal calls
+            calls += 1
+            raise PersistenceError("database is locked")
+
+    pool = TaskWorkerPool(_SlowLockedRunner())  # type: ignore[arg-type]
+    with pytest.raises(PersistenceError, match="database is locked"):
+        await pool.drain()
+
+    assert calls == 3
+    assert sleep_delays == [0.05, 0.1]
+
+
+async def test_drain_does_not_retry_non_lock_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-lock exceptions propagate immediately from `_drain_worker` without sleeping."""
+    sleep_called = False
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal sleep_called
+        sleep_called = True
+
+    monkeypatch.setattr(worker_module.asyncio, "sleep", fake_sleep)
+
+    calls = 0
+
+    class _BrokenRunner:
+        async def run_next(self) -> ProcessingTask | None:
+            nonlocal calls
+            calls += 1
+            raise PersistenceError("задача отсутствует в хранилище")
+
+    pool = TaskWorkerPool(_BrokenRunner())  # type: ignore[arg-type]
+    with pytest.raises(PersistenceError, match="задача отсутствует"):
+        await pool.drain()
+
+    assert calls == 1
+    assert sleep_called is False

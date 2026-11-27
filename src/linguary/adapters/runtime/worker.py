@@ -15,10 +15,14 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from time import monotonic
 
 from linguary.application.diagnostics import is_transient_lock_error
 from linguary.application.task_runner import TaskHandler, TaskRunner
 from linguary.domain import ProcessingTask
+
+_MAX_CONSECUTIVE_DRAIN_LOCK_ERRORS = 10
+_MAX_DRAIN_LOCK_WAIT_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +170,29 @@ class TaskWorkerPool:
 
     async def _drain_worker(self, finished: list[ProcessingTask]) -> None:
         """Drain worker coroutine: processes tasks while the queue has work."""
-        while (task := await self._runner.run_next()) is not None:
+        consecutive_locks = 0
+        lock_wait_started: float | None = None
+        while True:
+            try:
+                task = await self._runner.run_next()
+                consecutive_locks = 0
+                lock_wait_started = None
+            except Exception as error:
+                if not is_transient_lock_error(error):
+                    raise
+                now = monotonic()
+                if lock_wait_started is None:
+                    lock_wait_started = now
+                consecutive_locks += 1
+                if (
+                    consecutive_locks >= _MAX_CONSECUTIVE_DRAIN_LOCK_ERRORS
+                    or (now - lock_wait_started) >= _MAX_DRAIN_LOCK_WAIT_SECONDS
+                ):
+                    raise
+                await asyncio.sleep(min(0.05 * consecutive_locks, 0.5))
+                continue
+            if task is None:
+                return
             finished.append(task)
 
     async def _polling_worker(self, slot: int, wake: asyncio.Event) -> None:

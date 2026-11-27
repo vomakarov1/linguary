@@ -25,7 +25,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 #: Write lock wait timeout in milliseconds.
-DEFAULT_BUSY_TIMEOUT_MS = 5000
+DEFAULT_BUSY_TIMEOUT_MS = 15_000
 
 #: Path value representing an in-memory database.
 IN_MEMORY = ":memory:"
@@ -45,7 +45,11 @@ def create_database_engine(
     echo: bool = False,
 ) -> Engine:
     """Create a SQLite engine configured with connection PRAGMAs."""
-    engine = create_engine(build_database_url(database_path), echo=echo)
+    engine = create_engine(
+        build_database_url(database_path),
+        connect_args={"timeout": busy_timeout_ms / 1000.0},
+        echo=echo,
+    )
     configure_sqlite_connections(engine, busy_timeout_ms=busy_timeout_ms)
     return engine
 

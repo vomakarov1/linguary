@@ -58,6 +58,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskIdentity,
     TaskStatus,
+    TaskType,
     TermConcept,
     TaskError,
     build_language_note_id,
@@ -907,6 +908,21 @@ class SqlAlchemyTaskRepository:
         rows = self._session.scalars(
             select(ProcessingTaskRow)
             .where(ProcessingTaskRow.book_id == book_id)
+            .order_by(ProcessingTaskRow.created_at, ProcessingTaskRow.id)
+        ).all()
+        return tuple(mapping.to_task(row) for row in rows)
+
+    def list_for_scope(
+        self, book_id: str, task_type: TaskType, scope_id: str
+    ) -> tuple[ProcessingTask, ...]:
+        """List tasks for a book, type, and scope in creation order."""
+        rows = self._session.scalars(
+            select(ProcessingTaskRow)
+            .where(
+                ProcessingTaskRow.book_id == book_id,
+                ProcessingTaskRow.task_type == task_type.value,
+                ProcessingTaskRow.scope_id == scope_id,
+            )
             .order_by(ProcessingTaskRow.created_at, ProcessingTaskRow.id)
         ).all()
         return tuple(mapping.to_task(row) for row in rows)
