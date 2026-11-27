@@ -291,57 +291,85 @@ def _insert_markers(
     prepared: Sequence[tuple[NumberedNote, tuple[str, ...], str]],
 ) -> None:
     """Digit links after each numbered marker that falls inside this slice."""
-    markers: list[tuple[int, int, int, str]] = []
+    grouped: dict[int, list[tuple[int, int, str]]] = {}
     for index, (numbered, _, note_id) in enumerate(prepared):
         number = numbered.number
         if number is None or numbered.note.marker_end is None:
             continue
         offset = numbered.note.marker_end
         if unit.start < offset <= unit.end:
-            markers.append((offset, index, number, note_id))
-    for offset, _, number, note_id in sorted(markers, key=lambda item: (-item[0], item[1])):
-        _insert_marker(source, offset - unit.start, number, note_id)
+            grouped.setdefault(offset, []).append((index, number, note_id))
+    for offset in sorted(grouped, reverse=True):
+        group = tuple(
+            (number, note_id)
+            for _, number, note_id in sorted(grouped[offset], key=lambda item: item[0])
+        )
+        _insert_marker_group(source, offset - unit.start, group)
 
 
-def _insert_marker(
-    source: etree._Element, position: int, number: int | None, note_id: str
-) -> None:
-    """Place ``a.lg-ref`` at ``position`` without nesting it inside a link."""
-    if number is None:
-        return
+def _marker_link(number: int, note_id: str) -> etree._Element:
+    """Build one footnote reference link ``<a class="lg-ref"><sup>N</sup></a>``."""
     link = _element("a", {"class": "lg-ref", "href": f"#{note_id}"})
     _sub(link, "sup").text = str(number)
+    return link
+
+
+def _insert_marker_group(
+    source: etree._Element,
+    position: int,
+    group: Sequence[tuple[int, str]],
+) -> None:
+    """Place a group of ``a.lg-ref`` links at ``position`` without nesting inside a link."""
+    if not group:
+        return
+    links = [_marker_link(number, note_id) for number, note_id in group]
     slots, length = _text_slots(source)
     if position >= length:
-        source.append(link)
+        for link in links:
+            source.append(link)
         return
     for node, is_tail, lower, upper in slots:
         if position != lower and not lower < position <= upper:
             continue
         anchor = _enclosing_anchor(node, is_tail, source)
         if anchor is not None:
-            link.tail = anchor.tail
+            tail = anchor.tail or None
             anchor.tail = None
-            anchor.addnext(link)
+            prev = anchor
+            for link in links:
+                prev.addnext(link)
+                prev = link
+            links[-1].tail = tail
             return
-        _split_insert(node, is_tail, position - lower, link)
+        _split_insert_group(node, is_tail, position - lower, links)
         return
-    source.append(link)
+    for link in links:
+        source.append(link)
 
 
-def _split_insert(
-    node: etree._Element, is_tail: bool, offset: int, link: etree._Element
+def _split_insert_group(
+    node: etree._Element,
+    is_tail: bool,
+    offset: int,
+    links: Sequence[etree._Element],
 ) -> None:
-    """Insert ``link`` after ``offset`` characters of this text slot."""
-    value = (node.tail if is_tail else node.text) or ""
-    head, rest = value[:offset], value[offset:]
-    link.tail = rest or None
-    if is_tail:
-        node.tail = head or None
-        node.addnext(link)
+    """Insert ``links`` in order after ``offset`` characters of this text slot."""
+    if not links:
         return
-    node.text = head or None
-    node.insert(0, link)
+    value = (node.tail if is_tail else node.text) or ""
+    before, rest = value[:offset], value[offset:]
+    if is_tail:
+        node.tail = before or None
+        prev = node
+        for link in links:
+            prev.addnext(link)
+            prev = link
+        links[-1].tail = rest or None
+        return
+    node.text = before or None
+    for index, link in enumerate(links):
+        node.insert(index, link)
+    links[-1].tail = rest or None
 
 
 def _enclosing_anchor(

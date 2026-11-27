@@ -803,3 +803,156 @@ def test_heading_keeps_original_level() -> None:
     assert "lg-src" not in _classes(fallback)
     assert fallback.text == "Untitled"
     assert not any("lg-src" in _classes(node) for node in root.iter())
+
+
+def test_adjacent_markers_preserve_ascending_order_and_none_slots() -> None:
+    """Markers sharing an offset keep ascending order in middle, end, inline, and anchor slots."""
+    from linguary.adapters.epub.layout_render import _marker_link, _split_insert_group
+
+    text = "Harry wore half-moon glasses and saw an owl."
+    em_start = text.index("half-moon")
+    em_end = em_start + len("half-moon")
+    link_start = text.index("glasses")
+    link_end = link_start + len("glasses")
+    block = _block(
+        text,
+        annotations=(
+            InlineAnnotation(InlineAnnotationType.EMPHASIS, em_start, em_end),
+            InlineAnnotation(
+                InlineAnnotationType.LINK,
+                link_start,
+                link_end,
+                "https://example.com/glasses",
+            ),
+        ),
+    )
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(block,),
+    )
+    mid_offset = text.index("wore") + len("wore")
+    em_offset = em_end
+    link_offset = link_end
+    tail_offset = text.index("saw") + len("saw")
+    end_offset = len(text)
+    notes = (
+        _note(1, ("первая в тексте",), marker_end=mid_offset),
+        _note(2, ("вторая в тексте",), marker_end=mid_offset),
+        _note(3, ("первая в em",), marker_end=em_offset),
+        _note(4, ("вторая в em",), marker_end=em_offset),
+        _note(5, ("первая в ссылке",), marker_end=link_offset),
+        _note(6, ("вторая в ссылке",), marker_end=link_offset),
+        _note(7, ("первая в хвосте",), marker_end=tail_offset),
+        _note(8, ("вторая в хвосте",), marker_end=tail_offset),
+        _note(9, ("первая в конце",), marker_end=end_offset),
+        _note(10, ("вторая в конце",), marker_end=end_offset),
+    )
+    root = _chapter(block, layout=_layout(section, {block.id: (_unit(block, notes=notes),)}))
+    source = _source(_units(root)[0])
+
+    refs = [node for node in _elements(source, "a") if "lg-ref" in _classes(node)]
+    assert [_elements(ref, "sup")[0].text for ref in refs] == [str(n) for n in range(1, 11)]
+    assert _plain(source) == text
+
+    # Paired markers inside <em> stay inside <em> in ascending order with None tails where empty.
+    em = _elements(source, "em")[0]
+    em_refs = [node for node in _elements(em, "a") if "lg-ref" in _classes(node)]
+    assert [_elements(ref, "sup")[0].text for ref in em_refs] == ["3", "4"]
+    assert em_refs[-1].tail is None
+
+    # Paired markers targeting an enclosing <a> are placed right after it, never nested inside <a>.
+    ext_link = next(
+        node for node in _elements(source, "a") if node.get("href") == "https://example.com/glasses"
+    )
+    assert _elements(ext_link, "a") == [ext_link]
+    assert ext_link.tail is None
+    next_one = ext_link.getnext()
+    next_two = next_one.getnext() if next_one is not None else None
+    assert next_one is not None and next_two is not None
+    assert [_elements(next_one, "sup")[0].text, _elements(next_two, "sup")[0].text] == ["5", "6"]
+    assert next_one.tail is None
+    assert next_two.tail == " and saw"
+
+    # Before-text checks for every pair confirm exact positions.
+    assert _text_before(source, refs[0]) == "Harry wore"
+    assert _text_before(source, refs[1]) == "Harry wore1"
+    assert _text_before(source, refs[6]) == "Harry wore12 half-moon34 glasses56 and saw"
+    assert _text_before(source, refs[8]) == "Harry wore12 half-moon34 glasses56 and saw78 an owl."
+
+    # Empty before/rest and None text/tail normalize to None rather than empty string "".
+    parent = etree.Element(f"{{{_XHTML}}}p")
+    child = etree.SubElement(parent, f"{{{_XHTML}}}em")
+    child.text = None
+    child.tail = None
+    _split_insert_group(child, False, 0, [_marker_link(1, "n1"), _marker_link(2, "n2")])
+    assert child.text is None
+    assert [child[0].get("href"), child[1].get("href")] == ["#n1", "#n2"]
+    assert child[0].tail is None
+    assert child[1].tail is None
+
+    _split_insert_group(child, True, 0, [_marker_link(3, "n3"), _marker_link(4, "n4")])
+    assert child.tail is None
+    after_one = child.getnext()
+    after_two = after_one.getnext() if after_one is not None else None
+    assert after_one is not None and after_two is not None
+    assert [after_one.get("href"), after_two.get("href")] == ["#n3", "#n4"]
+    assert after_one.tail is None
+    assert after_two.tail is None
+
+
+def test_adjacent_markers_in_anchor_without_tail_and_css_spacing_rule() -> None:
+    """Enclosing anchor at end of slice without tail keeps None tails; CSS spaces adjacent refs."""
+    text = "Click here."
+    link_start = text.index("here")
+    link_end = link_start + len("here")
+    block = _block(
+        text,
+        annotations=(
+            InlineAnnotation(
+                InlineAnnotationType.LINK,
+                link_start,
+                link_end,
+                "https://example.com",
+            ),
+        ),
+    )
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(block,),
+    )
+    # Slice ends right after the link so anchor.tail is None and position < length hits anchor slot.
+    notes = (
+        _note(1, ("первая",), marker_end=link_start + 2),
+        _note(2, ("вторая",), marker_end=link_start + 2),
+    )
+    root = _chapter(
+        block,
+        layout=_layout(
+            section,
+            {block.id: (_unit(block, start=0, end=link_end, notes=notes),)},
+        ),
+    )
+    source = _source(_units(root)[0])
+    ext_link = next(
+        node for node in _elements(source, "a") if node.get("href") == "https://example.com"
+    )
+    refs = [node for node in _elements(source, "a") if "lg-ref" in _classes(node)]
+    assert [_elements(ref, "sup")[0].text for ref in refs] == ["1", "2"]
+    assert ext_link.tail is None
+    assert refs[0].tail is None
+    assert refs[1].tail is None
+
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    pattern = r"a\.lg-ref\s*\+\s*a\.lg-ref\s*\{\s*margin-left\s*:\s*0\.18em\s*;\s*\}"
+    assert re.search(pattern, _STYLESHEET)
+    assert re.search(pattern, web)
