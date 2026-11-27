@@ -1121,13 +1121,22 @@ def is_core_a2_word(word: str) -> bool:
     return _is_core_normalized(_normalize_token(word))
 
 
+_LEADING_ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
+
+
 def is_trivial_a1_hint(original: str) -> bool:
     """Return True if `original` is a single trivial CEFR A1 word or obvious internationalism."""
     cleaned = original.strip().translate(_APOSTROPHES).lower()
     has_to_prefix = False
+    has_article_prefix = False
     if cleaned.startswith("to") and len(cleaned) > 2 and cleaned[2].isspace():
         cleaned = cleaned[2:].lstrip()
         has_to_prefix = True
+    else:
+        parts = cleaned.split(None, 1)
+        if len(parts) == 2 and parts[0] in _LEADING_ARTICLES:
+            cleaned = parts[1].lstrip()
+            has_article_prefix = True
     if not cleaned or any(ch.isspace() for ch in cleaned):
         return False
     if not cleaned.isascii() or not cleaned.isalpha():
@@ -1136,6 +1145,8 @@ def is_trivial_a1_hint(original: str) -> bool:
         return False
     if has_to_prefix:
         return cleaned in _A1_VERB_ROOTS
+    if has_article_prefix:
+        return cleaned in A1_TRIVIAL_HINT_WORDS or _matches_plural_or_3sg(cleaned, _A1_S_ROOTS)
     if cleaned in A1_TRIVIAL_HINT_WORDS or cleaned in _A1_IRREGULAR_TO_BASE:
         return True
     return (

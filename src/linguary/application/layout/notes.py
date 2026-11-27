@@ -606,12 +606,17 @@ def block_notes(
     return tuple(sorted(notes, key=_marker_key))
 
 
+_LEADING_ARTICLES = frozenset({"a", "an", "the"})
+
+
 def vocabulary_dedup_key(original: str) -> str:
     """Normalized lemma-like key for book-wide glossary hint deduplication."""
     words = expression_words(original)
     if not words:
         return original.strip().casefold()
     if len(words) >= 2 and words[0] == "to" and words[1] not in _NOT_A_VERB_AFTER_TO:
+        words = words[1:]
+    elif len(words) >= 2 and words[0] in _LEADING_ARTICLES:
         words = words[1:]
     head = _canonical_vocab_word(words[0])
     if len(words) == 1:
