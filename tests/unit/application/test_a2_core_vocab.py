@@ -634,3 +634,18 @@ def test_is_trivial_a1_hint_rejects_borderline_a2_non_core_and_multiword(
     from linguary.application.a2_core_vocab import is_trivial_a1_hint
 
     assert is_trivial_a1_hint(original) is False
+
+
+def test_going_is_core_a2_and_two_letter_ing_stems_allowed() -> None:
+    """WP7: `going` is in A2_CORE_VOCABULARY and `_matches_ing` accepts 2-letter stems {go, do, be}."""
+    from linguary.application.a2_core_vocab import _matches_ing, is_trivial_a1_hint
+
+    assert "going" in A2_CORE_VOCABULARY
+    assert is_core_a2_word("going") is True
+    assert is_trivial_a1_hint("going") is True
+    assert non_core_a2_words("Where are you going now?") == ()
+    assert _matches_ing("going", frozenset({"go"})) is True
+    assert _matches_ing("doing", frozenset({"do"})) is True
+    assert _matches_ing("being", frozenset({"be"})) is True
+    assert _matches_ing("axing", frozenset({"ax"})) is False
+

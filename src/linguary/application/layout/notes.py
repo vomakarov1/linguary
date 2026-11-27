@@ -114,9 +114,30 @@ _NOT_A_VERB_AFTER_TO = frozenset(
         "yourselves",
     }
 )
+_RESULTATIVE_PARTICLES = frozenset(
+    {
+        "open",
+        "shut",
+        "closed",
+        "free",
+        "loose",
+        "clear",
+        "clean",
+        "dry",
+        "flat",
+        "short",
+        "still",
+        "tight",
+        "wide",
+    }
+)
 # Particles and the prepositions that introduce an object after the verb.
-_PHRASE_PREPOSITIONS = _PARTICLES | frozenset(
-    {"at", "for", "from", "into", "of", "onto", "to", "with", "without", "upon", "against"}
+_PHRASE_PREPOSITIONS = (
+    _PARTICLES
+    | _RESULTATIVE_PARTICLES
+    | frozenset(
+        {"at", "for", "from", "into", "of", "onto", "to", "with", "without", "upon", "against"}
+    )
 )
 # Irregular or alternating forms only. Regular -ed/-ing stays on `_same_word` / `_regular_ed_stem`.
 _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {

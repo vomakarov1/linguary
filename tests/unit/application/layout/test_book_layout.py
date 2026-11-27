@@ -3290,3 +3290,136 @@ def test_self_identifies_speaker_suppresses_intro_line_but_keeps_generic_phrase(
     assert units[nick_other.id][0].speaker == "Ник"
     assert units[nick_other.id][0].notes[0].note.body == ("Говорит Ник",)
 
+
+def test_speech_style_subject_anchor_block_fallback_in_pattern_and_book_cap() -> None:
+    """WP7: speaker matching uses subject_anchor + single-speaker block fallback, normalizes -in', and caps at 4 per book."""
+    from linguary.application.layout.book import _speech_style_lexemes
+    from linguary.domain.content_plan import Scene
+
+    # 1. `-in'` normalization keeps companion lexemes (`yer`).
+    probe_block = _block("probe", 0, "‘Yer deliverin’ that parcel, flyin’ high.’")
+    d_probe = _difficulty(probe_block, "Yer deliverin’", "speech_style", "d-probe")
+    assert _speech_style_lexemes(d_probe) == frozenset({"yer", "-in'"})
+
+    # 2. Binding via `subject_anchor` (even when `fact.anchors` points at reporting clause),
+    #    block-level single-speaker fallback (when anchor is outside both fact spans),
+    #    `-in'` deduplication (`flyin'` vs `payin'`), and `_SPEECH_STYLE_BOOK_CAP = 4`.
+    b1 = _block("c1", 0, "‘Yeh’re a wizard,’ Hagrid said softly.")
+    b2 = _block("c1", 1, "‘Flyin’ over Bristol,’ Hagrid added.")
+    b3 = _block("c1", 2, "‘Payin’ for it meself.’ He grinned. ‘Blimey!’")
+    b4 = _block("c2", 0, "‘Codswallop!’ Hagrid barked.")
+    b5 = _block("c2", 1, "‘Crikey, look at that!’ Hagrid laughed.")
+    b6 = _block("c3", 0, "‘Gorgons alive!’ Hagrid roared.")
+
+    d1 = _difficulty(b1, "Yeh’re", "speech_style", "d1")
+    d2 = _difficulty(b2, "Flyin’", "speech_style", "d2")
+    # `Payin'` is in b3, repeats `-in'` from d2; fact only anchors `‘Blimey!’` in b3 (block fallback!).
+    d3_in = _difficulty(b3, "Payin’", "speech_style", "d3-in")
+    # `Blimey` is unique (#3 kept).
+    d3_unique = _difficulty(b3, "Blimey", "speech_style", "d3-unique")
+    # `Codswallop` is unique (#4 kept — hits `_SPEECH_STYLE_BOOK_CAP = 4`).
+    d4 = _difficulty(b4, "Codswallop", "speech_style", "d4")
+    # `Crikey` and `Gorgons` are 5th & 6th unique lexemes -> dropped by `_SPEECH_STYLE_BOOK_CAP = 4`!
+    d5 = _difficulty(b5, "Crikey", "speech_style", "d5")
+    d6 = _difficulty(b6, "Gorgons", "speech_style", "d6")
+
+    # Non-overlapping `fact.anchors` (reporting clause) vs `fact.subject_anchor` (the quote itself).
+    f1 = ContextFact(
+        "f1",
+        "speaker",
+        (_anchor(b1, "Hagrid said softly."),),
+        _anchor(b1, "‘Yeh’re a wizard,’"),
+        "Hagrid",
+        "explicit",
+    )
+    f2 = ContextFact(
+        "f2",
+        "speaker",
+        (_anchor(b2, "Hagrid added."),),
+        _anchor(b2, "‘Flyin’ over Bristol,’"),
+        "Hagrid",
+        "explicit",
+    )
+    # Block-level fallback: `subject_anchor` is only `‘Blimey!’`, so `Payin’` does not overlap it.
+    f3 = ContextFact(
+        "f3",
+        "speaker",
+        (_anchor(b3, "He grinned."),),
+        _anchor(b3, "‘Blimey!’"),
+        "Hagrid",
+        "inferred",
+    )
+    f4 = _fact("f4", b4, b4.text, "Hagrid", "explicit")
+    f5 = _fact("f5", b5, b5.text, "Hagrid", "explicit")
+    f6 = _fact("f6", b6, b6.text, "Hagrid", "explicit")
+
+    p1 = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(d1, d2, d3_in, d3_unique),
+        context_facts=(f1, f2, f3),
+        scenes=(Scene("sc-1", 0, b1.id, b3.id, "Scene 1"),),
+    )
+    p2 = _plan(d4, d5, facts=(f4, f5))
+    p3 = _plan(d6, facts=(f6,))
+
+    s1 = _section("c1", 0, "Chapter 1", (b1, b2, b3))
+    s2 = _section("c2", 1, "Chapter 2", (b4, b5))
+    s3 = _section("c3", 2, "Chapter 3", (b6,))
+
+    results = {
+        b1.id: BlockProcessingResult(
+            b1.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(d1, "пояснение d1", "sentence_rephrase"),),
+        ),
+        b2.id: BlockProcessingResult(
+            b2.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(d2, "пояснение d2", "sentence_rephrase"),),
+        ),
+        b3.id: BlockProcessingResult(
+            b3.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(
+                _assistance(d3_in, "пояснение d3-in", "sentence_rephrase"),
+                _assistance(d3_unique, "пояснение d3-unique", "sentence_rephrase"),
+            ),
+        ),
+        b4.id: BlockProcessingResult(
+            b4.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(d4, "пояснение d4", "sentence_rephrase"),),
+        ),
+        b5.id: BlockProcessingResult(
+            b5.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(d5, "пояснение d5", "sentence_rephrase"),),
+        ),
+        b6.id: BlockProcessingResult(
+            b6.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(d6, "пояснение d6", "sentence_rephrase"),),
+        ),
+    }
+    layout = build_book_layout(
+        _inputs(
+            _document((s1, s2, s3)),
+            results,
+            (
+                _analysis("a1", s1.id, plan=p1),
+                _analysis("a2", s2.id, plan=p2),
+                _analysis("a3", s3.id, plan=p3),
+            ),
+        )
+    )
+
+    assert _labels(layout, b1.id) == ("Речь персонажа.",)
+    assert _labels(layout, b2.id) == ("Речь персонажа.",)
+    b3_bodies = [n.body for n in _notes(layout, b3.id) if n.origin != "speaker"]
+    assert b3_bodies == [("пояснение d3-unique",)]
+    assert _labels(layout, b4.id) == ("Речь персонажа.",)
+    assert [n for n in _notes(layout, b5.id) if n.origin != "speaker"] == []
+    assert [n for n in _notes(layout, b6.id) if n.origin != "speaker"] == []
+
+

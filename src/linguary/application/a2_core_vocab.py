@@ -228,7 +228,7 @@ caught children chose chosen came crept
 dealt dug drank drawn dreamt drew driven drove drunk
 eaten
 fallen fed fell felt feet flew flown forgot forgotten forgave forgiven fought found froze frozen
-gave geese given gone got gotten grew grown
+gave geese given going gone got gotten grew grown
 heard held hid hidden hung
 kept knew known knives
 laid lain learnt leaves led lent lit lives loaves lost
@@ -1009,6 +1009,9 @@ def _matches_ed(
     return False
 
 
+_TWO_LETTER_ING_STEMS: frozenset[str] = frozenset({"go", "do", "be"})
+
+
 def _matches_ing(
     word: str,
     roots: frozenset[str] = _VERB_INFLECT_ROOTS,
@@ -1018,7 +1021,7 @@ def _matches_ing(
     if word.endswith("ying") and (word[:-4] + "ie") in roots:
         return True
     stem = word[:-3]
-    if len(stem) >= 3 and _allows_undoubled_stem(stem) and stem in roots:
+    if (len(stem) >= 3 or stem in _TWO_LETTER_ING_STEMS) and _allows_undoubled_stem(stem) and stem in roots:
         return True
     if len(stem) >= 2 and (stem + "e") in roots:
         return True

@@ -1682,3 +1682,28 @@ def test_tautological_gloss_dropped_and_real_notes_kept() -> None:
     wp_notes = block_notes(wp_block, wp_result, wp_plan, ())
     assert wp_notes[0].body == ("взрослые", "взрослые люди")
 
+
+def test_resultative_particles_match_object_split_infinitive_phrases() -> None:
+    """WP7: resultative particles like `open`/`shut`/`free` match object-split phrases (`flicked it open` <-> `to flick open`)."""
+    from linguary.application.layout.notes import _infinitive_end, find_hint_marker_end
+
+    cases = (
+        ("He flicked it open and looked inside.", "to flick open", "flicked it open"),
+        ("She pulled the door shut.", "to pull shut", "pulled the door shut"),
+        ("They set the bird free.", "to set free", "set the bird free"),
+        ("He wiped the glass clean.", "to wipe clean", "wiped the glass clean"),
+        ("She flung the window wide.", "to fling wide", "flung the window wide"),
+    )
+    for text, original, matched in cases:
+        expected_end = _end(text, matched)
+        assert _infinitive_end(text, original) == expected_end
+        assert find_hint_marker_end(text, original) == expected_end
+        block = _block(text)
+        result = _result(
+            block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(GlossaryHint(original, "перевод"),),
+        )
+        assert block_notes(block, result, None, ())[0].marker_end == expected_end
+
+

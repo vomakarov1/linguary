@@ -16,6 +16,15 @@ _VERSE_CARDINAL_START_RE = re.compile(
 )
 _VERSE_OPENING_QUOTES = '‘“"\'«'
 _VERSE_CLOSING_QUOTES = '’”"\'»'
+_VERSE_QUOTE_PAIRS = {"‘": "’", "“": "”"}
+_VERSE_DASH_END_RE = re.compile(r"[—–-]\s*$")
+_VERSE_SPEECH_VERB_RE = re.compile(
+    r"\b(?:said|asked|replied|answered|whispered|shouted|muttered|"
+    r"murmured|mumbled|stammered|yelled|bellowed|exclaimed|retorted|snapped|growled)\b",
+    re.IGNORECASE,
+)
+_VERSE_TAIL_MAX_LEN = 80
+_VERSE_TAIL_MAX_BLOCKS = 4
 _VERSE_WORD_RE = re.compile(
     r"[A-Za-z\u00C0-\u024FА-Яа-яЁё]+(?:['’-][A-Za-z\u00C0-\u024FА-Яа-яЁё]+)*"
 )
@@ -84,19 +93,71 @@ def _is_verse_paragraph_candidate(block: DocumentBlock) -> bool:
     return breaks <= 1
 
 
-def _is_valid_implicit_verse_run(run: Sequence[DocumentBlock]) -> bool:
-    if len(run) < 3:
+def _has_speech_verb(text: str) -> bool:
+    return _VERSE_SPEECH_VERB_RE.search(text) is not None
+
+
+def _is_single_quote_apostrophe(text: str, idx: int) -> bool:
+    if text[idx] != "’":
         return False
+    if idx + 1 < len(text) and text[idx + 1].isalnum():
+        return True
+    if idx > 0 and text[idx - 1].isalnum():
+        tail = text[idx + 1 :]
+        if not tail.strip():
+            word_match = re.search(r"[A-Za-z]+$", text[:idx])
+            if (
+                word_match is not None
+                and len(word_match.group(0)) >= 3
+                and word_match.group(0).casefold().endswith("in")
+            ):
+                return True
+            return False
+        if tail[0] in ".!?…,:;)]}":
+            return False
+        return True
+    return False
+
+
+def _advance_quote_stack(text: str, stack: list[str]) -> None:
+    for idx, ch in enumerate(text):
+        if ch in _VERSE_QUOTE_PAIRS:
+            stack.append(ch)
+        elif stack and ch == _VERSE_QUOTE_PAIRS[stack[-1]]:
+            if ch == "’" and _is_single_quote_apostrophe(text, idx):
+                continue
+            stack.pop()
+
+
+def _unclosed_quote_opener(blocks: Sequence[DocumentBlock]) -> str | None:
+    stack: list[str] = []
+    for block in blocks:
+        _advance_quote_stack(block.text.strip(), stack)
+    return stack[0] if stack else None
+
+
+def _has_lowercase_prose_ratio(blocks: Sequence[DocumentBlock]) -> bool:
     non_initial_alpha = 0
     non_initial_lower = 0
-    for block in run:
+    for block in blocks:
         tokens = _VERSE_WORD_RE.findall(block.text)
         for token in tokens[1:]:
             if len(token) > 1:
                 non_initial_alpha += 1
                 if token[0].islower():
                     non_initial_lower += 1
-    if non_initial_alpha == 0 or non_initial_lower * 2 <= non_initial_alpha:
+    return non_initial_alpha > 0 and non_initial_lower * 2 > non_initial_alpha
+
+
+def _is_valid_implicit_verse_run(
+    run: Sequence[DocumentBlock],
+    *,
+    core_len: int | None = None,
+) -> bool:
+    core = run if core_len is None else run[:core_len]
+    if len(core) < 3:
+        return False
+    if not _has_lowercase_prose_ratio(run):
         return False
     final_closed = _VERSE_CLOSURE_PUNCT_RE.search(run[-1].text) is not None
     all_italic = all(_is_full_block_italic(block) for block in run)
@@ -107,11 +168,11 @@ def _is_valid_implicit_verse_run(run: Sequence[DocumentBlock]) -> bool:
         return False
     if not final_closed and sum(1 for block in run if "(" in block.text and ")" in block.text) * 2 >= len(run):
         return False
-    non_final = len(run) - 1
+    non_final = len(core) - 1
     enjambed_caps = 0
     for index in range(non_final):
-        cur_text = run[index].text.strip()
-        next_text = run[index + 1].text.strip()
+        cur_text = core[index].text.strip()
+        next_text = core[index + 1].text.strip()
         if (
             _VERSE_TERMINAL_PUNCT_RE.search(cur_text) is None
             and _starts_with_upper_verse(next_text)
@@ -145,17 +206,108 @@ def _extract_implicit_verse_subruns(
     for idx in enjambed_indices[1:]:
         if idx <= cur_end + 1:
             cur_end = idx + 1
+        elif idx <= cur_end + 3 and all(
+            _is_verse_paragraph_candidate(strip[k]) and not _has_speech_verb(strip[k].text)
+            for k in range(cur_end + 1, idx)
+        ):
+            cur_end = idx + 1
         else:
             groups.append((cur_start, cur_end))
             cur_start = idx
             cur_end = idx + 1
     groups.append((cur_start, cur_end))
     result: list[tuple[DocumentBlock, ...]] = []
+    last_emitted_end = -1
     for start_idx, end_idx in groups:
-        candidate = tuple(strip[start_idx:end_idx + 1])
-        if _is_valid_implicit_verse_run(candidate):
-            result.append(candidate)
+        if start_idx <= last_emitted_end:
+            continue
+        core = tuple(strip[start_idx:end_idx + 1])
+        extended_candidate: tuple[DocumentBlock, ...] | None = None
+        extended_end = end_idx
+        stack: list[str] = []
+        for block in core:
+            _advance_quote_stack(block.text.strip(), stack)
+        if stack:
+            tail_limit = min(len(strip), end_idx + 1 + _VERSE_TAIL_MAX_BLOCKS)
+            for tail_idx in range(end_idx + 1, tail_limit):
+                tail_block = strip[tail_idx]
+                tail_text = tail_block.text.strip()
+                if (
+                    len(tail_text) > _VERSE_TAIL_MAX_LEN
+                    or not _is_verse_paragraph_candidate(tail_block)
+                    or _has_speech_verb(tail_text)
+                ):
+                    break
+                _advance_quote_stack(tail_text, stack)
+                if not stack:
+                    candidate = tuple(strip[start_idx:tail_idx + 1])
+                    if _is_valid_implicit_verse_run(candidate, core_len=len(core)):
+                        extended_candidate = candidate
+                        extended_end = tail_idx
+                    break
+        if extended_candidate is not None:
+            result.append(extended_candidate)
+            last_emitted_end = extended_end
+        elif _is_valid_implicit_verse_run(core):
+            result.append(core)
+            last_emitted_end = end_idx
     return result
+
+
+def _detect_implicit_couplets(
+    ordered: Sequence[DocumentBlock],
+    covered_ids: frozenset[str],
+) -> list[tuple[DocumentBlock, ...]]:
+    """Detect strict 2-line quoted verse couplets outside longer stanzas."""
+    couplets: list[tuple[DocumentBlock, ...]] = []
+    n = len(ordered)
+    index = 0
+    while index + 1 < n:
+        first = ordered[index]
+        second = ordered[index + 1]
+        if (
+            first.id in covered_ids
+            or second.id in covered_ids
+            or second.order != first.order + 1
+            or not _is_verse_paragraph_candidate(first)
+            or not _is_verse_paragraph_candidate(second)
+            or _is_full_block_italic(first) is not _is_full_block_italic(second)
+        ):
+            index += 1
+            continue
+        t1 = first.text.strip()
+        t2 = second.text.strip()
+        if (
+            len(t1) > 100
+            or len(t2) > 100
+            or _has_speech_verb(t1)
+            or _has_speech_verb(t2)
+        ):
+            index += 1
+            continue
+        opener = t1[0]
+        if (
+            opener not in _VERSE_QUOTE_PAIRS
+            or _unclosed_quote_opener((first,)) != opener
+            or _VERSE_TERMINAL_PUNCT_RE.search(t1) is not None
+            or _VERSE_DASH_END_RE.search(t1) is not None
+        ):
+            index += 1
+            continue
+        expected_closer = _VERSE_QUOTE_PAIRS[opener]
+        if (
+            t2[0] in _VERSE_OPENING_QUOTES
+            or not _starts_with_upper_verse(t2)
+            or not t2.endswith(expected_closer)
+            or _VERSE_CLOSURE_PUNCT_RE.search(t2) is None
+            or _unclosed_quote_opener((first, second)) is not None
+            or not _has_lowercase_prose_ratio((first, second))
+        ):
+            index += 1
+            continue
+        couplets.append((first, second))
+        index += 2
+    return couplets
 
 
 def detect_verse_stanza_runs(
@@ -194,6 +346,11 @@ def detect_verse_stanza_runs(
             index = end
             continue
         index += 1
+    covered_ids = frozenset(block.id for run in runs for block in run)
+    couplets = _detect_implicit_couplets(ordered, covered_ids)
+    if couplets:
+        runs.extend(couplets)
+        runs.sort(key=lambda run: run[0].order)
     return tuple(runs)
 
 

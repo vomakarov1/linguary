@@ -227,6 +227,7 @@ _NOTE_EN_DASH_RU_RE = re.compile(
     r"[«\"']?\b([A-Z][a-z]+(?:[-'][A-Za-z]+)?)\b[»\"']?\s*[—–-]\s*(?:сокр(?:ащ(?:[её]нно)?)?\.?\s+)?[«\"']?([А-ЯЁ][а-яё-]+(?:\s+[А-ЯЁ][а-яё-]+)?)[»\"']?"
 )
 _SPEECH_STYLE_FIRST_SCENE_KEEP = 2
+_SPEECH_STYLE_BOOK_CAP = 4
 _SPEECH_STYLE_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _SPEECH_STYLE_TOKEN = re.compile(r"[a-z]+(?:'[a-z]*)*|'[a-z]+", re.IGNORECASE)
 _CONTRACTION_SUFFIXES = frozenset({"ll", "re", "ve", "d", "m", "s"})
@@ -1740,6 +1741,9 @@ def _speech_style_lexemes(difficulty: Difficulty) -> frozenset[str]:
             continue
         significant: set[str] = set()
         for token in tokens:
+            if token.endswith("in'") and len(token) >= 4:
+                significant.add("-in'")
+                continue
             if token.endswith("'") or token.startswith("'"):
                 significant.add(token)
                 continue
@@ -1788,14 +1792,21 @@ def _repeated_speech_style_ids(
     explicit or inferred. The earliest anchor wins, not the difficulty id.
     The speaker's first 2 speech-style difficulties in their first scene/chapter
     are always kept, and any later difficulty whose dialect anchors/lexemes do
-    not overlap already-shown ones is also kept.
+    not overlap already-shown ones is also kept up to `_SPEECH_STYLE_BOOK_CAP`.
     """
     positions = _block_positions(document)
     anchors_by_speaker: dict[str, list[SourceAnchor]] = {}
+    block_speakers: dict[str, set[str]] = {}
     for fact in facts:
-        if not isinstance(fact.value, str):
+        if fact.kind != "speaker" or not isinstance(fact.value, str):
             continue
-        anchors_by_speaker.setdefault(glossary_key(fact.value), []).extend(fact.anchors)
+        key = glossary_key(fact.value)
+        if not key:
+            continue
+        speaker_anchors = anchors_by_speaker.setdefault(key, [])
+        speaker_anchors.append(fact.subject_anchor)
+        speaker_anchors.extend(fact.anchors)
+        block_speakers.setdefault(fact.subject_anchor.block_id, set()).add(key)
     grouped: dict[
         str,
         list[tuple[tuple[int, int, int, str], str, Difficulty, tuple[str, str | None]]],
@@ -1809,9 +1820,24 @@ def _repeated_speech_style_ids(
                 continue
             position = _appearance(difficulty, positions)
             scene_key = _difficulty_scene_key(analysis.section_id, plan, position, positions)
-            for key, anchors in anchors_by_speaker.items():
-                if not _overlaps(difficulty.anchors, anchors):
-                    continue
+            matched_keys = [
+                key
+                for key, anchors in anchors_by_speaker.items()
+                if _overlaps(difficulty.anchors, anchors)
+            ]
+            if not matched_keys:
+                candidate_blocks = {
+                    difficulty.owner_block_id,
+                    *(anchor.block_id for anchor in difficulty.anchors),
+                }
+                fallback_keys: set[str] = set()
+                for block_id in candidate_blocks:
+                    speakers_in_block = block_speakers.get(block_id)
+                    if speakers_in_block and len(speakers_in_block) == 1:
+                        fallback_keys.update(speakers_in_block)
+                if len(fallback_keys) == 1:
+                    matched_keys = list(fallback_keys)
+            for key in matched_keys:
                 grouped.setdefault(key, []).append(
                     (position, analysis.section_id, difficulty, scene_key)
                 )
@@ -1821,15 +1847,20 @@ def _repeated_speech_style_ids(
         items.sort(key=lambda entry: entry[0])
         first_scene = items[0][3]
         first_scene_kept = 0
+        speaker_kept = 0
         shown_lexemes: set[str] = set()
         for _, section_id, difficulty, scene_key in items:
             lexemes = _speech_style_lexemes(difficulty)
-            if scene_key == first_scene and first_scene_kept < _SPEECH_STYLE_FIRST_SCENE_KEEP:
+            if speaker_kept >= _SPEECH_STYLE_BOOK_CAP:
+                later.add((section_id, difficulty.id))
+            elif scene_key == first_scene and first_scene_kept < _SPEECH_STYLE_FIRST_SCENE_KEEP:
                 kept.add((section_id, difficulty.id))
                 first_scene_kept += 1
+                speaker_kept += 1
                 shown_lexemes.update(lexemes)
             elif lexemes and not (lexemes & shown_lexemes):
                 kept.add((section_id, difficulty.id))
+                speaker_kept += 1
                 shown_lexemes.update(lexemes)
             else:
                 later.add((section_id, difficulty.id))
