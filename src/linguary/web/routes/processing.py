@@ -173,12 +173,15 @@ async def start_processing(
     request: Request, application: CurrentApplication, book_id: str
 ) -> ProcessingStartResponse | RedirectResponse:
     """Freeze the glossary and enqueue processing tasks for all chapters."""
-    run = application.start_processing()(StartProcessingCommand(book_id=book_id))
-    with application.unit_of_work.transaction() as tx:
-        set_book_paused = getattr(tx.work, "set_book_paused", None)
-        if callable(set_book_paused):
-            set_book_paused(book_id, None, False)
-    tasks = await application.processing.start(book_id)
+    try:
+        run = application.start_processing()(StartProcessingCommand(book_id=book_id))
+        with application.unit_of_work.transaction() as tx:
+            set_book_paused = getattr(tx.work, "set_book_paused", None)
+            if callable(set_book_paused):
+                set_book_paused(book_id, None, False)
+        tasks = await application.processing.start(book_id)
+    except ConditionsError as error:
+        return input_error_response(request, _conditions_http_error(error))
     if wants_html(request):
         return RedirectResponse(
             url=f"/books/{book_id}", status_code=status.HTTP_303_SEE_OTHER

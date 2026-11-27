@@ -1428,6 +1428,74 @@ def test_set_note_on_last_awaiting_item_completes_glossary_review(
     assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
 
 
+def test_start_processing_validates_route_atomically_and_aligns_correction_route() -> None:
+    """WP1: route mismatch aborts before writing ProcessingRun; compatible 4-key route aligns correction."""
+    from linguary.application.book_conditions import ConditionsError
+
+    pinned_route = {
+        "provider": "openai_compatible",
+        "base_url": "http://127.0.0.1:51247/v1",
+        "proxy": {"mode": "direct"},
+        "route_id": "route-51247",
+    }
+    live_route = {
+        "provider": "openai_compatible",
+        "base_url": "http://127.0.0.1:51594/v1",
+        "proxy": {"mode": "direct"},
+        "route_id": "route-51594",
+    }
+    conditions = SimpleNamespace(
+        id="cond-route-1",
+        payload={
+            "route": pinned_route,
+            "models": {"processing": "gpt-test"},
+            "llm_parameters": {"temperature": 0.2, "max_output_tokens": 1000},
+            "checks": {},
+        },
+    )
+
+    corr_snapshot = replace(CORRECTION_SETTINGS, route=live_route)
+
+    unit_of_work = glossary_book(make_analysis_candidate())
+    unit_of_work.work = ProcessingWork(conditions)
+    approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
+    unit_of_work.books.save(replace(unit_of_work.books.get(BOOK_ID), status=BookStatus.GLOSSARY_REVIEW))
+
+    def _reject_route(route) -> None:
+        raise ConditionsError("route_unavailable")
+
+    use_case_reject = StartProcessing(
+        unit_of_work=unit_of_work,
+        glossary_confidence_threshold=0.8,
+        llm_settings_snapshot=LLM_SETTINGS,
+        book_conditions=SimpleNamespace(require=lambda *args, **kwargs: conditions),
+        correction_snapshot=corr_snapshot,
+        validate_route=_reject_route,
+    )
+    with pytest.raises(ConditionsError, match="route_unavailable"):
+        use_case_reject(StartProcessingCommand(book_id=BOOK_ID))
+
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
+    assert unit_of_work.runs.active_for_book(BOOK_ID) is None
+    assert unit_of_work.work.bindings == {}
+
+    seen_routes: list[object] = []
+    use_case_ok = StartProcessing(
+        unit_of_work=unit_of_work,
+        glossary_confidence_threshold=0.8,
+        llm_settings_snapshot=LLM_SETTINGS,
+        book_conditions=SimpleNamespace(require=lambda *args, **kwargs: conditions),
+        correction_snapshot=corr_snapshot,
+        validate_route=lambda route: seen_routes.append(route),
+    )
+    run = use_case_ok(StartProcessingCommand(book_id=BOOK_ID))
+    assert len(seen_routes) == 1
+    binding = unit_of_work.work.bindings.get(("run", run.id))
+    assert binding is not None
+    assert binding["payload"]["correction"]["route"] == pinned_route
+
+
+
 
 
 

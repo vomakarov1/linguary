@@ -227,6 +227,7 @@ class Application:
             glossary_review_min_chapters=settings.checks.glossary_review_min_chapters,
             llm_settings_snapshot=_llm_snapshot(settings),
             correction_snapshot=correction_snapshot(settings),
+            validate_route=self.book_runtime.validate_route,
         )
 
     async def start_import(self, book_id: str) -> ProcessingTask:
@@ -464,15 +465,17 @@ def build_application(
         )
 
         async def _start_book_processing(book_id: str) -> object:
-            candidate.llm.ensure_ready()
+            live = runtime_settings.current.settings
+            live.llm.ensure_ready()
             start_use_case = StartProcessing(
                 unit_of_work=unit_of_work,
                 book_conditions=book_conditions if conditions is not None else None,
-                glossary_confidence_threshold=candidate.checks.glossary_confidence_threshold,
-                glossary_review_min_mentions=candidate.checks.glossary_review_min_mentions,
-                glossary_review_min_chapters=candidate.checks.glossary_review_min_chapters,
-                llm_settings_snapshot=_llm_snapshot(candidate),
-                correction_snapshot=correction_snapshot(candidate),
+                glossary_confidence_threshold=live.checks.glossary_confidence_threshold,
+                glossary_review_min_mentions=live.checks.glossary_review_min_mentions,
+                glossary_review_min_chapters=live.checks.glossary_review_min_chapters,
+                llm_settings_snapshot=_llm_snapshot(live),
+                correction_snapshot=correction_snapshot(live),
+                validate_route=book_runtime.validate_route,
             )
             start_use_case(StartProcessingCommand(book_id=book_id))
             return await processing_seq.start(book_id)
