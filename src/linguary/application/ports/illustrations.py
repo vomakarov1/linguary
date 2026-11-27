@@ -266,6 +266,7 @@ class IllustrationRepository(Protocol):
         *,
         entity_id: str | None = None,
         kind: IllustrationRegistryKind | None = None,
+        kinds: Sequence[IllustrationRegistryKind] | None = None,
         max_position_key: str | None = None,
         include_back_applicable: bool = False,
         offset: int = 0,

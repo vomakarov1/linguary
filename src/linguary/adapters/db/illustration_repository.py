@@ -1606,6 +1606,7 @@ class SqlAlchemyIllustrationRepository:
         *,
         entity_id: str | None = None,
         kind: IllustrationRegistryKind | None = None,
+        kinds: Sequence[IllustrationRegistryKind] | None = None,
         max_position_key: str | None = None,
         include_back_applicable: bool = False,
         offset: int = 0,
@@ -1616,6 +1617,11 @@ class SqlAlchemyIllustrationRepository:
             conditions.append(IllustrationRegistryItemRow.entity_id == entity_id)
         if kind is not None:
             conditions.append(IllustrationRegistryItemRow.kind == IllustrationRegistryKind(kind).value)
+        elif kinds is not None:
+            kind_values = tuple(IllustrationRegistryKind(k).value for k in kinds)
+            if not kind_values:
+                return (), 0
+            conditions.append(IllustrationRegistryItemRow.kind.in_(kind_values))
         if max_position_key is not None:
             if include_back_applicable:
                 conditions.append(

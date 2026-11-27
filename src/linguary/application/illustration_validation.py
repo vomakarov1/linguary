@@ -27,6 +27,10 @@ MONOCHROME_INK_DIRECTIVE = (
 _BLOCK_ALIAS_RE = re.compile(r"^b\d+$")
 _SEGMENT_ID_RE = re.compile(r"#s\d+$")
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+_SPEECH_BUBBLE_RE = re.compile(
+    r"\b(?:speech|thought|text|comic)\s+(?:balloon|bubble|box|caption)s?\b",
+    re.IGNORECASE,
+)
 _MONOCHROME_COLOR_EN_RE = re.compile(
     r"\b(red|crimson|scarlet|green|emerald|blue|azure|cobalt|yellow|amber|gold|golden|"
     r"orange|purple|violet|pink|magenta|teal|turquoise|beige|brown|chestnut|auburn|"
@@ -106,6 +110,14 @@ _CLAUSE_STOPWORDS = frozenset(
 def has_cyrillic(text: str) -> bool:
     """Return True if the string contains any Cyrillic character."""
     return bool(_CYRILLIC_RE.search(text))
+
+
+def find_speech_bubble_term(text: str) -> str | None:
+    """Return the first disallowed comic speech/thought bubble term in `text`, or None."""
+    if not text or not text.strip():
+        return None
+    match = _SPEECH_BUBBLE_RE.search(text)
+    return match.group(0) if match is not None else None
 
 
 def dedupe_texts(items: Iterable[str]) -> tuple[str, ...]:
@@ -653,6 +665,7 @@ __all__ = [
     "dedupe_texts",
     "filter_non_assumption_placeholders",
     "find_monochrome_color_word",
+    "find_speech_bubble_term",
     "has_cyrillic",
     "resolve_insert_after_block_id",
     "validate_moment",

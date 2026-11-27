@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +15,7 @@ from linguary.application.illustration_context import (
     IllustrationContext,
     _collect_book_glossary_terms_ru,
     closed_traits_for_kind,
+    collect_book_glossary_entries,
     compact_safe_detail,
     decode_wire_id_aliases,
     encode_wire_id_aliases,
@@ -299,6 +300,8 @@ def _blocking_keys_for_mention(
 
 
 MAX_CONTEXT_ALIAS_NEIGHBORS = 8
+_EXACT_GROUP_CLIQUE_MAX = 4
+_CROSS_GROUP_REPS_MAX = 2
 
 
 def _parse_section_block_order(position_key: Any) -> tuple[int, int] | None:
@@ -329,33 +332,78 @@ def build_alias_candidate_pairs(
     mentions: Sequence[Mapping[str, Any]],
     *,
     glossary_links: Mapping[str, str] | None = None,
+    fact_counts: Mapping[str, int] | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """Deterministically generate candidate `(mention_a, mention_b)` pairs via blocking.
+    """Deterministically generate candidate `(mention_a, mention_b)` pairs via linear blocking.
 
-    Subquadratic for large books; pairs with the exact same name are still emitted as
-    candidates (same name is NOT automatic identity).
+    Exact-name groups of size `k > _EXACT_GROUP_CLIQUE_MAX` emit a star + chain (`2k - 3` pairs)
+    rooted at the highest-ranked anchor (by `fact_counts`, `position_key`, `mention_key`).
+    Cross-group buckets connect only bounded representatives plus all mentions with `alias_of_hint`.
+    Same name is NEVER automatic identity.
     """
     links = glossary_links or {}
-    buckets: dict[str, list[str]] = defaultdict(list)
-    kind_by_key: dict[str, str] = {}
     sorted_mentions = sorted(mentions, key=lambda m: str(m["mention_key"]))
+
+    def _rep_rank(m: Mapping[str, Any]) -> tuple[int, str, str]:
+        mk = str(m["mention_key"])
+        cnt = fact_counts.get(mk, 0) if fact_counts else 0
+        return (-cnt, str(m.get("position_key") or ""), mk)
+
+    groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    bucket_groups: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for mention in sorted_mentions:
-        mkey = str(mention["mention_key"])
-        kind_by_key[mkey] = str(mention["entity_kind"])
+        ekind = str(mention["entity_kind"])
+        gkey = (ekind, normalize_name_token(str(mention.get("name", ""))))
+        groups[gkey].append(mention)
         for bkey in sorted(_blocking_keys_for_mention(mention, glossary_links=links)):
-            buckets[bkey].append(mkey)
+            bucket_groups[bkey].add(gkey)
 
     pairs: set[tuple[str, str]] = set()
-    for members in buckets.values():
-        unique = sorted(set(members))
-        if len(unique) < 2:
+    reps: dict[tuple[str, str], list[str]] = {}
+    for gkey, members in groups.items():
+        ranked = sorted(members, key=_rep_rank)
+        k = len(ranked)
+        if k <= _EXACT_GROUP_CLIQUE_MAX:
+            for i in range(k):
+                a = str(ranked[i]["mention_key"])
+                for j in range(i + 1, k):
+                    b = str(ranked[j]["mention_key"])
+                    if a != b:
+                        pairs.add((a, b) if a < b else (b, a))
+        else:
+            anchor = str(ranked[0]["mention_key"])
+            for i in range(1, k):
+                b = str(ranked[i]["mention_key"])
+                if anchor != b:
+                    pairs.add((anchor, b) if anchor < b else (b, anchor))
+            for i in range(1, k - 1):
+                a = str(ranked[i]["mention_key"])
+                b = str(ranked[i + 1]["mention_key"])
+                if a != b:
+                    pairs.add((a, b) if a < b else (b, a))
+
+        base_reps = [str(m["mention_key"]) for m in ranked[:_CROSS_GROUP_REPS_MAX]]
+        hint_reps = [
+            str(m["mention_key"])
+            for m in ranked
+            if isinstance(m.get("alias_of_hint"), str) and m["alias_of_hint"].strip()
+        ]
+        reps[gkey] = list(dict.fromkeys([*base_reps, *hint_reps]))
+
+    for members_groups in bucket_groups.values():
+        unique_groups = sorted(members_groups)
+        if len(unique_groups) < 2:
             continue
-        for i in range(len(unique)):
-            a = unique[i]
-            for j in range(i + 1, len(unique)):
-                b = unique[j]
-                if kind_by_key[a] == kind_by_key[b]:
-                    pairs.add((a, b))
+        for i in range(len(unique_groups)):
+            g1 = unique_groups[i]
+            for j in range(i + 1, len(unique_groups)):
+                g2 = unique_groups[j]
+                if g1[0] != g2[0]:
+                    continue
+                for a in reps[g1]:
+                    for b in reps[g2]:
+                        if a != b:
+                            pairs.add((a, b) if a < b else (b, a))
 
     # Contextual blocking for anonymous tier-0 person descriptors with valid position_key.
     persons_by_section: dict[int, list[tuple[str, int, int, str]]] = defaultdict(list)
@@ -385,13 +433,21 @@ def build_alias_candidate_pairs(
         mkey = str(mention["mention_key"])
         mnorm = normalize_name_token(mname)
         others = [
-            (0 if o_tier >= 1 else 1, abs(o_blk - blk_ord), okey)
+            (0 if o_tier >= 1 else 1, abs(o_blk - blk_ord), okey, o_norm)
             for okey, o_blk, o_tier, o_norm in persons_by_section[sec_ord]
             if okey != mkey and (o_tier >= 1 or o_norm != mnorm)
         ]
         others.sort()
-        for _, _, okey in others[:MAX_CONTEXT_ALIAS_NEIGHBORS]:
+        seen_neighbor_norms: set[str] = set()
+        picked = 0
+        for _, _, okey, o_norm in others:
+            if o_norm in seen_neighbor_norms:
+                continue
+            seen_neighbor_norms.add(o_norm)
             pairs.add((mkey, okey) if mkey < okey else (okey, mkey))
+            picked += 1
+            if picked >= MAX_CONTEXT_ALIAS_NEIGHBORS:
+                break
 
     return tuple(sorted(pairs))
 
@@ -2373,8 +2429,7 @@ class IllustrationReference:
 
         glossary_links: dict[str, str] = {}
         glossary_source_keys: set[str] = set()
-        glossary_ru_by_key: dict[str, str] = {}
-        glossary_ru_rank: dict[str, int] = {}
+        approved_glossary_keys: set[str] = set()
         glossary_repo = getattr(tx, "glossary", None)
         list_glossary = getattr(glossary_repo, "list_for_book", None) if glossary_repo is not None else None
         if callable(list_glossary):
@@ -2384,16 +2439,28 @@ class IllustrationReference:
                     continue
                 glossary_links[ckey] = concept.id
                 glossary_source_keys.add(ckey)
+                concept_status = getattr(getattr(concept, "status", None), "value", "")
                 ru_var = concept.variant_for("ru")
-                if ru_var is not None and ru_var.text.strip():
-                    status_val = getattr(ru_var.status, "value", "")
-                    rank = 2 if status_val == "locked" else (1 if status_val == "approved" else 0)
-                    if rank > glossary_ru_rank.get(ckey, -1):
-                        glossary_ru_rank[ckey] = rank
-                        glossary_ru_by_key[ckey] = ru_var.text.strip()
+                ru_status = (
+                    getattr(getattr(ru_var, "status", None), "value", "")
+                    if ru_var is not None
+                    else ""
+                )
+                if concept_status in {"approved", "locked"} or ru_status in {"approved", "locked"}:
+                    approved_glossary_keys.add(ckey)
         glossary_source_keys_frozen = frozenset(glossary_source_keys)
+        approved_glossary_keys_frozen = frozenset(approved_glossary_keys)
+        glossary_ru_by_key: dict[str, str] = {
+            ckey: tr
+            for ckey, (_src, tr) in collect_book_glossary_entries(tx, generation.book_id).items()
+        }
 
-        candidate_pairs = build_alias_candidate_pairs(mentions, glossary_links=glossary_links)
+        fact_counts = Counter(
+            str(f["subject_mention_key"]) for f in facts if f.get("subject_mention_key")
+        )
+        candidate_pairs = build_alias_candidate_pairs(
+            mentions, glossary_links=glossary_links, fact_counts=fact_counts
+        )
         if candidate_pairs and not alias_scopes:
             mention_by_key = {str(m["mention_key"]): m for m in mentions}
             facts_by_mention: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -2698,7 +2765,7 @@ class IllustrationReference:
                     str(f.get("temporal_scope", "")) == "permanent"
                     for f in facts_by_entity.get(str(e["entity_id"]), ())
                 )
-                or bool(e.get("glossary_translation_ru"))
+                or glossary_key(str(e.get("canonical_name") or "")) in approved_glossary_keys_frozen
             )
         ]
         if design_entities and not design_scopes:

@@ -58,6 +58,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskError,
     TaskType,
+    glossary_key,
 )
 from linguary.domain.book_conditions import thaw
 from linguary.domain.content_plan import canonical_sha
@@ -81,7 +82,7 @@ from linguary.domain.illustrations import (
 from linguary.domain.llm_log import LLMCallStage
 
 _MAX_SHORTLIST = 24
-_MAX_CANDIDATE_BLOCKS_PER_CHUNK = 24
+_MAX_CANDIDATE_BLOCKS_PER_CHUNK = 64
 _MAX_KNOWN_ENTITIES_PER_KIND = 40
 _DEFAULT_ZERO_REASON_RU = "В этой главе не нашлось выразительных визуальных моментов для иллюстрации."
 
@@ -112,11 +113,18 @@ def _known_entities_context_for_chapter(
     generation_id: str,
     *,
     section_order: int,
+    max_position_key: str | None = None,
+    preloaded_entities: Sequence[Mapping[str, Any]] | None = None,
     limit_per_kind: int = _MAX_KNOWN_ENTITIES_PER_KIND,
 ) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, list[str]]]:
-    """Collect clean spoiler-free known names and separate non-spoiler aliases visible by `section_order`."""
+    """Collect clean spoiler-free known names and separate non-spoiler aliases visible by `max_position_key`."""
     chapter_end_pos = format_position_key(section_order, 999_999, 99_999_999)
-    entities = _load_entity_payloads(tx, generation_id)
+    effective_max_pos = max_position_key or chapter_end_pos
+    entities = (
+        list(preloaded_entities)
+        if preloaded_entities is not None
+        else _load_entity_payloads(tx, generation_id)
+    )
     persons: list[tuple[int, str, str, str, list[str]]] = []
     locations: list[tuple[int, str, str, str, list[str]]] = []
     for ent in entities:
@@ -126,14 +134,14 @@ def _known_entities_context_for_chapter(
             type(o) is int and o == section_order for o in raw_orders
         )
         first_pos = str(ent.get("first_position_key") or "")
+        if first_pos and first_pos > effective_max_pos:
+            continue
         if not in_current:
-            if first_pos and first_pos > chapter_end_pos:
-                continue
             if not first_pos and has_orders and not any(
                 type(o) is int and o <= section_order for o in raw_orders
             ):
                 continue
-        display_name = _display_name_at_position(ent, chapter_end_pos).strip()
+        display_name = _display_name_at_position(ent, effective_max_pos).strip()
         if not display_name:
             continue
         display_norm = normalize_name_token(display_name)
@@ -146,7 +154,7 @@ def _known_entities_context_for_chapter(
                     raw_alias is None
                     or not isinstance(pos, str)
                     or not pos
-                    or pos > chapter_end_pos
+                    or pos > effective_max_pos
                 ):
                     continue
                 clean_alias = str(raw_alias).strip()
@@ -887,16 +895,37 @@ class IllustrationSelection:
         policy = revision.settings.policy
         sizer = self._runtime.sizer_for(revision, LLMCallStage.ILLUSTRATION_CHAPTER)
         route_id = self._runtime.route_id()
+        preloaded_entities = _load_entity_payloads(tx, generation.id)
         known_characters, known_locations, known_entity_aliases = (
             _known_entities_context_for_chapter(
-                tx, generation.id, section_order=entry.order
+                tx,
+                generation.id,
+                section_order=entry.order,
+                preloaded_entities=preloaded_entities,
             )
         )
+        priority_glossary_keys: set[str] = set()
+        for scene_meta in scene_units:
+            for part in scene_meta.get("participants", ()):
+                if part and str(part).strip():
+                    k = glossary_key(str(part))
+                    if k:
+                        priority_glossary_keys.add(k)
+            loc = scene_meta.get("location")
+            if loc and str(loc).strip():
+                k = glossary_key(str(loc))
+                if k:
+                    priority_glossary_keys.add(k)
+        for name in (*known_characters, *known_locations):
+            k = glossary_key(name)
+            if k:
+                priority_glossary_keys.add(k)
         chapter_glossary_terms_ru = _collect_book_glossary_terms_ru(
             tx,
             generation.book_id,
             generation_id=generation.id,
             max_section_order=entry.order,
+            priority_keys=frozenset(priority_glossary_keys),
         )
 
         specs: list[IllustrationScopeSpec] = []
@@ -963,6 +992,25 @@ class IllustrationSelection:
             )
             for c_idx, chunk in enumerate(chunks):
                 scope_key = f"cand:{section_id}:s{s_idx:03d}:p{c_idx:03d}"
+                chunk_block_orders = [
+                    int(b["block_order"])
+                    for b in chunk
+                    if b.get("block_order") is not None
+                ]
+                chunk_end_pos = (
+                    format_position_key(entry.order, max(chunk_block_orders), 99_999_999)
+                    if chunk_block_orders
+                    else None
+                )
+                chunk_known_chars, chunk_known_locs, chunk_known_aliases = (
+                    _known_entities_context_for_chapter(
+                        tx,
+                        generation.id,
+                        section_order=entry.order,
+                        max_position_key=chunk_end_pos,
+                        preloaded_entities=preloaded_entities,
+                    )
+                )
                 draft = _build_candidate_scope_spec(
                     section_id=section_id,
                     section_order=entry.order,
@@ -973,9 +1021,9 @@ class IllustrationSelection:
                     depth=0,
                     revision=revision,
                     route_id=route_id,
-                    known_characters=known_characters,
-                    known_locations=known_locations,
-                    known_entity_aliases=known_entity_aliases,
+                    known_characters=chunk_known_chars,
+                    known_locations=chunk_known_locs,
+                    known_entity_aliases=chunk_known_aliases,
                     glossary_terms_ru=bounded_glossary_terms_ru,
                 )
                 reusable = tx.illustrations.find_reusable_scope(
@@ -994,9 +1042,9 @@ class IllustrationSelection:
                         depth=0,
                         revision=revision,
                         route_id=route_id,
-                        known_characters=known_characters,
-                        known_locations=known_locations,
-                        known_entity_aliases=known_entity_aliases,
+                        known_characters=chunk_known_chars,
+                        known_locations=chunk_known_locs,
+                        known_entity_aliases=chunk_known_aliases,
                         glossary_terms_ru=bounded_glossary_terms_ru,
                         reusable=reusable,
                     )

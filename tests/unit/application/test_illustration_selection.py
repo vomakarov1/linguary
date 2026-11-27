@@ -1808,3 +1808,143 @@ def test_moments_conflict_diversity_min_block_gap() -> None:
     winners_legacy, _, _ = enforce_intra_chapter_diversity([c_b2, c_b3], [c_b5])
     assert [w.candidate_id for w in winners_legacy] == ["c-b2", "c-b3"]
 
+
+async def test_candidates_known_entities_scoped_to_chunk_end_pos_and_block_limit_64(
+    tmp_path: Path,
+) -> None:
+    from linguary.application.illustration_selection import (
+        _MAX_CANDIDATE_BLOCKS_PER_CHUNK,
+        _known_entities_context_for_chapter,
+    )
+    from linguary.domain.illustrations import (
+        TIMELESS_POSITION_KEY,
+        IllustrationRegistryKind,
+        RegistryItem,
+    )
+
+    assert _MAX_CANDIDATE_BLOCKS_PER_CHUNK == 64
+
+    seen_chunks: list[dict[str, Any]] = []
+
+    def _handler(req: LLMRequest[Any], _n: int) -> Any:
+        data = json.loads(req.input_text)
+        if req.kind is LLMResponseKind.ILLUSTRATION_CANDIDATES:
+            seen_chunks.append(data)
+            return IllustrationCandidatesResponse(
+                scene_id=data["scene_id"],
+                events=(),
+                zero_reason_ru="Тихо.",
+                covered_source_unit_ids=tuple(b["source_unit_id"] for b in data["blocks"]),
+                complete=True,
+            )
+        raise AssertionError(req.kind)
+
+    # 70 blocks in one scene -> splits into 2 chunks: blocks 0..63 (chunk 0) and blocks 64..69 (chunk 1).
+    blocks_70 = [(f"b-{i}", f"Paragraph {i} in the quiet hall.") for i in range(70)]
+    harness = _setup_chapter(
+        tmp_path,
+        scenes_spec=[("Большая сцена", blocks_70)],
+        handler=_handler,
+        book_id="book-chunk-end-pos",
+    )
+
+    with harness.uow.transaction() as tx:
+        gen = tx.illustrations.get_generation(harness.book_id, harness.generation_id)
+        assert gen is not None
+        snap = harness.source.snapshot(tx, harness.book_id)
+        head = tx.illustrations.get_head(harness.book_id)
+        assert head.settings_id is not None
+        tx.illustrations.revoke_generation(harness.book_id, gen.id, reason_code="settings_changed")
+        gen2, _ = tx.illustrations.create_or_get_generation(
+            harness.book_id,
+            settings_id=head.settings_id,
+            request_key="req-chunk-end-pos-2",
+            source_sha256=gen.source_sha256,
+            source_authority=gen.source_authority,
+            requested_sections=(harness.section_id,),
+        )
+        assert snap.manifest is not None and snap.manifest_sha256 is not None
+        gen2 = tx.illustrations.seal_manifest(
+            harness.book_id, gen2.id, manifest=snap.manifest, manifest_sha256=snap.manifest_sha256
+        )
+
+        early_pay = {
+            "entity_id": "ent-early",
+            "entity_kind": "person",
+            "canonical_name": "Hagrid",
+            "aliases": ["the stranger"],
+            "alias_first_positions": {
+                "the stranger": format_position_key(0, 2, 0),
+                "Hagrid": format_position_key(0, 66, 0),
+            },
+            "section_orders": [0],
+            "mention_count": 2,
+            "first_position_key": format_position_key(0, 2, 0),
+        }
+        late_same_chapter_pay = {
+            "entity_id": "ent-late-same-ch",
+            "entity_kind": "person",
+            "canonical_name": "Latecomer",
+            "aliases": [],
+            "alias_first_positions": {"Latecomer": format_position_key(0, 66, 0)},
+            "section_orders": [0],
+            "mention_count": 1,
+            "first_position_key": format_position_key(0, 66, 0),
+        }
+        tx.illustrations.upsert_registry_items(
+            gen2.id,
+            [
+                RegistryItem(
+                    generation_id=gen2.id,
+                    kind=IllustrationRegistryKind.ENTITY,
+                    item_key="ent-early",
+                    entity_id="ent-early",
+                    position_key=TIMELESS_POSITION_KEY,
+                    is_back_applicable=False,
+                    payload_sha256=canonical_sha(early_pay),
+                    payload=early_pay,
+                ),
+                RegistryItem(
+                    generation_id=gen2.id,
+                    kind=IllustrationRegistryKind.ENTITY,
+                    item_key="ent-late-same-ch",
+                    entity_id="ent-late-same-ch",
+                    position_key=TIMELESS_POSITION_KEY,
+                    is_back_applicable=False,
+                    payload_sha256=canonical_sha(late_same_chapter_pay),
+                    payload=late_same_chapter_pay,
+                ),
+            ],
+        )
+        gen2 = tx.illustrations.seal_registry(harness.book_id, gen2.id, registry_sha256="e" * 64)
+        gen2 = tx.illustrations.update_generation_state(
+            harness.book_id, gen2.id, state=IllustrationGenerationState.QUEUED, reason_code=None
+        )
+        new_gen_id = gen2.id
+
+        # Direct unit check: max_position_key at block 10 excludes Latecomer (same chapter, block 66)
+        # and displays "the stranger" (not "Hagrid") with no future alias leak!
+        kc_early, _kl_early, aliases_early = _known_entities_context_for_chapter(
+            tx,
+            new_gen_id,
+            section_order=0,
+            max_position_key=format_position_key(0, 10, 99_999_999),
+        )
+        assert kc_early == ("the stranger",)
+        assert "Hagrid" not in kc_early
+        assert "Latecomer" not in kc_early
+        assert "Hagrid" not in aliases_early.get("the stranger", [])
+
+    harness.selection.plan_scopes(new_gen_id, harness.section_id)
+    await _drain_selection_tasks(harness)
+
+    assert len(seen_chunks) >= 2
+    first_chunk = min(seen_chunks, key=lambda c: c["blocks"][0]["block_order"])
+    last_chunk = max(seen_chunks, key=lambda c: c["blocks"][-1]["block_order"])
+    assert "Latecomer" not in first_chunk["known_characters"]
+    assert "Hagrid" not in first_chunk["known_characters"]
+    assert "the stranger" in first_chunk["known_characters"]
+    assert "Latecomer" in last_chunk["known_characters"]
+    assert "Hagrid" in last_chunk["known_characters"]
+
+
