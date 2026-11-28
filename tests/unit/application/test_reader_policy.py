@@ -626,3 +626,31 @@ def test_validate_a2_summary_rejects_disallowed_heading_prefix_in_monolingual_mo
         language_detector=LANGUAGE_DETECTOR,
         require_parallel_russian=True,
     )
+
+
+def test_a2_instructions_specify_note_guillemets_and_yo_anti_hypercorrection_without_changing_prepare():
+    """A4.2 & A4.3: prompts require «…» in notes and guard against «ё» hypercorrection; prepare stays idempotent."""
+    from linguary.domain import BlockProcessingResult, BlockTreatment, GlossaryHint, LanguageNote
+
+    instructions = learner_instructions('a2')
+    assert 'кавычки-ёлочки «…» (не прямые "...")' in instructions
+    assert 'гиперкоррекции' in instructions
+    assert '«починенный», а не «починённый»' in instructions
+
+    # `ReaderTextPolicy.prepare_results` must remain strictly idempotent on stored notes with straight/curly quotes.
+    policy = ReaderTextPolicy()
+    result = BlockProcessingResult(
+        'block-q1',
+        BlockTreatment.TRANSLATE,
+        translated_text='Он починил замок.',
+        glossary_hints=(
+            GlossaryHint('mended', 'починенный', 'Слово "mended" означает “починенный”.'),
+        ),
+        language_notes=(
+            LanguageNote('n-q1', 'block-q1', 'mended', 'Форма "mended" — “починенный”.'),
+        ),
+    )
+    prepared = policy.prepare_results((result,))
+    assert prepared == (result,)
+    assert policy.prepare_results(prepared) == prepared
+

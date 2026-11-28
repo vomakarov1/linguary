@@ -3,9 +3,10 @@ import asyncio
 from dataclasses import replace
 
 from linguary.adapters.runtime import ExecutorLock
+from linguary.application.llm_dto import LLMPayloadError
 from linguary.application.ports.llm import (
-    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMResponseFormatError,
-    LLMTransportError,
+    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMRequest,
+    LLMRequestTooLargeError, LLMResponseFormatError, LLMTransportError,
 )
 from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.composition import drain_tasks
@@ -337,3 +338,110 @@ async def test_full_chain_not_sent_rollback_cancel_in_http_and_poisoned_diagnost
         assert _translation_requests(fake3) == []
     finally:
         await app3.aclose()
+
+
+async def test_provenance_client_not_rooted_settles_attempts_without_false_unknown(tmp_path):
+    """Non-rooted ProvenanceClient calls settle known failures to failed/cancelled, reserving unknown for ambiguous outcomes."""
+    import pytest
+    from linguary.adapters.llm.logging import LoggingLLMClient
+    from linguary.composition.book_runtime import ProvenanceClient
+
+    cases = [
+        ("known_transient", LLMTransportError("HTTP 429", outcome="known_transient"), False, "failed"),
+        ("not_sent", LLMTransportError("connect failed", outcome="not_sent"), False, "cancelled"),
+        ("unknown_transport", LLMTransportError("read timeout", outcome="unknown"), False, "unknown"),
+        ("request_too_large", LLMRequestTooLargeError("too large", size_bytes=200, max_bytes=100), False, "cancelled"),
+        ("provider_error", LLMProviderError("HTTP 400"), False, "failed"),
+        ("payload_error", LLMPayloadError("invalid payload"), False, "failed"),
+        ("context_capacity", LLMContextCapacityError("context limit"), False, "failed"),
+        ("config_error", LLMConfigurationError("bad key"), False, "failed"),
+        ("format_error_direct", LLMResponseFormatError("invalid json"), False, "failed"),
+        ("format_error_logged", LLMResponseFormatError("invalid json", raw_content="{"), True, "rejected"),
+        ("unexpected_runtime", RuntimeError("boom"), False, "unknown"),
+    ]
+
+    class _FailingInner:
+        def __init__(self, err: BaseException, seen: list[str]) -> None:
+            self._err = err
+            self._seen = seen
+
+        async def generate(self, request):
+            assert request.call_context is not None
+            self._seen.append(request.call_context.attempt_id)
+            raise self._err
+
+    for name, error, with_logging, expected_state in cases:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        app = make_app(case_dir, FakeLLMClient())
+        try:
+            store_imported(app)
+            cond_id = app.book_conditions.freeze_before_analysis("book-1", expected_settings_revision=0)
+            seen_attempt_ids: list[str] = []
+            failing_inner = _FailingInner(error, seen_attempt_ids)
+
+            inner = (
+                LoggingLLMClient(
+                    inner=failing_inner,
+                    unit_of_work=app.unit_of_work,
+                    provider="openai_compatible",
+                    model="gpt-test",
+                )
+                if with_logging
+                else failing_inner
+            )
+            client = ProvenanceClient(inner, app.book_conditions, cond_id)
+            request = LLMRequest.for_chapter_analysis(
+                instructions="Analyze.",
+                input_text="{}",
+            ).with_logging(
+                book_id="book-1",
+                stage=LLMCallStage.CHAPTER_ANALYSIS,
+                scope_id="section-1",
+            )
+
+            with pytest.raises(type(error)):
+                await client.generate(request)
+
+            assert len(seen_attempt_ids) == 1, name
+            with app.unit_of_work.transaction() as tx:
+                saved = tx.work.get_attempt(seen_attempt_ids[0])
+            assert saved is not None, name
+            assert saved.state == expected_state, (name, saved.state, expected_state)
+        finally:
+            await app.aclose()
+
+
+async def test_rooted_request_too_large_preserves_rooted_behavior(tmp_path):
+    """Rooted calls keep existing behavior on LLMRequestTooLargeError (not rolled back in ProvenanceClient)."""
+    case = tmp_path / "rooted-too-large"
+    case.mkdir()
+    fake = FakeLLMClient([analysis_reply(2), LLMRequestTooLargeError("too large"), translation_reply(2)])
+    app = make_app(case, fake)
+    _one_attempt(app)
+    seen: list[str] = []
+    try:
+        _doc, run, _task = await prepare(app)
+        client = _processing_client(app)
+        original = client.generate
+
+        async def _observe(request):
+            try:
+                return await original(request)
+            except Exception:
+                attempt_id = request.call_context.attempt_id
+                with app.unit_of_work.transaction() as tx:
+                    seen.append(tx.work.get_attempt(attempt_id).state)
+                raise
+
+        client.generate = _observe
+        completed = await drain_tasks(app)
+        assert completed[0].status == TaskStatus.FAILED
+        assert seen == ["sent"]
+        with app.unit_of_work.transaction() as tx:
+            root, = tx.work.list_roots("book-1", run_id=run.id)
+            attempts = tx.work.list_root_attempts(root.id)
+        assert attempts and all(a.state != "unknown" for a in attempts)
+    finally:
+        await app.aclose()
+

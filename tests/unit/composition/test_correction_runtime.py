@@ -11,7 +11,10 @@ import pytest
 from linguary.adapters.config.settings import AppSettings, LLMSettings
 from linguary.composition.book_runtime import conditions_payload
 from linguary.composition.correction_runtime import (
+    CORRECTION_POLICY_VERSION_V3,
     CORRECTION_PROMPT_V2,
+    CORRECTION_REVIEW_PROMPT,
+    CORRECTION_VERSIONS_V3,
     CorrectionRuntimeResolver,
     correction_snapshot,
 )
@@ -489,6 +492,51 @@ async def test_correction_runtime_resolver_operational_overrides_legacy_route_an
 
     await resolver.aclose()
     assert created_clients[1].closed == 1
+
+
+def test_correction_prompts_sync_orthography_warnings_and_review_criteria() -> None:
+    for expected in (
+        "гиперкоррекцию «ё»",
+        "починённый",
+        "починенный",
+        "неестественный порядок слов",
+        "в самый тот день",
+        "в тот самый день",
+        "validator_warnings",
+    ):
+        assert expected in CORRECTION_PROMPT_V2
+    assert "условиям книги" not in CORRECTION_PROMPT_V2
+    assert "условия книги" not in CORRECTION_PROMPT_V2
+
+    for expected in (
+        "candidate_id",
+        "confirmed",
+        "needs_human",
+        "two dozen",
+        "две дюжины",
+        "гиперкоррекцию «ё»",
+        "неестественный порядок слов",
+        "language_notes",
+        "glossary_hints.note",
+        "грамматического рода животных",
+        "«ты/вы»",
+        "— Реплика!\\nАвторское предложение.",
+        "— Реплика 1.\\nАвторское предложение.\\n— Реплика 2.",
+        "Авторское предложение. — Реплика 2.",
+        "кавычек-ёлочек с начала абзаца",
+        "changes",
+    ):
+        assert expected in CORRECTION_REVIEW_PROMPT
+    assert "proposal_sha256" not in CORRECTION_REVIEW_PROMPT
+    assert CORRECTION_POLICY_VERSION_V3 == "chapter-correction-v3"
+    assert CORRECTION_VERSIONS_V3 == {
+        "context": 2,
+        "schema": 2,
+        "validation": 3,
+        "grouping": 1,
+        "review_schema": 1,
+    }
+
 
 
 

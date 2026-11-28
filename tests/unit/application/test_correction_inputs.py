@@ -2756,4 +2756,142 @@ def test_correction_verdict_allows_empty_reason_only_when_confirmed() -> None:
         CorrectionVerdict("cand-1", "needs_human", True, True, True, True, "")
 
 
+def test_correct_chapter_v2_request_passes_aliased_validator_warnings_separately():
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        CorrectionSnapshotV2,
+    )
+    from linguary.domain import (
+        ChapterAnalysis,
+        ResultWarning,
+        ResultWarningKind,
+        TreatmentPlan,
+    )
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    section = make_analysis_section(texts=("First warning block.", "Second clean block."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    raw_diff_id = "df-11111111-2222-3333-4444-555555555555"
+    raw_fact_id = "cf-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id=raw_diff_id,
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="meaning"),),
+            ),
+        ),
+        context_facts=(
+            ContextFact(
+                id=raw_fact_id,
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+                subject_anchor=SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),
+                value="Narrator",
+                certainty="explicit",
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-warn",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+        content_plan=content_plan,
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первый блок.",
+        warnings=(
+            ResultWarning(
+                kind=ResultWarningKind.QUALITY,
+                message=f"Повтор в блоке {b1.id} по трудности {raw_diff_id} и факту {raw_fact_id}",
+            ),
+        ),
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второй блок.",
+    )
+    v2_snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=v2_snapshot,
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+    task = SimpleNamespace(book_id=doc.id, id="task-1", scope_id=section.id)
+
+    v2_request = CorrectChapter(
+        unit_of_work=None, llm_client=None, snapshot=v2_snapshot, validator=None
+    )._request(inputs, task, (b1.id, b2.id))
+    v2_body = json.loads(v2_request.input_text)
+
+    assert v2_body["blocks"][0]["validator_warnings"] == [
+        "Повтор в блоке b1 по трудности d1 и факту f1"
+    ]
+    assert "warnings" not in v2_body["blocks"][0]["current_result"]
+    assert "validator_warnings" not in v2_body["blocks"][1]
+    assert b1.id not in v2_request.input_text
+    assert b2.id not in v2_request.input_text
+    assert raw_diff_id not in v2_request.input_text
+    assert raw_fact_id not in v2_request.input_text
+
+    v1_snapshot = CorrectionSnapshot(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters=v2_snapshot.parameters,
+        prompt="Correct v1.",
+        versions=CORRECTION_VERSIONS,
+    )
+    v1_request = CorrectChapter(
+        unit_of_work=None, llm_client=None, snapshot=v1_snapshot, validator=None
+    )._request(inputs, task, (b1.id, b2.id))
+    v1_body = json.loads(v1_request.input_text)
+    assert "validator_warnings" not in v1_body["blocks"][0]
+
+
+
 

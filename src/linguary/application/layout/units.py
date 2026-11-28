@@ -278,12 +278,91 @@ def _normalize_display_note(note: LayoutNote, target_language: str | None) -> La
     if not _is_russian(target_language) or not note.body:
         return note
     normalized_body = tuple(
-        _normalize_display_translation(paragraph, target_language)
+        _normalize_outer_note_quotes(_normalize_display_translation(paragraph, target_language))
         for paragraph in note.body
     )
     if normalized_body == note.body:
         return note
     return replace(note, body=normalized_body)
+
+
+def _normalize_outer_note_quotes(text: str) -> str:
+    """Replace outer paired `“...”` and `"..."` with `«...»` in Russian notes in O(N) time.
+
+    Quotes inside existing `«…»`, straight `"` immediately after a digit (e.g. `6"`),
+    empty, multiline, guillemet-containing, or unpaired quotes stay untouched.
+    """
+    if '"' not in text and "“" not in text:
+        return text
+    chars = list(text)
+    depth = 0
+    curly_depth = 0
+    curly_open = -1
+    curly_valid = False
+    straight_open = -1
+    straight_valid = False
+    straight_pairs: list[tuple[int, int]] = []
+    for index, char in enumerate(text):
+        if char == "«":
+            depth += 1
+            if curly_depth > 0:
+                curly_valid = False
+            if straight_open >= 0:
+                straight_valid = False
+        elif char == "»":
+            depth = max(0, depth - 1)
+            if curly_depth > 0:
+                curly_valid = False
+            if straight_open >= 0:
+                straight_valid = False
+        elif char in ("\n", "\r"):
+            if curly_depth > 0:
+                curly_valid = False
+            if straight_open >= 0:
+                straight_valid = False
+        elif char == "“":
+            if depth == 0 and straight_open < 0:
+                if curly_depth == 0:
+                    curly_open = index
+                    curly_valid = True
+                curly_depth += 1
+        elif char == "”":
+            if curly_depth > 0:
+                curly_depth -= 1
+                if curly_depth == 0:
+                    if (
+                        curly_valid
+                        and depth == 0
+                        and curly_open >= 0
+                        and index > curly_open + 1
+                        and text[curly_open + 1 : index].strip()
+                    ):
+                        chars[curly_open] = "«"
+                        chars[index] = "»"
+                    curly_open = -1
+                    curly_valid = False
+        elif char == '"':
+            if depth != 0 or curly_depth > 0:
+                continue
+            if straight_open < 0:
+                if index > 0 and text[index - 1].isdigit():
+                    continue
+                straight_open = index
+                straight_valid = True
+            else:
+                if (
+                    straight_valid
+                    and index > straight_open + 1
+                    and text[straight_open + 1 : index].strip()
+                ):
+                    straight_pairs.append((straight_open, index))
+                straight_open = -1
+                straight_valid = False
+    if straight_open < 0:
+        for open_idx, close_idx in straight_pairs:
+            chars[open_idx] = "«"
+            chars[close_idx] = "»"
+    return "".join(chars)
 
 
 def _normalize_display_translation(text: str, target_language: str | None) -> str:

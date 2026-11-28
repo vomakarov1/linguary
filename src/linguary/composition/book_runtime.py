@@ -24,9 +24,10 @@ from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext, LLMCallStage
 from linguary.domain.name_translation import NameTranslationPolicy
+from linguary.application.llm_dto import LLMPayloadError
 from linguary.application.ports.llm import (
-    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMResponseFormatError,
-    LLMTransportError,
+    LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMRequestTooLargeError,
+    LLMResponseFormatError, LLMTransportError,
 )
 from linguary.application.recovery import RecoveryError
 from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
@@ -258,15 +259,22 @@ class ProvenanceClient:
             if current is not None and current.state == 'sent':
                 transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')
 
+    def _mark_sent_failed(self, attempt_id):
+        with self.service.uow.transaction() as transaction:
+            current = transaction.work.get_attempt(attempt_id)
+            if current is not None and current.state == 'sent':
+                with suppress(WorkStateError):
+                    transaction.work.transition_attempt(attempt_id, 'failed', expected_state='sent')
+
     def _settle_transport(self, attempt_id, error, *, rooted):
-        if rooted and error.outcome == 'known_transient':
-            return
-        if rooted and error.outcome == 'not_sent':
+        if error.outcome == 'not_sent':
             with self.service.uow.transaction() as transaction:
-                try:
+                with suppress(WorkStateError):
                     transaction.work.rollback_not_sent_attempt(attempt_id)
-                except WorkStateError:
-                    return
+            return
+        if error.outcome == 'known_transient':
+            if not rooted:
+                self._mark_sent_failed(attempt_id)
             return
         self._mark_sent_unknown(attempt_id)
 
@@ -368,9 +376,21 @@ class ProvenanceClient:
         except LLMTransportError as error:
             self._settle_transport(attempt.id, error, rooted=rooted)
             raise
-        except (LLMResponseFormatError, LLMContextCapacityError, LLMConfigurationError, LLMProviderError):
+        except LLMRequestTooLargeError:
             if not rooted:
-                self._mark_sent_unknown(attempt.id)
+                with self.service.uow.transaction() as transaction:
+                    with suppress(WorkStateError):
+                        transaction.work.rollback_not_sent_attempt(attempt.id)
+            raise
+        except (
+            LLMResponseFormatError,
+            LLMPayloadError,
+            LLMContextCapacityError,
+            LLMConfigurationError,
+            LLMProviderError,
+        ):
+            if not rooted:
+                self._mark_sent_failed(attempt.id)
             raise
         except BaseException:
             self._mark_sent_unknown(attempt.id)

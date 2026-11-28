@@ -3487,4 +3487,176 @@ def test_speech_style_fallback_does_not_ignore_multispeaker_owner_block() -> Non
     assert "d-ambig" not in dropped.get(sec.id, frozenset())
 
 
+def test_same_chapter_hint_and_unlinked_note_dedup_beyond_20_blocks() -> None:
+    """A4.4: same-chapter repeats beyond 20 blocks suppress without burning count; unlinked notes don't duplicate hints."""
+    from linguary.domain import LanguageNote
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    # Chapter 1:
+    # - b0: 1st appearance of `the reptile house` and `ink` (FULL).
+    # - b1: unlinked short-term LanguageNote for `reptile house` (same chapter -> suppressed!)
+    #       AND cultural_reference LanguageNote for `ink` (linked cultural_reference -> kept!).
+    # - b2..b24: 23 filler blocks (> 20-block local window).
+    # - b25 (dist 25 > 20, SAME chapter 1): `reptile house` + `wand` in GLOSSARY_ONLY ->
+    #       `reptile house` suppressed (no count burn!), `wand` shown FULL.
+    # - b26 (dist 26 > 20, SAME chapter 1): sole `ink` in GLOSSARY_ONLY ->
+    #       rescued compact (translation only) without burning count!
+    # - b27 (dist 27 > 20, SAME chapter 1): `reptile house` in TRANSLATE -> suppressed.
+    # - b28..b50: 23 filler blocks so chapter 2 is > 20 blocks away from rescued `ink`.
+    # Chapter 2:
+    # - c2_0: `reptile house` in GLOSSARY_ONLY -> 2nd cross-chapter occurrence, shown compact (stripped note).
+    # - c2_1: `ink` in GLOSSARY_ONLY -> 2nd cross-chapter occurrence, shown compact (stripped note).
+    # - c2_2: unlinked short-term LanguageNote for `wand` (hint was in ch1, NOT ch2 -> kept!).
+    c1_b0 = _block("c1", 0, "They entered the reptile house and spilled ink.")
+    c1_b1 = _block("c1", 1, "Inside the reptile house, dark ink stained the sign.")
+    c1_fillers_1 = [_block("c1", idx, f"Filler one {idx}.") for idx in range(2, 25)]
+    c1_b25 = _block("c1", 25, "The reptile house hid a wand.")
+    c1_b26 = _block("c1", 26, "Drops of ink remained.")
+    c1_b27 = _block("c1", 27, "He left the reptile house.")
+    c1_fillers_2 = [_block("c1", idx, f"Filler two {idx}.") for idx in range(28, 51)]
+
+    c2_b0 = _block("c2", 0, "He remembered the reptile house.")
+    c2_b1 = _block("c2", 1, "He bought fresh ink.")
+    c2_b2 = _block("c2", 2, "He picked up the wand.")
+
+    reptile_h1 = GlossaryHint("the reptile house", "террариум", "Павильон с рептилиями.")
+    reptile_h2 = GlossaryHint("reptile house", "террариум", "Повтор в той же главе.")
+    reptile_h3 = GlossaryHint("reptile house", "террариум", "Повтор в следующей главе.")
+    ink_h1 = GlossaryHint("ink", "чернила", "Жидкость для письма пером.")
+    ink_h2 = GlossaryHint("ink", "чернила", "Повтор чернил в той же главе.")
+    ink_h3 = GlossaryHint("ink", "чернила", "Повтор чернил во второй главе.")
+    wand_h = GlossaryHint("wand", "палочка", "Волшебная палочка.")
+
+    unlinked_reptile_note = LanguageNote("ln-rep", c1_b1.id, "reptile house", "Террариум в зоопарке.")
+    cultural_ink_note = LanguageNote("ln-ink-cult", c1_b1.id, "ink", "В волшебном мире пишут перьями и чернилами.")
+    c2_wand_note = LanguageNote("ln-wand-c2", c2_b2.id, "wand", "Палочка выбирает волшебника.")
+
+    ink_cult_diff = _difficulty(c1_b1, "ink", "cultural_reference", "d-ink-cult")
+    c1_plan = _plan(ink_cult_diff)
+    ink_note_key = artifact_key(
+        "language_note.note",
+        c1_b1.id,
+        {
+            "original_excerpt": cultural_ink_note.original_excerpt,
+            "note": cultural_ink_note.note,
+            "translated_excerpt": cultural_ink_note.translated_excerpt,
+        },
+    )
+
+    results = {
+        c1_b0.id: BlockProcessingResult(
+            c1_b0.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(reptile_h1, ink_h1),
+        ),
+        c1_b1.id: BlockProcessingResult(
+            c1_b1.id,
+            BlockTreatment.READ_AS_IS,
+            language_notes=(unlinked_reptile_note, cultural_ink_note),
+            content_evidence=ContentEvidence(
+                c1_plan.sha256,
+                (
+                    HelpEvidence(
+                        ink_cult_diff.id,
+                        ink_cult_diff.required_points[0].id,
+                        "language_note.note",
+                        c1_b1.id,
+                        ink_note_key,
+                        cultural_ink_note.note,
+                    ),
+                ),
+            ),
+        ),
+        c1_b25.id: BlockProcessingResult(
+            c1_b25.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(reptile_h2, wand_h),
+        ),
+        c1_b26.id: BlockProcessingResult(
+            c1_b26.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(ink_h2,),
+        ),
+        c1_b27.id: BlockProcessingResult(
+            c1_b27.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="Он вышел из террариума.",
+            glossary_hints=(reptile_h2,),
+        ),
+        c2_b0.id: BlockProcessingResult(
+            c2_b0.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(reptile_h3,),
+        ),
+        c2_b1.id: BlockProcessingResult(
+            c2_b1.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(ink_h3,),
+        ),
+        c2_b2.id: BlockProcessingResult(
+            c2_b2.id,
+            BlockTreatment.READ_AS_IS,
+            language_notes=(c2_wand_note,),
+        ),
+    }
+
+    sections = (
+        _section("c1", 0, "Chapter 1", (c1_b0, c1_b1, *c1_fillers_1, c1_b25, c1_b26, c1_b27, *c1_fillers_2)),
+        _section("c2", 1, "Chapter 2", (c2_b0, c2_b1, c2_b2)),
+    )
+    layout = build_book_layout(
+        _inputs(_document(sections), results, (_analysis("a-c1", "c1", plan=c1_plan),))
+    )
+
+    # c1_b0: first appearances shown FULL.
+    assert [(n.term, n.body) for n in _notes(layout, c1_b0.id)] == [
+        ("the reptile house", ("террариум", "Павильон с рептилиями.")),
+        ("ink", ("чернила", "Жидкость для письма пером.")),
+    ]
+    # c1_b1: unlinked short-term `reptile house` suppressed by same-chapter hint; cultural `ink` kept.
+    assert [(n.origin, n.body) for n in _notes(layout, c1_b1.id)] == [
+        ("language_note", ("В волшебном мире пишут перьями и чернилами.",)),
+    ]
+    # c1_b25 (> 20 blocks later, SAME chapter): `reptile house` suppressed, `wand` shown FULL.
+    assert [(n.term, n.body) for n in _notes(layout, c1_b25.id)] == [
+        ("wand", ("палочка", "Волшебная палочка.")),
+    ]
+    # c1_b26 (> 20 blocks later, SAME chapter, sole GLOSSARY_ONLY hint): rescued compact.
+    assert [(n.term, n.body) for n in _notes(layout, c1_b26.id)] == [
+        ("ink", ("чернила",)),
+    ]
+    # c1_b27 (> 20 blocks later, SAME chapter, TRANSLATE): suppressed.
+    assert _notes(layout, c1_b27.id) == ()
+    # c2_b0 & c2_b1 (NEXT chapter): 2nd compact occurrence still shown (same-chapter repeats didn't burn count).
+    assert [(n.term, n.body) for n in _notes(layout, c2_b0.id)] == [
+        ("reptile house", ("террариум",)),
+    ]
+    assert [(n.term, n.body) for n in _notes(layout, c2_b1.id)] == [
+        ("ink", ("чернила",)),
+    ]
+    # c2_b2 (NEXT chapter): unlinked short-term `wand` note not suppressed by ch1 hint.
+    assert [(n.origin, n.body) for n in _notes(layout, c2_b2.id)] == [
+        ("language_note", ("Палочка выбирает волшебника.",)),
+    ]
+
+    # Same-block complementary GlossaryHint + unlinked LanguageNote on the same word are BOTH kept.
+    same_blk = _block("c1", 99, "Alice was very tired.")
+    same_doc = _document((_section("c1", 0, "Chapter 1", (same_blk,)),))
+    same_res = BlockProcessingResult(
+        same_blk.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Алиса очень устала.",
+        glossary_hints=(GlossaryHint("tired", "уставать"),),
+        language_notes=(
+            LanguageNote("n-same", same_blk.id, "tired", "Разговорная заметка."),
+        ),
+    )
+    same_layout = build_book_layout(_inputs(same_doc, {same_blk.id: same_res}))
+    assert [n.origin for n in _notes(same_layout, same_blk.id)] == [
+        "glossary_hint",
+        "language_note",
+    ]
+
+
+
 

@@ -809,27 +809,45 @@ def _glossary_accept_all(args: argparse.Namespace) -> int:
         asyncio.run(application.aclose())
 
 
+def _extract_candidate_text(mapping: Mapping[str, Any]) -> str | None:
+    raw_text = mapping.get("translated_text")
+    if isinstance(raw_text, str) and raw_text.strip():
+        return raw_text
+    seg_translations = mapping.get("segment_translations")
+    if isinstance(seg_translations, Sequence) and not isinstance(
+        seg_translations, (str, bytes)
+    ):
+        parts = [
+            item
+            for item in seg_translations
+            if isinstance(item, str) and item.strip()
+        ]
+        if parts:
+            return " ".join(parts)
+    segments = mapping.get("segments")
+    if isinstance(segments, Sequence) and not isinstance(segments, (str, bytes)):
+        parts = [
+            seg["translated_text"]
+            for seg in segments
+            if isinstance(seg, Mapping)
+            and isinstance(seg.get("translated_text"), str)
+            and seg["translated_text"].strip()
+        ]
+        if parts:
+            return " ".join(parts)
+    return None
+
+
 def _candidate_snippet(candidate: Any) -> tuple[str | None, str | None]:
-    proposed = (
-        candidate.payload.get("proposed_result")
-        if isinstance(candidate.payload, Mapping)
-        else None
-    )
     prop_text: str | None = None
-    if isinstance(proposed, Mapping):
-        raw_text = proposed.get("translated_text")
-        if isinstance(raw_text, str):
-            prop_text = raw_text
-        elif isinstance(proposed.get("segments"), Sequence) and not isinstance(
-            proposed.get("segments"), (str, bytes)
-        ):
-            parts = [
-                seg.get("translated_text")
-                for seg in proposed["segments"]
-                if isinstance(seg, Mapping) and isinstance(seg.get("translated_text"), str)
-            ]
-            if parts:
-                prop_text = " ".join(parts)
+    if isinstance(candidate.payload, Mapping):
+        for key in ("result", "proposed_result", "proposal"):
+            source = candidate.payload.get(key)
+            if isinstance(source, Mapping):
+                extracted = _extract_candidate_text(source)
+                if extracted is not None:
+                    prop_text = extracted
+                    break
     review = candidate.review if isinstance(candidate.review, Mapping) else None
     reason = review.get("reason") if isinstance(review, Mapping) else None
     return reason, prop_text
