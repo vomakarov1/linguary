@@ -25,7 +25,7 @@ from typing import Any
 
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import UnitOfWork
-from linguary.domain import AnalysisPassKind, ErrorType, ProcessingTask, TaskStatus, TaskType
+from linguary.domain import AnalysisPassKind, ProcessingTask, TaskStatus, TaskType
 from linguary.domain.book_conditions import thaw
 
 
@@ -43,6 +43,7 @@ class RetryTaskCommand:
 
     task_id: str
     acknowledge_unknown_outcome: bool = False
+    clear_cache: bool = False
 
 
 class RetryTask:
@@ -71,9 +72,9 @@ class RetryTask:
                     reason or f"задача {task.id} не может быть повторена"
                 )
             if (
-                task.task_type is TaskType.ANALYZE_CHAPTER
+                command.clear_cache
+                and task.task_type is TaskType.ANALYZE_CHAPTER
                 and task.scope_id
-                and (task.last_error is None or task.last_error.type is not ErrorType.TRANSIENT)
             ):
                 analyses = getattr(transaction, "analyses", None)
                 delete_fn = getattr(analyses, "delete_fragment_passes_for_section", None)

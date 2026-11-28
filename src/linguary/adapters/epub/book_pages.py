@@ -55,6 +55,8 @@ def legend_document(
     language: str,
     stylesheet: str,
     ipa_key_href: str | None = None,
+    source_language: str | None = None,
+    include_example: bool = False,
 ) -> etree._Element:
     """One paragraph per legend sentence. The key phrase is a link only when given."""
     root = _xhtml_document(title=LEGEND_TITLE, language=language, stylesheet=stylesheet)
@@ -65,7 +67,51 @@ def legend_document(
     _sub(section, "h1").text = LEGEND_TITLE
     for line in lines:
         _append_legend_line(section, line, ipa_key_href)
+    if include_example and source_language == "en":
+        _append_english_legend_example(
+            section, language=language, source_language=source_language
+        )
     return root
+
+
+def _append_english_legend_example(
+    section: etree._Element,
+    *,
+    language: str,
+    source_language: str,
+) -> None:
+    """Append a compact, book-neutral reading-unit mini-example to the legend."""
+    _sub(section, "h2").text = "Пример"
+    unit = _sub(section, "div", {"class": "lg-unit lg-end"})
+    source = _sub(unit, "p", {"class": "lg-src", "lang": source_language})
+    source.text = "She looked up with a faint"
+    ref1 = _sub(source, "span", {"class": "lg-example-ref"})
+    _sub(ref1, "sup").text = "1"
+    ref1.tail = " smile and couldn’t help laughing"
+    ref2 = _sub(source, "span", {"class": "lg-example-ref"})
+    _sub(ref2, "sup").text = "2"
+    ref2.tail = "."
+
+    tr = _sub(unit, "p", {"class": "lg-tr", "lang": language})
+    tr.text = "Она подняла взгляд со слабой улыбкой и не смогла удержаться от смеха."
+
+    notes = _sub(unit, "ol", {"class": "lg-notes", "lang": language})
+    item1 = _sub(notes, "li", {"id": "lg-legend-ex1"})
+    num1 = _sub(item1, "span", {"class": "lg-num"})
+    num1.text = "1"
+    num1.tail = " "
+    term1 = _sub(item1, "span", {"class": "lg-term", "lang": source_language})
+    term1.text = "faint"
+    term1.tail = " — "
+    _sub(item1, "p").text = "слабый, едва заметный"
+
+    item2 = _sub(notes, "li", {"id": "lg-legend-ex2"})
+    num2 = _sub(item2, "span", {"class": "lg-num"})
+    num2.text = "2"
+    num2.tail = " "
+    _sub(item2, "p").text = (
+        "Конструкция «couldn’t help + -ing» означает «не могла удержаться от того, чтобы…»."
+    )
 
 
 def ipa_key_document(

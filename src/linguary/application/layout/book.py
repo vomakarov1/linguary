@@ -140,6 +140,32 @@ _REMARK_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.IGNORECASE)
 _WORD_FINAL_APOSTROPHE = re.compile(
     r"’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
 )
+_SINGLE_QUOTE_APOSTROPHE = (
+    r"’(?=\w)"
+    r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
+)
+_DIALOGUE_QUOTES = re.compile(
+    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”]*\"|«[^«»]*»"
+)
+_UNCLOSED_OPENING_QUOTE = re.compile(r"[“‘«].*$", re.DOTALL)
+_PREPOSITION_BEFORE_NAME_RE = re.compile(
+    r"\b(?:at|to|for|with|from|about|after|of|behind|beside|toward|towards)\s+(?:(?:the|a|an)\s+)?$",
+    re.IGNORECASE,
+)
+_POSSESSIVE_AFTER_NAME_RE = re.compile(r"['’]s\b|['’](?!\w)")
+_PRECEDING_WORD_RE = re.compile(r"(?<!\w)([^\W\d_]+)\.?\s+$")
+_SENTENCE_START_NON_NAMES = frozenset(
+    {
+        "the", "a", "an", "and", "but", "or", "so", "then", "now", "when",
+        "while", "where", "as", "if", "for", "yet", "still", "suddenly",
+        "meanwhile", "finally", "slowly", "quickly", "quietly", "loudly",
+        "however", "soon", "later", "next", "after", "before", "until",
+        "though", "although", "because", "since", "once", "here", "there",
+        "even", "only", "just", "well", "oh", "yes", "no", "not", "all",
+        "both", "each", "neither", "either", "poor", "old", "young", "little",
+        "big", "dear", "good",
+    }
+)
 _TITLE_TRANSLATIONS = {
     "mr": "мистер",
     "mrs": "миссис",
@@ -539,8 +565,8 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             section_id=section.id,
             number=section_number,
             units=units,
-            who_is_who=(),
-            review=(),
+            who_is_who=(),  # Intentionally deferred: chapter cast cards are disabled until curated cast UX ships.
+            review=(),  # Intentionally deferred: chapter review lists are disabled until spaced-repetition UX ships.
         )
     features = _features(
         document,
@@ -553,7 +579,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
         chapters=chapters,
         legend=legend_lines(features),
         ipa_key=ipa_key(_ipa_strings(chapters)),
-        who_is_who=(),
+        who_is_who=(),  # Intentionally deferred: book-level who-is-who page is disabled by default.
         features=features,
     )
 
@@ -920,6 +946,12 @@ def _speaker_name(
     return None
 
 
+def _strip_quoted_speech(text: str) -> str:
+    """Strip quoted direct speech while preserving authorial narrative and plural possessives."""
+    stripped = _DIALOGUE_QUOTES.sub(" ", text)
+    return _UNCLOSED_OPENING_QUOTE.sub(" ", stripped)
+
+
 def _part_self_identifies_speaker(
     part_text: str,
     speaker_tokens: Sequence[str],
@@ -946,12 +978,259 @@ def _part_self_identifies_speaker(
     return False
 
 
+def _part_explicitly_names_speaker(
+    part_text: str,
+    speaker_tokens: Sequence[str],
+    fact_value: str | None = None,
+) -> bool:
+    """Whether `part_text` already names the speaker as a subject in narrative or self-intro.
+
+    Protects against shared surnames with another title/first name (`Mr Dursley` !=
+    `Petunia Dursley`), possessive forms (`Harry’s aunt`), prepositional objects
+    (`looking at Dudley`), and plural possessives inside quoted speech (`Dursleys’`).
+    """
+    if not part_text:
+        return False
+    raw_names = list(dict.fromkeys(
+        name for name in (*(speaker_tokens or ()), fact_value or "") if name and name.strip()
+    ))
+    if not raw_names:
+        return False
+    if _part_self_identifies_speaker(part_text, raw_names):
+        return True
+    narrative = _strip_quoted_speech(part_text)
+    if not narrative.strip():
+        return False
+
+    own_titles: set[str] = set()
+    own_tokens: set[str] = set()
+    full_phrases: list[tuple[str, ...]] = []
+    seen_phrases: set[tuple[str, ...]] = set()
+    non_surname_tokens: set[str] = set()
+    surname_candidates: set[str] = set()
+    token_casing: dict[str, str] = {}
+
+    for raw in raw_names:
+        # Strip parenthetical notes like "Vernon Dursley (Uncle Vernon)" into separate variants.
+        for variant in _name_variants(raw):
+            words = _WORD_TOKEN_RE.findall(variant)
+            if not words:
+                continue
+            folded_words = [w.casefold() for w in words]
+            for word, folded in zip(words, folded_words, strict=True):
+                if folded in _SHORT_NAME_SKIP_PREFIXES:
+                    own_titles.add(folded)
+                if len(folded) >= 2 and folded not in _SELF_ID_STOPWORDS:
+                    own_tokens.add(folded)
+                    token_casing.setdefault(folded, word)
+            if len(words) >= 2:
+                phrase_key = tuple(folded_words)
+                if phrase_key not in seen_phrases:
+                    seen_phrases.add(phrase_key)
+                    full_phrases.append(tuple(words))
+                # Trailing token of a multi-word name is a surname candidate unless also seen standalone/first.
+                for w_idx, folded in enumerate(folded_words):
+                    if len(folded) < 2 or folded in _SELF_ID_STOPWORDS or folded in _SHORT_NAME_SKIP_PREFIXES:
+                        continue
+                    if w_idx == len(folded_words) - 1:
+                        surname_candidates.add(folded)
+                    else:
+                        non_surname_tokens.add(folded)
+            else:
+                folded = folded_words[0]
+                if len(folded) >= 2 and folded not in _SELF_ID_STOPWORDS and folded not in _SHORT_NAME_SKIP_PREFIXES:
+                    non_surname_tokens.add(folded)
+
+    # 1. Check multi-word phrases (e.g. "Mr Dursley", "Petunia Dursley", "Uncle Vernon").
+    for phrase in full_phrases:
+        parts_re = []
+        for idx, word in enumerate(phrase):
+            escaped = re.escape(word)
+            if idx < len(phrase) - 1 and word.casefold() in _SHORT_NAME_SKIP_PREFIXES:
+                parts_re.append(rf"{escaped}\.?")
+            else:
+                parts_re.append(escaped)
+        pattern = re.compile(rf"(?<!\w){r'\s+'.join(parts_re)}(?!\w)", re.IGNORECASE)
+        for match in pattern.finditer(narrative):
+            if _POSSESSIVE_AFTER_NAME_RE.match(narrative[match.end() :]) is not None:
+                continue
+            if _PREPOSITION_BEFORE_NAME_RE.search(narrative[: match.start()]) is not None:
+                continue
+            return True
+
+    # 2. Check individual non-generic name tokens with surname/title/possessive/preposition guards.
+    for folded, display_tok in token_casing.items():
+        if folded in _SHORT_NAME_SKIP_PREFIXES:
+            continue
+        is_surname_only = folded in surname_candidates and folded not in non_surname_tokens
+        pattern = re.compile(rf"(?<!\w){re.escape(display_tok)}(?!\w)", re.IGNORECASE)
+        for match in pattern.finditer(narrative):
+            if _POSSESSIVE_AFTER_NAME_RE.match(narrative[match.end() :]) is not None:
+                continue
+            prefix = narrative[: match.start()]
+            prev_match = _PRECEDING_WORD_RE.search(prefix)
+            if prev_match is not None:
+                prev_word = prev_match.group(1)
+                prev_folded = prev_word.casefold()
+                if prev_folded in _SHORT_NAME_SKIP_PREFIXES:
+                    if prev_folded not in own_titles:
+                        continue
+                    if _PREPOSITION_BEFORE_NAME_RE.search(narrative[: prev_match.start()]) is not None:
+                        continue
+                elif (
+                    is_surname_only
+                    and prev_word[0].isupper()
+                    and prev_folded not in _SENTENCE_START_NON_NAMES
+                    and prev_folded not in own_tokens
+                ):
+                    continue
+            if _PREPOSITION_BEFORE_NAME_RE.search(prefix) is not None:
+                continue
+            return True
+    return False
+
+
 def _speaker_tokens_for_fact(value: str, index: _SpeakerIndex) -> tuple[str, ...]:
     """Candidate name strings from `fact.value`, matched canonical names, and short names."""
     raw_names: list[str] = [value]
     for variant in _name_variants(value):
         raw_names.extend(index.source_names_by_key.get(glossary_key(variant), ()))
     return tuple(dict.fromkeys(name for name in raw_names if name and name.strip()))
+
+
+def _first_mention_pos(text: str, patterns: Sequence[re.Pattern[str]]) -> int | None:
+    best: int | None = None
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match is not None and (best is None or match.start() < best):
+            best = match.start()
+    return best
+
+
+def _joint_mention_patterns(
+    raw_names: Sequence[str],
+    shared_tokens: frozenset[str],
+) -> tuple[tuple[re.Pattern[str], ...], tuple[re.Pattern[str], ...]]:
+    full_patterns: list[re.Pattern[str]] = []
+    distinct_patterns: list[re.Pattern[str]] = []
+    fallback_patterns: list[re.Pattern[str]] = []
+    seen_full: set[str] = set()
+    seen_tokens: set[str] = set()
+    for raw in raw_names:
+        parts = _WORD_TOKEN_RE.findall(raw)
+        if not parts:
+            continue
+        if len(parts) >= 2:
+            full_key = " ".join(p.casefold() for p in parts)
+            if full_key not in seen_full:
+                seen_full.add(full_key)
+                full_patterns.append(
+                    re.compile(
+                        rf"(?<!\w){r'\s+'.join(re.escape(p) for p in parts)}(?!\w)",
+                        re.IGNORECASE,
+                    )
+                )
+        for token in parts:
+            folded = token.casefold()
+            if (
+                len(folded) < 2
+                or folded in _SELF_ID_STOPWORDS
+                or folded in _SHORT_NAME_SKIP_PREFIXES
+                or folded in seen_tokens
+            ):
+                continue
+            seen_tokens.add(folded)
+            pattern = re.compile(rf"(?<!\w){re.escape(token)}(?!\w)", re.IGNORECASE)
+            if folded not in shared_tokens:
+                distinct_patterns.append(pattern)
+            else:
+                fallback_patterns.append(pattern)
+    return tuple(full_patterns + distinct_patterns), tuple(fallback_patterns)
+
+
+def _sort_joint_speakers(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    block: DocumentBlock,
+    document: CanonicalDocument | None,
+    section_order: int | None,
+) -> list[tuple[str, tuple[str, ...]]]:
+    """Deterministically order joint speakers by first mention in block/chapter/book, then casefold."""
+    token_owner_counts: dict[str, int] = {}
+    for _, raw_names in entries:
+        owned: set[str] = set()
+        for raw in raw_names:
+            for token in _WORD_TOKEN_RE.findall(raw):
+                folded = token.casefold()
+                if len(folded) >= 2 and folded not in _SELF_ID_STOPWORDS and folded not in _SHORT_NAME_SKIP_PREFIXES:
+                    owned.add(folded)
+        for tok in owned:
+            token_owner_counts[tok] = token_owner_counts.get(tok, 0) + 1
+    shared_tokens = frozenset(tok for tok, count in token_owner_counts.items() if count > 1)
+
+    current_section = None
+    earlier_sections = []
+    if document is not None:
+        for sec in document.ordered_sections:
+            if section_order is not None and sec.order == section_order:
+                current_section = sec
+                break
+            if any(b.id == block.id for b in sec.ordered_blocks):
+                current_section = sec
+                break
+        if current_section is not None:
+            earlier_sections = [
+                sec
+                for sec in document.ordered_sections
+                if sec.order < current_section.order
+                and not document.is_front_matter(sec)
+                and not sec.is_notes_only
+            ]
+
+    def first_in_blocks(
+        blocks_seq: Sequence[DocumentBlock],
+        patterns: Sequence[re.Pattern[str]],
+    ) -> tuple[int, int] | None:
+        if not patterns:
+            return None
+        for b_idx, b in enumerate(blocks_seq):
+            if not b.text:
+                continue
+            pos = _first_mention_pos(b.text, patterns)
+            if pos is not None:
+                return (b_idx, pos)
+        return None
+
+    def sort_key(item: tuple[str, tuple[str, ...]]) -> tuple[int, int, int, int, str]:
+        display_name, raw_names = item
+        primary, secondary = _joint_mention_patterns(raw_names, shared_tokens)
+        folded_name = display_name.casefold()
+
+        # Tier 0: mentioned directly in this block.
+        for pats in (primary, secondary):
+            pos = _first_mention_pos(block.text, pats) if pats else None
+            if pos is not None:
+                return (0, 0, 0, pos, folded_name)
+
+        # Tier 1: mentioned in the current chapter.
+        if current_section is not None:
+            for pats in (primary, secondary):
+                found = first_in_blocks(current_section.ordered_blocks, pats)
+                if found is not None:
+                    return (1, 0, found[0], found[1], folded_name)
+
+        # Tier 2: mentioned in earlier content chapters.
+        if earlier_sections:
+            for pats in (primary, secondary):
+                if not pats:
+                    continue
+                for sec in earlier_sections:
+                    found = first_in_blocks(sec.ordered_blocks, pats)
+                    if found is not None:
+                        return (2, sec.order, found[0], found[1], folded_name)
+
+        return (3, 0, 0, 0, folded_name)
+
+    return sorted(entries, key=sort_key)
 
 
 def _speakers_for_block(
@@ -966,14 +1245,15 @@ def _speakers_for_block(
     document: CanonicalDocument | None = None,
     section_order: int | None = None,
     _index: _SpeakerIndex | None = None,
-) -> dict[tuple[int, int], str]:
+) -> dict[tuple[int, int], str | tuple[str, ...]]:
     """Inferred subject anchors whose shown part opens the line or continues its quote.
 
     Parts follow `compose_parts`, including the single unit used when a whole-block
     translation replaces those parts. Secondary anchors are ignored. A part that
     starts as narrative, with a quote only later, is absent. Parts where the speaker
-    explicitly introduces themselves are skipped. The first resolved name keeps a
-    repeated part.
+    explicitly introduces themselves are skipped. Joint speaker facts sharing the
+    same `subject_anchor` become a deterministically ordered tuple of names; non-joint
+    facts keep the first resolved name on a repeated part without merging.
     """
     block_facts = [
         fact
@@ -999,33 +1279,83 @@ def _speakers_for_block(
         for part in parts
         if _part_shows_speaker(block.text, part, fact.subject_anchor.start)
     }
-    speakers: dict[tuple[int, int], str] = {}
+    grouped_facts: dict[SourceAnchor, list[ContextFact]] = {}
     for fact in block_facts:
-        if fact.value is None:
-            continue
-        name = _speaker_name(
-            fact.value,
-            concepts,
-            analyses,
-            language,
-            document=document,
-            section_order=section_order,
-            _index=index,
-        )
-        if name is None:
-            continue
-        speaker_tokens = _speaker_tokens_for_fact(fact.value, index)
-        anchor = fact.subject_anchor
-        for part in parts:
-            bounds = (part.start, part.end)
-            if (
-                bounds not in explicit_parts
-                and _part_shows_speaker(block.text, part, anchor.start)
-                and not _part_self_identifies_speaker(
-                    block.text[part.start : part.end], speaker_tokens
+        grouped_facts.setdefault(fact.subject_anchor, []).append(fact)
+
+    speakers: dict[tuple[int, int], str | tuple[str, ...]] = {}
+    for anchor, group in grouped_facts.items():
+        if any(fact.joint for fact in group):
+            resolved_by_name: dict[str, list[str]] = {}
+            for fact in group:
+                if fact.value is None:
+                    continue
+                name = _speaker_name(
+                    fact.value,
+                    concepts,
+                    analyses,
+                    language,
+                    document=document,
+                    section_order=section_order,
+                    _index=index,
                 )
-            ):
-                speakers.setdefault(bounds, name)
+                if name is None:
+                    continue
+                tokens = _speaker_tokens_for_fact(fact.value, index)
+                resolved_by_name.setdefault(name, []).extend(tokens)
+            if not resolved_by_name:
+                continue
+            entries = [
+                (name, tuple(dict.fromkeys(tokens)))
+                for name, tokens in resolved_by_name.items()
+            ]
+            if len(entries) >= 2:
+                entries = _sort_joint_speakers(entries, block, document, section_order)
+            for part in parts:
+                bounds = (part.start, part.end)
+                if bounds in explicit_parts or not _part_shows_speaker(
+                    block.text, part, anchor.start
+                ):
+                    continue
+                part_text = block.text[part.start : part.end]
+                all_named = all(
+                    _part_explicitly_names_speaker(
+                        part_text, tokens, tokens[0] if tokens else None
+                    )
+                    for _, tokens in entries
+                )
+                if not all_named:
+                    if len(entries) >= 2:
+                        speakers.setdefault(bounds, tuple(name for name, _ in entries))
+                    elif len(entries) == 1:
+                        speakers.setdefault(bounds, entries[0][0])
+            continue
+
+        for fact in group:
+            if fact.value is None:
+                continue
+            name = _speaker_name(
+                fact.value,
+                concepts,
+                analyses,
+                language,
+                document=document,
+                section_order=section_order,
+                _index=index,
+            )
+            if name is None:
+                continue
+            speaker_tokens = _speaker_tokens_for_fact(fact.value, index)
+            for part in parts:
+                bounds = (part.start, part.end)
+                if (
+                    bounds not in explicit_parts
+                    and _part_shows_speaker(block.text, part, anchor.start)
+                    and not _part_explicitly_names_speaker(
+                        block.text[part.start : part.end], speaker_tokens, fact.value
+                    )
+                ):
+                    speakers.setdefault(bounds, name)
     return speakers
 
 

@@ -1495,6 +1495,77 @@ def test_start_processing_validates_route_atomically_and_aligns_correction_route
     assert binding["payload"]["correction"]["route"] == pinned_route
 
 
+def test_start_processing_auto_promotes_exempt_key_entities_with_empty_note_and_respects_skip() -> None:
+    """WP4: StartProcessing freezes exempt key entities as APPROVED with note='' while honoring SKIP."""
+    alice = replace(
+        make_analysis_candidate(
+            source_text="Alice",
+            suggested_translation="Элис",
+            note="мужской род",
+        ),
+        name_translation_evidence=NameTranslationEvidence(
+            1,
+            "conditions-1",
+            1,
+            NameTranslationStrategy.SOUND,
+            (
+                NameTranslationObservation(
+                    "Элис",
+                    0.9,
+                    False,
+                    NameTranslationAssessment("sound", True, (), "Однозначное имя."),
+                ),
+            ),
+        ),
+    )
+    bob = replace(
+        make_analysis_candidate(
+            source_text="Bob",
+            suggested_translation="Боб",
+            note="мужской род",
+        ),
+        name_translation_evidence=NameTranslationEvidence(
+            1,
+            "conditions-1",
+            1,
+            NameTranslationStrategy.SOUND,
+            (
+                NameTranslationObservation(
+                    "Боб",
+                    0.9,
+                    False,
+                    NameTranslationAssessment("sound", True, (), "Однозначное имя."),
+                ),
+            ),
+        ),
+    )
+    unit_of_work = glossary_book(alice, bob)
+    conditions = SimpleNamespace(
+        id="conditions-1",
+        payload={
+            "name_translation_policy": {"version": 1, "strategy": "sound"},
+            "checks": {
+                "glossary_confidence_threshold": CONFIDENCE_THRESHOLD,
+                "glossary_review_min_mentions": 5,
+                "glossary_review_min_chapters": 3,
+            },
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)
+
+    # Explicitly skip Bob; leave Alice untouched (exempt_type_review=True).
+    approve(unit_of_work)(command(GlossaryDecision.SKIP, source_text="Bob"))
+
+    run = start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+    entries = {entry.source_text: entry for entry in run.glossary_snapshot.entries}
+
+    assert entries["Alice"].status is TermStatus.APPROVED
+    assert entries["Alice"].translation == "Элис"
+    assert entries["Alice"].note == ""
+    assert entries["Bob"].status is TermStatus.SUGGESTED
+    assert tuple(e.source_text for e in run.glossary_snapshot.mandatory_entries) == ("Alice",)
+
+
 
 
 

@@ -58,6 +58,16 @@ REVIEW_TYPE_ORDER: tuple[ConceptType, ...] = (
     ConceptType.TERM,
 )
 
+#: Concept types eligible for automatic mandatory promotion when exempted from manual review.
+_AUTO_MANDATORY_TYPES: frozenset[ConceptType] = frozenset(
+    {
+        ConceptType.PERSON,
+        ConceptType.PLACE,
+        ConceptType.ORGANIZATION,
+        ConceptType.FICTIONAL_CONCEPT,
+    }
+)
+
 
 class GlossaryReviewError(ApplicationError):
     """Book glossary cannot be read or modified in its current state."""
@@ -102,6 +112,18 @@ class GlossaryReviewItem:
     suggested_note: str = ""
     spellings: tuple[str, ...] = ()
     superseded_decisions: tuple[TermConcept, ...] = ()
+    exempt_type_review: bool = False
+
+    @property
+    def is_auto_mandatory(self) -> bool:
+        """Key entity exempted from manual review by NameTranslationPolicy whose translation is enforced."""
+        if self.decision is not None or not self.exempt_type_review:
+            return False
+        if self.type not in _AUTO_MANDATORY_TYPES:
+            return False
+        if not self.suggested_translation.strip():
+            return False
+        return self.is_frequent or self.mention_count >= 2 or self.chapter_count >= 2
 
     @property
     def model_doubts(self) -> bool:
@@ -252,19 +274,32 @@ def build_glossary_review(
     return GlossaryReview(book_id=book_id, items=tuple(sorted(items, key=_display_order)))
 
 
-def glossary_snapshot(review: GlossaryReview, *, language: str) -> GlossarySnapshot:
+def glossary_snapshot(
+    review: GlossaryReview,
+    *,
+    language: str,
+    promote_exempt: bool = True,
+) -> GlossarySnapshot:
     """Glossary snapshot used for executing a processing run (PRD § 11, § 13).
 
     Decisions are conveyed to the model by status: user decisions as `approved` (accepted
     or edited) and `locked` — mandatory translation directives; skipped items (`suggested`) —
-    optional hints. Items without a decision enter the snapshot as hints with the model's
-    suggested translation: they did not require review.
+    optional hints. Key entities exempted from manual review by `NameTranslationPolicy`
+    (`is_auto_mandatory`) are promoted to `approved` with an empty note when `promote_exempt`
+    is enabled so their canonical translation is enforced without propagating unreviewed model
+    notes into `glossary_context_constraints`. Remaining items without a decision enter the
+    snapshot as hints with the model's suggested translation.
     """
     return GlossarySnapshot(
         entries=tuple(
             entry
             for item in review.items
-            if (entry := _snapshot_entry(item, language=language)) is not None
+            if (
+                entry := _snapshot_entry(
+                    item, language=language, promote_exempt=promote_exempt
+                )
+            )
+            is not None
         )
     )
 
@@ -480,6 +515,7 @@ def _review_item(
         suggested_note=suggested_note,
         spellings=spellings,
         superseded_decisions=superseded,
+        exempt_type_review=eligible,
     )
 
 
@@ -548,10 +584,18 @@ def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, bool, int, str
 
 
 def _snapshot_entry(
-    item: GlossaryReviewItem, *, language: str
+    item: GlossaryReviewItem, *, language: str, promote_exempt: bool = True
 ) -> GlossarySnapshotEntry | None:
     """Snapshot entry for a single item, or `None` if there is nothing to enforce on the model."""
     if item.decision is None:
+        if promote_exempt and item.is_auto_mandatory:
+            return GlossarySnapshotEntry(
+                source_text=item.source_text,
+                translation=item.suggested_translation,
+                type=item.type,
+                status=TermStatus.APPROVED,
+                note="",
+            )
         return GlossarySnapshotEntry(
             source_text=item.source_text,
             translation=item.suggested_translation,

@@ -411,7 +411,7 @@ def test_retry_task_analyze_chapter_fragment_cache_cleared_on_validation_preserv
             (AnalysisPassKind.PEDAGOGICAL, 'frag:0'),
         }
 
-    # 2. ErrorType.VALIDATION on ANALYZE_CHAPTER clears fragment passes for both kinds, keeping whole-chapter NARRATIVE.
+    # 2. ErrorType.VALIDATION on ANALYZE_CHAPTER preserves fragment cache by default (clear_cache=False).
     with unit_of_work.transaction() as tx:
         _seed_passes(tx, 'book-analyze-retry', 'section-validation')
         validation_task = ProcessingTask(
@@ -429,11 +429,30 @@ def test_retry_task_analyze_chapter_fragment_cache_cleared_on_validation_preserv
     assert restarted_validation.status is TaskStatus.PENDING
     with unit_of_work.transaction() as tx:
         passes_validation = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-validation')
-        assert [(p.pass_kind, p.scope_key) for p in passes_validation] == [
+        assert {(p.pass_kind, p.scope_key) for p in passes_validation} == {
+            (AnalysisPassKind.NARRATIVE, ''),
+            (AnalysisPassKind.NARRATIVE, 'frag:0'),
+            (AnalysisPassKind.PEDAGOGICAL, 'frag:0'),
+        }
+
+    # 2b. Explicit clear_cache=True clears fragment passes for both kinds, keeping whole-chapter NARRATIVE.
+    with unit_of_work.transaction() as tx:
+        failed_again = restarted_validation.start().fail(
+            TaskError(ErrorType.VALIDATION, 'ошибка слияния', 'spoiler_name_leak')
+        )
+        tx.tasks.save(failed_again)
+
+    restarted_cleared = RetryTask(unit_of_work=unit_of_work)(
+        RetryTaskCommand(task_id=failed_again.id, clear_cache=True)
+    )
+    assert restarted_cleared.status is TaskStatus.PENDING
+    with unit_of_work.transaction() as tx:
+        passes_cleared = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-validation')
+        assert [(p.pass_kind, p.scope_key) for p in passes_cleared] == [
             (AnalysisPassKind.NARRATIVE, ''),
         ]
 
-    # 3. Non-ANALYZE_CHAPTER task with VALIDATION error does not touch analysis fragment passes.
+    # 3. Non-ANALYZE_CHAPTER task (even with clear_cache=True) does not touch analysis fragment passes.
     with unit_of_work.transaction() as tx:
         _seed_passes(tx, 'book-analyze-retry', 'section-other')
         other_task = ProcessingTask(
@@ -447,7 +466,9 @@ def test_retry_task_analyze_chapter_fragment_cache_cleared_on_validation_preserv
         )
         tx.tasks.add(other_task)
 
-    restarted_other = _retry(unit_of_work, other_task)
+    restarted_other = RetryTask(unit_of_work=unit_of_work)(
+        RetryTaskCommand(task_id=other_task.id, clear_cache=True)
+    )
     assert restarted_other.status is TaskStatus.PENDING
     with unit_of_work.transaction() as tx:
         passes_other = tx.analyses.list_passes_for_section('book-analyze-retry', 'section-other')

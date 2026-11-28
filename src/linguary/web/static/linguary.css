@@ -506,6 +506,27 @@ pre code {
   color: inherit;
 }
 
+.lg-unit.lg-unit-long {
+  page-break-inside: auto;
+  break-inside: auto;
+}
+
+.lg-cover {
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+
+.lg-cover img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lg-cover svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
 .lg-unit.lg-end {
   margin-bottom: 1.4em;
 }
@@ -583,6 +604,12 @@ a.lg-ref + a.lg-ref {
 
 a.lg-ref sup,
 .lg-num {
+  font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+.lg-example-ref sup {
   font-size: 0.7em;
   vertical-align: super;
   line-height: 0;

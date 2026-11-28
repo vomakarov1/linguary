@@ -38,7 +38,7 @@ from urllib.parse import unquote
 
 from lxml import etree  # ty: ignore[missing-module-member]
 
-from linguary.adapters.epub.inline import local_name
+from linguary.adapters.epub.inline import clean_dc_text, local_name
 from linguary.adapters.epub.resources import package_path
 from linguary.adapters.epub.pronunciation_notices import (
     IPA_KEY_LINK_LABEL,
@@ -134,6 +134,27 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   color: inherit;
 }
 
+.lg-unit.lg-unit-long {
+  page-break-inside: auto;
+  break-inside: auto;
+}
+
+.lg-cover {
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+
+.lg-cover img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lg-cover svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+
 .lg-unit.lg-end {
   margin-bottom: 1.4em;
 }
@@ -211,6 +232,12 @@ a.lg-ref + a.lg-ref {
 
 a.lg-ref sup,
 .lg-num {
+  font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+.lg-example-ref sup {
   font-size: 0.7em;
   vertical-align: super;
   line-height: 0;
@@ -374,7 +401,8 @@ class EpubExportWriter(EpubWriter):
         _resolve_references(chapters, known_files=known_files, warnings=warnings)
         source_dc = (
             (None, None)
-            if request.document.metadata.rights and request.document.metadata.description
+            if clean_dc_text(request.document.metadata.rights)
+            and clean_dc_text(request.document.metadata.description)
             else _read_source_dc_metadata(request.source_epub_path)
         )
         _append_book_payloads(
@@ -501,6 +529,11 @@ def _insert_book_pages(
                     language=target,
                     stylesheet=_relative_href(pages.legend, _STYLESHEET_FILE),
                     ipa_key_href=_ipa_key_link(pages.legend, pages.ipa),
+                    source_language=source,
+                    include_example=bool(
+                        (layout.features.has_translation or layout.features.has_notes)
+                        and source == "en"
+                    ),
                 ),
             )
         )
@@ -536,11 +569,169 @@ def _insert_book_pages(
     return tuple(leading) + tuple(front) + tuple(rest) + who
 
 
+_DROPPED_TOC_FILENAMES = frozenset(
+    {
+        "contents",
+        "toc",
+        "nav",
+        "table_of_contents",
+        "tableofcontents",
+    }
+)
+
+_DROPPED_TOC_TITLES = frozenset(
+    {
+        "contents",
+        "table of contents",
+        "toc",
+        "оглавление",
+        "содержание",
+    }
+)
+
+_DROPPED_PROMO_FILENAMES = frozenset(
+    {
+        "advert",
+        "advertisement",
+        "adcard",
+        "also_by",
+        "alsoby",
+        "about_the_publisher",
+        "publisher_promo",
+        "promo",
+    }
+)
+
+_PROTECTED_FRONT_MATTER_STEMS = frozenset(
+    {
+        "title",
+        "titlepage",
+        "title_page",
+        "halftitle",
+        "half_title",
+        "dedication",
+        "copyright",
+        "colophon",
+        "imprint",
+        "epigraph",
+    }
+)
+
+_DROPPED_PROMO_RE = re.compile(
+    r"\b(?:also\s+by|about\s+the\s+publisher|other\s+books\s+by|advert(?:isement|ising)?)\b",
+    re.IGNORECASE,
+)
+
+_BARE_DOMAIN_TITLE_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?[\w-]+\.(?:com|org|net|co\.uk)/?$",
+    re.IGNORECASE,
+)
+
+_PROMO_HEADING_RE = re.compile(
+    r"\b(?:sign\s+up|newsletter|online\s+(?:experience|shop|store)|official\s+(?:shop|store))\b",
+    re.IGNORECASE,
+)
+
+_PROMO_DOMAIN_CTA_RE = re.compile(
+    r"\b(?:visit|discover|sign\s+up|newsletter|online\s+(?:experience|shop|store)|official\s+(?:shop|store))\b",
+    re.IGNORECASE,
+)
+
+_DOMAIN_IN_TEXT_RE = re.compile(
+    r"\b[\w-]+\.(?:com|org|net|co\.uk)\b",
+    re.IGNORECASE,
+)
+
+_COPYRIGHT_MARKERS = frozenset(
+    {"copyright", "©", "isbn", "all rights reserved", "все права защищены"}
+)
+
+
+def _is_dropped_front_matter(
+    section: DocumentSection, document: CanonicalDocument
+) -> bool:
+    """Whether front matter is a duplicate HTML TOC or publisher promo to omit.
+
+    Covers, part dividers, and editorial front matter (title, dedication,
+    copyright) are preserved as source-only sections.
+    """
+    if not document.is_front_matter(section):
+        return False
+    if document.is_cover_section(section) or document.is_part_divider(section):
+        return False
+
+    filename = section.source_resource_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    stem = filename.rsplit(".", 1)[0].casefold()
+    if stem in _DROPPED_TOC_FILENAMES or stem in _DROPPED_PROMO_FILENAMES:
+        return True
+    stem_tokens = set(re.split(r"[-_\s]+", stem))
+    if stem_tokens & {"toc", "contents", "advert", "advertisement", "promo"}:
+        return True
+
+    title_norm = " ".join(section.title.split()).casefold().strip("\"'«»")
+    headings = tuple(
+        " ".join(block.text.split()).casefold().strip("\"'«»")
+        for block in section.blocks
+        if block.type is BlockType.HEADING and block.text.strip()
+    )
+    if title_norm in _DROPPED_TOC_TITLES or any(
+        heading in _DROPPED_TOC_TITLES for heading in headings
+    ):
+        return True
+
+    text_blocks = tuple(
+        " ".join(block.text.split())
+        for block in section.blocks
+        if block.type
+        in (BlockType.PARAGRAPH, BlockType.POEM, BlockType.QUOTE, BlockType.LIST_ITEM)
+        and block.text.strip()
+    )
+    all_text_lower = " ".join((title_norm, *headings, *(b.casefold() for b in text_blocks)))
+    is_protected_editorial = (
+        stem in _PROTECTED_FRONT_MATTER_STEMS
+        or bool(stem_tokens & _PROTECTED_FRONT_MATTER_STEMS)
+        or any(marker in all_text_lower for marker in _COPYRIGHT_MARKERS)
+    )
+
+    if _DROPPED_PROMO_RE.search(title_norm) or any(
+        _DROPPED_PROMO_RE.search(heading) for heading in headings
+    ):
+        return True
+
+    if not is_protected_editorial:
+        if _BARE_DOMAIN_TITLE_RE.match(title_norm) or (
+            len(headings) == 1 and _BARE_DOMAIN_TITLE_RE.match(headings[0])
+        ):
+            return True
+        if _PROMO_HEADING_RE.search(title_norm) or any(
+            _PROMO_HEADING_RE.search(heading) for heading in headings
+        ):
+            return True
+        if (
+            (_PROMO_DOMAIN_CTA_RE.search(title_norm) and _DOMAIN_IN_TEXT_RE.search(title_norm))
+            or any(
+                _PROMO_DOMAIN_CTA_RE.search(heading) and _DOMAIN_IN_TEXT_RE.search(heading)
+                for heading in headings
+            )
+        ):
+            return True
+
+    if text_blocks and not is_protected_editorial:
+        sample = " ".join(text_blocks[:3])
+        if _DROPPED_PROMO_RE.search(sample):
+            return True
+        if _PROMO_DOMAIN_CTA_RE.search(sample) and _DOMAIN_IN_TEXT_RE.search(sample):
+            return True
+    return False
+
+
 def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]:
     """Sections written into a book.
 
     Without a layout, every section is exported. A learner layout keeps the
-    cover and standalone part dividers, and drops every other front-matter section.
+    cover, standalone part dividers, and editorial front matter (title,
+    dedication, copyright) as source-only sections, and drops redundant HTML
+    tables of contents and publisher promotional inserts.
     """
     sections = request.document.ordered_sections
     if request.layout is None:
@@ -548,11 +739,7 @@ def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]
     return tuple(
         section
         for section in sections
-        if not (
-            request.document.is_front_matter(section)
-            and not request.document.is_cover_section(section)
-            and not request.document.is_part_divider(section)
-        )
+        if not _is_dropped_front_matter(section, request.document)
     )
 
 
@@ -721,12 +908,12 @@ def _read_source_dc_metadata(source_epub_path: str | None) -> tuple[str | None, 
     rights = None
     description = None
     for elem in opf_root.findall(f".//{{{_DC_NAMESPACE}}}rights"):
-        text = " ".join((elem.text or "").split())
+        text = clean_dc_text("".join(elem.itertext()))
         if text:
             rights = text
             break
     for elem in opf_root.findall(f".//{{{_DC_NAMESPACE}}}description"):
-        text = " ".join((elem.text or "").split())
+        text = clean_dc_text("".join(elem.itertext()))
         if text:
             description = text
             break
@@ -1005,8 +1192,20 @@ class _ChapterRenderer:
             if block.parent_id is not None:
                 children.setdefault(block.parent_id, []).append(block)
         state = _SectionState(section=section, href=href, number=number)
-        self._reserve_opaque_ids(blocks, state)
         roots = tuple(block for block in blocks if block.parent_id is None)
+        blocks_for_reserve = blocks
+        if not is_front_matter and not section.is_notes_only and roots:
+            leading_ids = self._extract_leading_empty_pagebreak_ids(
+                roots[0], has_children=bool(children.get(roots[0].id))
+            )
+            if leading_ids is not None:
+                dropped_id = roots[0].id
+                blocks_for_reserve = tuple(
+                    block for block in blocks if block.id != dropped_id
+                )
+                roots = roots[1:]
+                self._attach_section_anchors(container, leading_ids, state=state)
+        self._reserve_opaque_ids(blocks_for_reserve, state)
         self._append_siblings(
             container,
             roots,
@@ -1014,6 +1213,67 @@ class _ChapterRenderer:
             state=state,
             is_front_matter=is_front_matter,
         )
+
+    def _extract_leading_empty_pagebreak_ids(
+        self, block: DocumentBlock, *, has_children: bool
+    ) -> tuple[str, ...] | None:
+        """Return anchor IDs if ``block`` is a leading empty pagebreak to drop, else ``None``."""
+        if has_children:
+            return None
+        if block.text.replace("\xa0", "").strip():
+            return None
+        copied = (
+            self._opaque.element(block)
+            if block.support_status is SupportStatus.PRESERVE_OPAQUE
+            else None
+        )
+        if block.type is BlockType.PAGE_BREAK:
+            if copied is not None and not _is_empty_non_media_element(copied):
+                return None
+        elif (
+            block.support_status is SupportStatus.PRESERVE_OPAQUE
+            and copied is not None
+            and _is_empty_opaque_pagebreak(copied)
+        ):
+            pass
+        else:
+            return None
+
+        ids: list[str] = [anchor for anchor in _anchors(block) if anchor]
+        if block.source_reference.element_id:
+            ids.append(block.source_reference.element_id)
+        if copied is not None:
+            for node in copied.iter():
+                node_id = node.get("id")
+                if node_id:
+                    ids.append(node_id)
+        return tuple(dict.fromkeys(ids))
+
+    def _attach_section_anchors(
+        self,
+        container: etree._Element,
+        ids: Sequence[str],
+        *,
+        state: _SectionState,
+    ) -> None:
+        """Place the first transferred id on ``container`` and the rest in a hidden anchor block."""
+        pending = [
+            identifier
+            for identifier in ids
+            if identifier and identifier not in state.used_ids
+        ]
+        if not pending:
+            return
+        if container.get("id") is None:
+            container.set("id", pending[0])
+            state.used_ids.add(pending[0])
+            pending = pending[1:]
+        if pending:
+            host = _element("div", {"class": "linguary-anchors"})
+            for identifier in pending:
+                _sub(host, "span", {"id": identifier})
+                state.used_ids.add(identifier)
+            container.insert(0, host)
 
     def _reserve_opaque_ids(
         self, blocks: Sequence[DocumentBlock], state: _SectionState
@@ -1123,6 +1383,11 @@ class _ChapterRenderer:
         """
         copied = self._opaque.element(block)
         if copied is not None:
+            if self._document.is_cover_section(state.section):
+                wrapper = _sub(parent, "div", {"class": "lg-cover"})
+                wrapper.append(copied)
+                self._attach_anchors(wrapper, copied, block, state=state, inside=False)
+                return True
             parent.append(copied)
             self._attach_anchors(parent, copied, block, state=state, inside=False)
             return True
@@ -1149,7 +1414,15 @@ class _ChapterRenderer:
         is_front_matter: bool,
     ) -> None:
         """Units from the request layout. Plain front matter and missing entries stay source-only."""
-        from linguary.adapters.epub.layout_render import render_unit
+        from linguary.adapters.epub.layout_render import render_cover_image, render_unit
+
+        if (
+            self._document.is_cover_section(state.section)
+            and block.type is BlockType.IMAGE
+            and not block.text.strip()
+        ):
+            render_cover_image(host, block, state=state)
+            return
 
         for unit in self._units_for(block, state=state, is_front_matter=is_front_matter):
             render_unit(
@@ -1475,8 +1748,18 @@ def _package(
     )
     _append_metadata(_sub(root, f"{{{_OPF_NAMESPACE}}}metadata"), document, source_dc=source_dc)
     manifest = _sub(root, f"{{{_OPF_NAMESPACE}}}manifest")
+    cover_image_href = _cover_image_href(
+        chapters=chapters,
+        document=document,
+        payloads=payloads,
+        media_types=media_types,
+    )
     identifiers = _manifest_items(
-        manifest, chapters=chapters, payloads=payloads, media_types=media_types
+        manifest,
+        chapters=chapters,
+        payloads=payloads,
+        media_types=media_types,
+        cover_image_href=cover_image_href,
     )
     spine = _sub(root, f"{{{_OPF_NAMESPACE}}}spine")
     for chapter in chapters:
@@ -1500,10 +1783,10 @@ def _append_metadata(
         _sub(metadata, f"{{{_DC_NAMESPACE}}}creator").text = author
     if book_metadata.publisher:
         _sub(metadata, f"{{{_DC_NAMESPACE}}}publisher").text = book_metadata.publisher
-    rights = book_metadata.rights or source_dc[0]
+    rights = clean_dc_text(book_metadata.rights) or clean_dc_text(source_dc[0])
     if rights:
         _sub(metadata, f"{{{_DC_NAMESPACE}}}rights").text = rights
-    description = book_metadata.description or source_dc[1]
+    description = clean_dc_text(book_metadata.description) or clean_dc_text(source_dc[1])
     if description:
         _sub(metadata, f"{{{_DC_NAMESPACE}}}description").text = description
     modified = _sub(
@@ -1512,12 +1795,55 @@ def _append_metadata(
     modified.text = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _cover_image_href(
+    *,
+    chapters: Sequence[_Chapter],
+    document: CanonicalDocument,
+    payloads: Mapping[str, bytes],
+    media_types: Mapping[str, str],
+) -> str | None:
+    """Manifest href of the first local image inside a cover section, or ``None``."""
+    sections_by_id = {section.id: section for section in document.ordered_sections}
+    payload_keys = set(payloads)
+    for chapter in chapters:
+        section = sections_by_id.get(chapter.section_id)
+        if section is None or not document.is_cover_section(section):
+            continue
+        for element in chapter.root.iter():
+            tag = local_name(element)
+            if tag == "img":
+                raw_ref = element.get("src")
+            elif tag == "image":
+                raw_ref = element.get(_XLINK_HREF) or element.get("href")
+            else:
+                continue
+            if not raw_ref:
+                continue
+            cleaned_ref = raw_ref.strip()
+            if not cleaned_ref or _is_external(cleaned_ref):
+                continue
+            resolved, _ = _resolve_target(cleaned_ref, base=chapter.href)
+            matched = _match_known_path(resolved, payload_keys)
+            if matched is None:
+                continue
+            media_type = (
+                (media_types.get(matched) or _media_type(matched))
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if media_type.startswith("image/"):
+                return matched
+    return None
+
+
 def _manifest_items(
     manifest: etree._Element,
     *,
     chapters: Sequence[_Chapter],
     payloads: Mapping[str, bytes],
     media_types: Mapping[str, str],
+    cover_image_href: str | None = None,
 ) -> Mapping[str, str]:
     """Manifest items; returns the identifier for each book file."""
     identifiers: dict[str, str] = {}
@@ -1530,6 +1856,8 @@ def _manifest_items(
         }
         if href == _NAVIGATION_FILE:
             attributes["properties"] = "nav"
+        elif cover_image_href is not None and href == cover_image_href:
+            attributes["properties"] = "cover-image"
         _sub(manifest, f"{{{_OPF_NAMESPACE}}}item", attributes)
         identifiers[href] = item_id
     return {chapter.href: identifiers[chapter.href] for chapter in chapters}
@@ -2299,6 +2627,24 @@ def _unique_resource_name(candidate: str, used: set[str]) -> str:
         result = f'{stem}-{suffix}{extension}'
     used.add(result)
     return result
+
+
+def _is_empty_non_media_element(element: etree._Element) -> bool:
+    """Whether ``element`` carries no visible text (ignoring whitespace/NBSP) and no img/svg."""
+    if any(local_name(node) in {"img", "svg"} for node in element.iter()):
+        return False
+    return not "".join(element.itertext()).replace("\xa0", "").strip()
+
+
+def _is_empty_opaque_pagebreak(element: etree._Element) -> bool:
+    """Whether an opaque element is an empty ``p.pagebreak`` or ``div.pagebreak``."""
+    if local_name(element) not in {"p", "div"}:
+        return False
+    classes = set((element.get("class") or "").split())
+    epub_types = set((element.get(f"{{{_EPUB_NAMESPACE}}}type") or "").split())
+    if "pagebreak" not in classes and "pagebreak" not in epub_types:
+        return False
+    return _is_empty_non_media_element(element)
 
 
 def _contains_id(element: etree._Element, identifier: str) -> bool:

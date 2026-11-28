@@ -25,7 +25,18 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, RequiredPoint, Scene, SceneVisualFact, SourceAnchor, artifact_key
+from linguary.domain.content_plan import (
+    ContentPlan,
+    ContextFact,
+    Difficulty,
+    HelpEvidence,
+    RequiredPoint,
+    Scene,
+    SceneVisualFact,
+    SourceAnchor,
+    artifact_key,
+    has_subject_attribution_conflict,
+)
 from linguary.domain.llm_log import Violation
 
 from linguary.application.a2_core_vocab import (
@@ -274,6 +285,7 @@ def plan_items_from_response(
     response_by_alias = {item.source_block_id: item for item in payload.treatment_plan}
     blocks_by_id = {block.id: block for block in blocks} if blocks is not None else {}
     items: list[TreatmentPlanItem] = []
+    errors: list[tuple[str, str]] = []
     for alias, block_id in block_ids_by_alias.items():
         response_item = response_by_alias.get(alias)
         if response_item is None:
@@ -281,7 +293,20 @@ def plan_items_from_response(
                 raise KeyError(alias)
             continue
         block = blocks_by_id.get(block_id) if blocks is not None else None
-        items.append(_plan_item_from_response(response_item, block_id=block_id, block=block))
+        try:
+            items.append(
+                _plan_item_from_response(
+                    response_item, block_id=block_id, block=block, alias=alias
+                )
+            )
+        except AnalysisMergeError as err:
+            errors.append((str(err), block_id))
+    if errors:
+        raise _analysis_error(
+            "; ".join(message for message, _ in errors),
+            rule_code="invalid_segment_treatment",
+            block_ids=tuple(dict.fromkeys(bid for _, bid in errors)),
+        )
     return tuple(items)
 
 
@@ -290,6 +315,7 @@ def _plan_item_from_response(
     *,
     block_id: str,
     block: DocumentBlock | None,
+    alias: str | None = None,
 ) -> TreatmentPlanItem:
     """Map 1-based segment indexes onto `block.segment_spans`.
 
@@ -297,18 +323,21 @@ def _plan_item_from_response(
     modes collapse to an empty `segment_treatments` in the constructor, and
     spans of one sentence must share a mode.
     """
+    label = alias or block_id
     if not item.segments:
         return TreatmentPlanItem(block_id=block_id, treatment=item.treatment)
     if block is None:
         raise _analysis_error(
-            f"режимы сегментов блока {block_id} нельзя собрать без самого блока",
+            f"режимы сегментов блока {label} нельзя собрать без самого блока",
             rule_code="invalid_segment_treatment",
             block_ids=(block_id,),
         )
     spans = block.segment_spans
     if len(spans) < 2:
+        if all(segment.treatment is item.treatment for segment in item.segments):
+            return TreatmentPlanItem(block_id=block_id, treatment=item.treatment)
         raise _analysis_error(
-            f"блок {block_id} состоит из одного сегмента, режимы сегментов не задаются",
+            f"блок {label} состоит из одного сегмента, режимы сегментов не задаются",
             rule_code="invalid_segment_treatment",
             block_ids=(block_id,),
         )
@@ -316,21 +345,21 @@ def _plan_item_from_response(
     for segment in item.segments:
         if segment.index < 1 or segment.index > len(spans):
             raise _analysis_error(
-                f"индекс сегмента {segment.index} блока {block_id} "
+                f"индекс сегмента {segment.index} блока {label} "
                 f"вне диапазона 1..{len(spans)}",
                 rule_code="invalid_segment_treatment",
                 block_ids=(block_id,),
             )
         if segment.index in by_index:
             raise _analysis_error(
-                f"сегмент {segment.index} блока {block_id} указан повторно",
+                f"сегмент {segment.index} блока {label} указан повторно",
                 rule_code="invalid_segment_treatment",
                 block_ids=(block_id,),
             )
         by_index[segment.index] = segment.treatment
     if set(by_index) != set(range(1, len(spans) + 1)):
         raise _analysis_error(
-            f"режимы сегментов блока {block_id} покрывают не все сегменты",
+            f"режимы сегментов блока {label} покрывают не все сегменты",
             rule_code="invalid_segment_treatment",
             block_ids=(block_id,),
         )
@@ -342,8 +371,9 @@ def _plan_item_from_response(
             sentence_indexes=tuple(span.sentence_index for span in spans),
         )
     except TreatmentPlanError as err:
+        message = str(err).replace(block_id, label) if label != block_id else str(err)
         raise _analysis_error(
-            str(err),
+            message,
             rule_code="invalid_segment_treatment",
             block_ids=(block_id,),
         ) from err
@@ -2916,6 +2946,10 @@ def _collect_spoiler_name_leaks(
             continue
         if fact.kind not in {"speaker", "pronoun_referent"} or not fact.value:
             continue
+        if any(
+            _same_spoiler_name(fact.value, kn, glossary_candidates) for kn in known
+        ):
+            continue
         fact_pos = block_order.get(fact.subject_anchor.block_id)
         if fact_pos is None:
             continue
@@ -3269,17 +3303,162 @@ def _resolve_quoted_fact_entries(
     )
 
 
+_JOINT_SPEECH_RE = re.compile(
+    r"\b(?:"
+    r"(?i:together"
+    r"|chorused"
+    r"|in\s+unison"
+    r"|at\s+once"
+    r"|both\s+(?:said|cried|shouted|replied|whispered|asked)"
+    r"|all\s+(?:said|cried|shouted))"
+    r"|(?i:said|cried|shouted|asked|replied)\s+[A-Z][\w'’.-]+\s+(?i:and)\s+[A-Z][\w'’.-]+"
+    r"|[A-Z][\w'’.-]+\s+(?i:and)\s+[A-Z][\w'’.-]+\s+(?i:said|cried|shouted|asked|replied|chorused)"
+    r")\b"
+)
+
+
+def _mask_dialogue_quotes(text: str) -> str:
+    """Replace quoted dialogue spans with spaces of equal length, keeping author text offsets."""
+    return _DIALOGUE_QUOTES.sub(lambda match: " " * len(match.group(0)), text)
+
+
+def _author_text_for_joint_group(
+    group: Sequence[ContextFact],
+    subject_anchor: SourceAnchor,
+    texts: Mapping[str, str],
+) -> str:
+    """Extract only unquoted author text from the subject sentence and group anchors."""
+    masked_cache: dict[str, str] = {}
+
+    def masked_for(block_id: str) -> str | None:
+        if block_id not in masked_cache:
+            raw = texts.get(block_id)
+            if raw is None:
+                return None
+            masked_cache[block_id] = _mask_dialogue_quotes(raw)
+        return masked_cache[block_id]
+
+    pieces: list[str] = []
+    block_text = texts.get(subject_anchor.block_id)
+    if block_text is not None:
+        masked = masked_for(subject_anchor.block_id)
+        assert masked is not None
+        quote_spans = [(match.start(), match.end()) for match in _DIALOGUE_QUOTES.finditer(block_text)]
+        span_start = subject_anchor.start
+        span_end = subject_anchor.end
+        for q_start, q_end in quote_spans:
+            if subject_anchor.start < q_end and q_start < subject_anchor.end:
+                span_start = min(span_start, q_start)
+                span_end = max(span_end, q_end)
+        prev_quote_end = max(
+            (q_end for _, q_end in quote_spans if q_end <= span_start),
+            default=0,
+        )
+        next_quote_start = min(
+            (q_start for q_start, _ in quote_spans if q_start >= span_end),
+            default=len(block_text),
+        )
+        sent_prev = _sentence_end_before(masked, span_start)
+        left = max(prev_quote_end, sent_prev + 1 if sent_prev >= 0 else 0, 0)
+        sent_after_offset = _sentence_end_at(masked[span_end:])
+        sent_right = span_end + sent_after_offset + (1 if span_end + sent_after_offset < len(block_text) else 0)
+        right = min(next_quote_start, sent_right, len(block_text))
+        if left < right:
+            pieces.append(masked[left:right])
+
+    for fact in group:
+        for anchor in fact.anchors:
+            masked_anchor_block = masked_for(anchor.block_id)
+            if masked_anchor_block is not None:
+                pieces.append(masked_anchor_block[anchor.start:anchor.end])
+            else:
+                pieces.append(_mask_dialogue_quotes(anchor.quote))
+    return " ".join(pieces)
+
+
+def _normalize_joint_speaker_facts(
+    facts: Sequence[ContextFact],
+    texts: Mapping[str, str],
+) -> list[ContextFact]:
+    """Defensively mark multi-speaker groups on the same subject_anchor as joint=True when author text signals choral speech."""
+    result = list(facts)
+    grouped: dict[SourceAnchor, list[int]] = {}
+    for index, fact in enumerate(result):
+        if fact.kind == "speaker":
+            grouped.setdefault(fact.subject_anchor, []).append(index)
+
+    for subject_anchor, indices in grouped.items():
+        if len(indices) < 2:
+            continue
+        group = [result[idx] for idx in indices]
+        if not any(not fact.joint for fact in group):
+            continue
+        if any(
+            fact.certainty == "unknown" or not isinstance(fact.value, str) or not fact.value.strip()
+            for fact in group
+        ):
+            continue
+        if len({fact.value for fact in group}) != len(group):
+            continue
+        author_text = _author_text_for_joint_group(group, subject_anchor, texts)
+        if _JOINT_SPEECH_RE.search(author_text) is not None:
+            for idx in indices:
+                result[idx] = replace(result[idx], joint=True)
+    return result
+
+
+def _promote_explicit_speakers(
+    facts: Sequence[Any],
+    texts: Mapping[str, str] | None,
+    blocks: Sequence[DocumentBlock] | None,
+    *,
+    scenes: Sequence[Scene] = (),
+    glossary_candidates: Sequence[GlossaryCandidateResponse] = (),
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None = (),
+    ordered_block_ids: Sequence[str] = (),
+    block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]] | None = None,
+    block_order: Mapping[str, int] | None = None,
+) -> list[Any]:
+    """Apply `_explicit_speaker_if_remark_names` atomically for joint=True speaker groups."""
+    promoted = [
+        _explicit_speaker_if_remark_names(
+            fact,
+            texts,
+            blocks,
+            scenes=scenes,
+            glossary_candidates=glossary_candidates,
+            context_facts=facts,
+            mandatory_facts=mandatory_facts,
+            ordered_block_ids=ordered_block_ids,
+            block_tokens=block_tokens,
+            block_order=block_order,
+        )
+        for fact in facts
+    ]
+    joint_groups: dict[object, list[int]] = {}
+    for index, fact in enumerate(facts):
+        if fact.kind == "speaker" and getattr(fact, "joint", False):
+            joint_groups.setdefault(fact.subject_anchor, []).append(index)
+    for indices in joint_groups.values():
+        if len(indices) < 2:
+            continue
+        if any(promoted[idx].certainty != "explicit" for idx in indices):
+            for idx in indices:
+                promoted[idx] = replace(facts[idx], certainty="inferred")
+    return promoted
+
+
 def _conflicting_subject_block_ids(facts: Sequence[ContextFact]) -> tuple[str, ...]:
-    subjects: dict[tuple[str, SourceAnchor], set[tuple[str | None, str]]] = {}
+    subjects: dict[tuple[str, SourceAnchor], set[tuple[str | None, str, bool]]] = {}
     for fact in facts:
         subjects.setdefault((fact.kind, fact.subject_anchor), set()).add(
-            (fact.value, fact.certainty)
+            (fact.value, fact.certainty, fact.joint)
         )
     return tuple(
         dict.fromkeys(
             anchor.block_id
-            for (_, anchor), values in subjects.items()
-            if len(values) > 1
+            for (kind, anchor), entries in subjects.items()
+            if has_subject_attribution_conflict(kind, entries)
         )
     )
 
@@ -3568,9 +3747,11 @@ def validate_narrative_response(
             subject_anchor=subject_anchor,
             value=fact.value,
             certainty=fact.certainty,
+            joint=fact.joint,
         )
         for fact, anchors, subject_anchor in resolved_facts
     ]
+    mapped_facts = _normalize_joint_speaker_facts(mapped_facts, texts)
 
     block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
     spoiler_details, spoiler_blocks = _collect_spoiler_name_leaks(
@@ -3593,20 +3774,19 @@ def validate_narrative_response(
             )
         )
 
+    promoted_facts = _promote_explicit_speakers(
+        mapped_facts,
+        texts,
+        blocks,
+        scenes=scenes,
+        glossary_candidates=payload.glossary_candidates,
+        mandatory_facts=mandatory_facts,
+        ordered_block_ids=ordered_block_ids,
+        block_tokens=block_tokens,
+        block_order=block_order,
+    )
     facts: list[ContextFact] = []
-    for mapped in mapped_facts:
-        mapped = _explicit_speaker_if_remark_names(
-            mapped,
-            texts,
-            blocks,
-            scenes=scenes,
-            glossary_candidates=payload.glossary_candidates,
-            context_facts=mapped_facts,
-            mandatory_facts=mandatory_facts,
-            ordered_block_ids=ordered_block_ids,
-            block_tokens=block_tokens,
-            block_order=block_order,
-        )
+    for mapped in promoted_facts:
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
 
@@ -3667,7 +3847,7 @@ def _quoted_fact(fact: ContextFact) -> QuotedContextFactResponse:
     return QuotedContextFactResponse(fact.id, fact.kind,
         tuple(_quoted_anchor(a) for a in fact.anchors),
         _quoted_anchor(fact.subject_anchor),
-        fact.value, fact.certainty)
+        fact.value, fact.certainty, joint=fact.joint)
 
 
 def _normalize_location(value: str) -> str:
@@ -3796,19 +3976,17 @@ def combine_staged_analysis_responses(
         block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts_by_id)
         block_order = {bid: index for index, bid in enumerate(ordered_block_ids)}
         facts = tuple(
-            _explicit_speaker_if_remark_names(
-                fact,
+            _promote_explicit_speakers(
+                facts,
                 texts_by_id,
                 resolved_blocks,
                 scenes=resolved_scenes,
                 glossary_candidates=narrative.glossary_candidates,
-                context_facts=facts,
                 mandatory_facts=mandatory_facts,
                 ordered_block_ids=ordered_block_ids,
                 block_tokens=block_tokens,
                 block_order=block_order,
             )
-            for fact in facts
         )
     return ChapterAnalysisResponse(narrative.translation_instructions,
         pedagogical.reader_chapter_summary or narrative.chapter_summary,
@@ -4020,6 +4198,7 @@ def content_plan_from_response(
                     subject_anchor=resolved_subject,
                     value=fact.value,
                     certainty=fact.certainty,
+                    joint=fact.joint,
                 )
             )
     else:
@@ -4041,6 +4220,8 @@ def content_plan_from_response(
                 )
             except KeyError:
                 raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
+    if texts is not None:
+        mapped_facts = _normalize_joint_speaker_facts(mapped_facts, texts)
     block_tokens = (
         _extract_block_spoiler_tokens(ordered_block_ids, texts)
         if texts is not None and ordered_block_ids
@@ -4051,20 +4232,19 @@ def content_plan_from_response(
         if block_tokens is not None
         else None
     )
+    promoted_facts = _promote_explicit_speakers(
+        mapped_facts,
+        texts,
+        blocks,
+        scenes=scenes,
+        glossary_candidates=payload.glossary_candidates,
+        mandatory_facts=mandatory_facts,
+        ordered_block_ids=ordered_block_ids,
+        block_tokens=block_tokens,
+        block_order=block_order,
+    )
     facts = []
-    for mapped in mapped_facts:
-        mapped = _explicit_speaker_if_remark_names(
-            mapped,
-            texts,
-            blocks,
-            scenes=scenes,
-            glossary_candidates=payload.glossary_candidates,
-            context_facts=mapped_facts,
-            mandatory_facts=mandatory_facts,
-            ordered_block_ids=ordered_block_ids,
-            block_tokens=block_tokens,
-            block_order=block_order,
-        )
+    for mapped in promoted_facts:
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
@@ -4832,6 +5012,7 @@ _QUESTION_TAG_RE = re.compile(
 _NARRATIVE_GLOSSARY_WORD_LIMIT = 45
 _NARRATIVE_GLOSSARY_SENTENCE_LIMIT = 4
 _NARRATIVE_GLOSSARY_DIFFICULTY_LIMIT = 3
+_NARRATIVE_GLOSSARY_NON_CORE_WORD_LIMIT = 4
 _DIALOGUE_GLOSSARY_WORD_LIMIT = 15
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
 _LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
@@ -6026,6 +6207,19 @@ def normalize_pedagogical_response(
                         demoted = stoplist_demoted
                     if spans:
                         stoplist_spans_by_block[block.id] = spans
+                if not was_demoted and block.type in _DEMOTABLE_BLOCK_TYPES:
+                    before_overload = updated
+                    updated = _promote_overloaded_glossary_only(
+                        updated, block, known_names=known_names
+                    )
+                    if (
+                        updated is not before_overload
+                        and updated.treatment is BlockTreatment.TRANSLATE
+                        and not updated.segments
+                    ):
+                        if demoted is not None:
+                            demoted = None
+                        stoplist_spans_by_block.pop(block.id, None)
                 was_demoted_flags[idx] = was_demoted
             if updated is not item:
                 changed = True
@@ -6973,6 +7167,59 @@ def _promote_a2_stoplist_item(
             return _force_block_treatment(item, BlockTreatment.TRANSLATE), None, ()
 
     return item, None, ()
+
+
+def _promote_overloaded_glossary_only(
+    item: TreatmentPlanItemResponse,
+    block: DocumentBlock,
+    *,
+    known_names: Sequence[str] = (),
+) -> TreatmentPlanItemResponse:
+    """Promote GLOSSARY_ONLY blocks or segments with > 4 unique non-A2 words to TRANSLATE."""
+    if item.segments:
+        spans = block.segment_spans
+        if not spans:
+            return item
+        promoted_sentences: set[int] = set()
+        for segment in item.segments:
+            if segment.treatment is not BlockTreatment.GLOSSARY_ONLY:
+                continue
+            if not (1 <= segment.index <= len(spans)):
+                continue
+            span = spans[segment.index - 1]
+            slice_text = block.text[span.start : span.end]
+            if dominant_script(slice_text) != "LATIN":
+                continue
+            if (
+                len(non_core_a2_words(slice_text, known_names=known_names))
+                > _NARRATIVE_GLOSSARY_NON_CORE_WORD_LIMIT
+            ):
+                promoted_sentences.add(span.sentence_index)
+        if not promoted_sentences:
+            return item
+        new_segments = tuple(
+            SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE)
+            if 1 <= segment.index <= len(spans)
+            and spans[segment.index - 1].sentence_index in promoted_sentences
+            and segment.treatment is BlockTreatment.GLOSSARY_ONLY
+            else segment
+            for segment in item.segments
+        )
+        strongest = strongest_treatment(segment.treatment for segment in new_segments)
+        if all(segment.treatment is strongest for segment in new_segments):
+            return replace(item, treatment=strongest, segments=())
+        return replace(item, treatment=strongest, segments=new_segments)
+
+    if item.treatment is not BlockTreatment.GLOSSARY_ONLY:
+        return item
+    if dominant_script(block.text) != "LATIN":
+        return item
+    if (
+        len(non_core_a2_words(block.text, known_names=known_names))
+        > _NARRATIVE_GLOSSARY_NON_CORE_WORD_LIMIT
+    ):
+        return _force_block_treatment(item, BlockTreatment.TRANSLATE)
+    return item
 
 
 def _compute_promoted_block(

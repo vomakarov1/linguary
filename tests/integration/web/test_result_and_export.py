@@ -686,7 +686,7 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
     )
     from linguary.web.schemas import ResultChapterResponse
 
-    text = "“hello,” said Alice."
+    text = "“hello,” she said softly."
     poem = "Twinkle."
     scenario = store_book(
         application,
@@ -707,7 +707,7 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
     section = scenario.section()
     document = replace(scenario.document, sections=(replace(section, blocks=(paragraph, verse)),))
     hello = text.index("hello")
-    alice_at = text.index("Alice")
+    softly_at = text.index("softly")
     spoken = "“hello,”"
     note = LanguageNote(
         id="ln-hello",
@@ -735,7 +735,7 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
     )
     idiom = Difficulty(
         "d-idiom",
-        (SourceAnchor(paragraph.id, alice_at, alice_at + len("Alice"), "Alice"),),
+        (SourceAnchor(paragraph.id, softly_at, softly_at + len("softly"), "softly"),),
         paragraph.id,
         "idiom",
         "useful",
@@ -2499,6 +2499,79 @@ def test_quality_review_partial_uses_default_seed_first_chapter_on_result_page(
             )
     finally:
         app.dispose()
+
+
+def test_result_endpoint_renders_joint_speaker_string_and_plural_note(
+    client: TestClient, application: Application
+) -> None:
+    """Web result endpoint serializes joint speakers as a single str and plural 'Говорят ...' note."""
+    from linguary.domain import TreatmentPlan, TreatmentPlanItem
+    from linguary.domain.content_plan import ContentPlan, ContextFact, SourceAnchor
+
+    intro_text = "Harry Potter glanced at Ron Weasley."
+    chorus_text = "‘Hermione!’ they said together."
+    scenario = store_book(
+        application,
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=((intro_text, chorus_text),),
+        glossary_candidates={
+            0: (
+                glossary_candidate(
+                    candidate_id="candidate-harry",
+                    source_text="Harry Potter",
+                    suggested_translation="Гарри Поттер",
+                ),
+                glossary_candidate(
+                    candidate_id="candidate-ron",
+                    source_text="Ron Weasley",
+                    suggested_translation="Рон",
+                ),
+            ),
+        },
+    )
+    section = scenario.section()
+    intro_block, chorus_block = section.ordered_blocks
+    anchor = SourceAnchor(chorus_block.id, 0, len("‘Hermione!’"), "‘Hermione!’")
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        context_facts=(
+            ContextFact("sp-ron", "speaker", (anchor,), anchor, "Ron Weasley", "inferred", joint=True),
+            ContextFact("sp-harry", "speaker", (anchor,), anchor, "Harry Potter", "inferred", joint=True),
+        ),
+    )
+    with application.unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(scenario.book_id, section.id)
+        assert analysis is not None
+        uow.analyses.save(
+            scenario.book_id,
+            replace(
+                analysis,
+                content_plan=plan,
+                treatment_plan=TreatmentPlan(
+                    section.id,
+                    items=(
+                        TreatmentPlanItem(intro_block.id, BlockTreatment.READ_AS_IS),
+                        TreatmentPlanItem(chorus_block.id, BlockTreatment.READ_AS_IS),
+                    ),
+                ),
+            ),
+        )
+    start_run(
+        application,
+        scenario,
+        results=(
+            BlockProcessingResult(intro_block.id, BlockTreatment.READ_AS_IS),
+            BlockProcessingResult(chorus_block.id, BlockTreatment.READ_AS_IS),
+        ),
+    )
+
+    body = client.get(f"/books/{scenario.book_id}/result").json()
+    blocks = {b["block_id"]: b for b in body["chapters"][0]["blocks"]}
+    chorus_unit = blocks[chorus_block.id]["units"][0]
+    assert chorus_unit["speaker"] == "Гарри Поттер и Рон"
+    assert chorus_unit["notes"][0]["body"] == ["Говорят Гарри Поттер и Рон"]
+
 
 
 

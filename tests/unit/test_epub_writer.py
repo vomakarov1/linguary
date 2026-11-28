@@ -520,11 +520,30 @@ def test_part_divider_classification_and_export_preservation() -> None:
         source_resource_path="dedication.xhtml",
         blocks=(_block("sec-ded", "b-ded", "For my aunt.", BlockType.PARAGRAPH, 0),),
     )
+    toc_section = DocumentSection(
+        id="sec-toc",
+        document_id="book-1",
+        title="Contents",
+        order=2,
+        source_resource_path="toc.xhtml",
+        blocks=(
+            _block("sec-toc", "b-toc-h", "Contents", BlockType.HEADING, 0),
+            _block("sec-toc", "b-toc-p", "Chapter 1", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    promo_section = DocumentSection(
+        id="sec-promo",
+        document_id="book-1",
+        title="Also by the Author",
+        order=3,
+        source_resource_path="also_by.xhtml",
+        blocks=(_block("sec-promo", "b-promo", "Also by Neal Shusterman", BlockType.PARAGRAPH, 0),),
+    )
     part1_heading_divider = DocumentSection(
         id="sec-part1",
         document_id="book-1",
         title="Part One: Afterlights",
-        order=2,
+        order=4,
         source_resource_path="part1.xhtml",
         blocks=(
             _block("sec-part1", "b-p1h1", "PART ONE", BlockType.HEADING, 0),
@@ -535,7 +554,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
         id="sec-ch1",
         document_id="book-1",
         title="Chapter 1",
-        order=3,
+        order=5,
         source_resource_path="ch1.xhtml",
         blocks=(
             _block("sec-ch1", "b-c1h", "Chapter 1", BlockType.HEADING, 0),
@@ -546,7 +565,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
         id="sec-part2",
         document_id="book-1",
         title="PART TWO Mary, Queen of Snots",
-        order=4,
+        order=6,
         source_resource_path="ch1-7.xhtml",
         blocks=(
             _block("sec-part2", "b-p2a", "PART TWO", BlockType.PARAGRAPH, 0),
@@ -557,7 +576,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
         id="sec-book1",
         document_id="book-1",
         title="Book 1",
-        order=5,
+        order=7,
         source_resource_path="book1.xhtml",
         blocks=(
             _block("sec-book1", "b-bk1h", "Book 1", BlockType.HEADING, 0),
@@ -568,7 +587,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
         id="sec-combined",
         document_id="book-1",
         title="PART ONE Afterlights",
-        order=6,
+        order=8,
         source_resource_path="ch1-2.xhtml",
         blocks=(
             _block("sec-combined", "b-cmb1", "PART ONE", BlockType.PARAGRAPH, 0),
@@ -585,6 +604,8 @@ def test_part_divider_classification_and_export_preservation() -> None:
         sections=(
             cover,
             dedication,
+            toc_section,
+            promo_section,
             part1_heading_divider,
             ch1,
             part2_paragraph_divider,
@@ -627,6 +648,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
     exported_ids = [section.id for section in _exported_sections(request)]
     assert exported_ids == [
         "sec-cover",
+        "sec-ded",
         "sec-part1",
         "sec-ch1",
         "sec-part2",
@@ -638,7 +660,7 @@ def test_part_divider_classification_and_export_preservation() -> None:
         request, opaque=_OpaqueSource(source_path=None), warnings=_ExportWarnings()
     )
     leading, rest = _split_leading_front_matter(chapters, request)
-    assert [c.section_id for c in leading] == ["sec-cover"]
+    assert [c.section_id for c in leading] == ["sec-cover", "sec-ded"]
     assert [c.section_id for c in rest] == [
         "sec-part1",
         "sec-ch1",
@@ -646,6 +668,118 @@ def test_part_divider_classification_and_export_preservation() -> None:
         "sec-book1",
         "sec-combined",
     ]
+
+
+def test_dropped_front_matter_protects_editorial_pages_with_urls_or_shop_words() -> None:
+    """B-1 regression: editorial title/dedication/copyright stay exported while promo pages drop."""
+    from linguary.adapters.epub.writer import _is_dropped_front_matter
+
+    def _sec(
+        sid: str, title: str, resource: str, order: int, paras: tuple[str, ...], *, heading: str | None = None
+    ) -> DocumentSection:
+        blocks = []
+        idx = 0
+        if heading is not None:
+            blocks.append(
+                DocumentBlock.create(
+                    document_id="doc-fm",
+                    section_id=sid,
+                    type=BlockType.HEADING,
+                    order=idx,
+                    text=heading,
+                    source_reference=SourceReference(resource, "/html/body/h1[1]"),
+                )
+            )
+            idx += 1
+        for p_idx, text in enumerate(paras, start=1):
+            blocks.append(
+                DocumentBlock.create(
+                    document_id="doc-fm",
+                    section_id=sid,
+                    type=BlockType.PARAGRAPH,
+                    order=idx,
+                    text=text,
+                    source_reference=SourceReference(resource, f"/html/body/p[{p_idx}]"),
+                )
+            )
+            idx += 1
+        return DocumentSection(sid, "doc-fm", title, order, resource, tuple(blocks))
+
+    title_shop = _sec(
+        "s1", "The Old Curiosity Shop", "title.xhtml", 0, ("Charles Dickens",), heading="The Old Curiosity Shop"
+    )
+    ded_shop = _sec(
+        "s2", "Dedication", "dedication.xhtml", 1, ("For my sister, who spent the summer in a bookshop.",)
+    )
+    copy_4th = _sec(
+        "s3",
+        "Copyright",
+        "copyright.xhtml",
+        2,
+        (
+            "Bloomsbury Publishing Plc",
+            "50 Bedford Square, London",
+            "www.bloomsbury.com",
+            "Copyright 1997 Author. ISBN 978-0-00-000000-0.",
+        ),
+    )
+    copy_symbol = _sec(
+        "s4", "Info", "info.xhtml", 3, ("© 1997 Author. Published at bloomsbury.com.",)
+    )
+    title_url = _sec(
+        "s5", "Title Page", "title.xhtml", 4, ("Some Novel", "Bloomsbury Publishing", "www.bloomsbury.com")
+    )
+    promo_domain = _sec(
+        "s6",
+        "Pottermore.com",
+        "hp01_experience_en-gb.html",
+        5,
+        ("Visit pottermore.com for more adventures.",),
+    )
+    promo_shop = _sec(
+        "s7",
+        "The Pottermore Shop",
+        "hp02_pottermore_en-gb.html",
+        6,
+        ("Discover exclusive editions at pottermore.com.",),
+    )
+    preface_visit = _sec(
+        "s7b",
+        "A Visit to the Archive",
+        "preface.xhtml",
+        7,
+        ("Discover the past through old letters and notebooks.",),
+        heading="A Visit to the Archive",
+    )
+    chapter = _sec(
+        "s8",
+        "Chapter 1",
+        "ch01.xhtml",
+        8,
+        ("Mr and Mrs Dursley, of number four, Privet Drive, were proud to say that they were perfectly normal. " * 6,),
+        heading="Chapter 1",
+    )
+    doc = CanonicalDocument(
+        id="doc-fm",
+        metadata=BookMetadata(title="Test"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            title_shop,
+            ded_shop,
+            copy_4th,
+            copy_symbol,
+            title_url,
+            promo_domain,
+            promo_shop,
+            preface_visit,
+            chapter,
+        ),
+    )
+    for kept in (title_shop, ded_shop, copy_4th, copy_symbol, title_url, preface_visit):
+        assert _is_dropped_front_matter(kept, doc) is False, f"unexpectedly dropped {kept.id}"
+    for dropped in (promo_domain, promo_shop):
+        assert _is_dropped_front_matter(dropped, doc) is True, f"expected drop for {dropped.id}"
 
 
 def test_has_meaningful_part_title_distinguishes_titled_and_bare_dividers() -> None:
@@ -1154,3 +1288,582 @@ def test_epub_writer_prunes_unreferenced_resources_and_preserves_dc_rights_descr
         opf_partial = zf.read("OEBPS/content.opf").decode("utf-8")
     assert "Custom Rights" in opf_partial
     assert "A classic story." in opf_partial
+
+
+def test_clean_dc_text_strips_html_and_applies_across_import_fallback_and_reexport(tmp_path) -> None:
+    """WP7: clean_dc_text cleans HTML in dc:description/rights on import, fallback read, and DB re-export."""
+    import zipfile
+
+    from lxml import etree
+
+    from linguary.adapters.epub.inline import clean_dc_text
+    from linguary.adapters.epub.reader import EbookLibEpubReader
+    from linguary.adapters.epub.writer import EpubExportWriter, _read_source_dc_metadata
+    from linguary.application.ports.epub import EpubReadRequest
+
+    assert clean_dc_text(None) is None
+    assert clean_dc_text("   \n\t ") is None
+    assert clean_dc_text("<p>  &nbsp; </p>") is None
+    assert clean_dc_text("<p>Text <em>here</em>") == "Text here"
+    assert clean_dc_text("<p>Text <em>here</em>.</p>") == "Text here."
+    assert clean_dc_text("<p>First.</p><p>Second.</p>") == "First. Second."
+    assert clean_dc_text("Line 1<br/>Line 2") == "Line 1 Line 2"
+    assert clean_dc_text("Tom &amp; Jerry &mdash; Classic") == "Tom & Jerry — Classic"
+    assert clean_dc_text("A & B") == "A & B"
+
+    source_epub = tmp_path / "dirty_dc.epub"
+    with zipfile.ZipFile(source_epub, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:identifier id="uid">urn:uuid:dirty-dc</dc:identifier>'
+            "<dc:title>Book</dc:title><dc:language>en</dc:language>"
+            "<dc:rights>&lt;p&gt;Copyright &amp;copy; 2026 &lt;b&gt;Author&lt;/b&gt;&lt;/p&gt;</dc:rights>"
+            "<dc:description>&lt;p&gt;Text &lt;em&gt;here&lt;/em&gt;&lt;/p&gt;&lt;p&gt;More &amp;amp; details.&lt;/p&gt;</dc:description>"
+            "</metadata>"
+            '<manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>'
+            '<spine><itemref idref="ch1"/></spine></package>',
+        )
+        zf.writestr(
+            "OEBPS/ch1.xhtml",
+            '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ch 1</title></head>'
+            "<body><h1>Chapter 1</h1><p>Hello world.</p></body></html>",
+        )
+
+    # 1. Import cleans dc:rights and dc:description.
+    imported = EbookLibEpubReader().read(
+        EpubReadRequest(book_id="dirty-dc", source_path=str(source_epub), target_language="ru")
+    )
+    assert imported.document.metadata.rights == "Copyright © 2026 Author"
+    assert imported.document.metadata.description == "Text here More & details."
+
+    # 2. Fallback _read_source_dc_metadata cleans HTML.
+    assert _read_source_dc_metadata(str(source_epub)) == (
+        "Copyright © 2026 Author",
+        "Text here More & details.",
+    )
+
+    # 3. Re-exporting an already-imported DB document with dirty HTML in BookMetadata cleans in _append_metadata.
+    dirty_doc = CanonicalDocument(
+        id="dirty-db",
+        metadata=BookMetadata(
+            title="Book",
+            rights="<p>Rights <em>kept</em></p>",
+            description="<p>Text <em>here</em>",
+        ),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id="sec-ch1",
+                document_id="dirty-db",
+                title="Chapter 1",
+                order=0,
+                source_resource_path="ch1.xhtml",
+                blocks=(_block("sec-ch1", "b1", "Hello.", BlockType.PARAGRAPH, 0),),
+            ),
+        ),
+    )
+    target = tmp_path / "reexported.epub"
+    EpubExportWriter().write(EpubWriteRequest(document=dirty_doc, target_path=str(target)))
+    with zipfile.ZipFile(target) as zf:
+        opf_root = etree.fromstring(zf.read("OEBPS/content.opf"))
+    dc_ns = "{http://purl.org/dc/elements/1.1/}"
+    assert opf_root.findtext(f".//{dc_ns}rights") == "Rights kept"
+    assert opf_root.findtext(f".//{dc_ns}description") == "Text here"
+
+
+def test_cover_image_property_and_clean_lg_cover_for_img_svg_and_synthetic_pages(tmp_path) -> None:
+    """WP7: cover-image property is set on img & opaque SVG covers, clean .lg-cover rendered, synthetic pages safe."""
+    import zipfile
+
+    from lxml import etree
+
+    from linguary.adapters.epub.writer import EpubExportWriter, _OPF_NAMESPACE, _XHTML_NAMESPACE
+    from linguary.application.layout.ipa_reference import IpaSymbol
+    from linguary.domain import DocumentResource, SupportStatus
+
+    cover_png = tmp_path / "cover.png"
+    cover_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+    # 1. Book with BlockType.IMAGE cover + synthetic pages (legend, ipa-key).
+    cover_sec = DocumentSection(
+        id="sec-cover",
+        document_id="book-cov",
+        title="Cover",
+        order=0,
+        source_resource_path="Text/cover.xhtml",
+        blocks=(
+            DocumentBlock(
+                id="b-cov-img",
+                section_id="sec-cover",
+                type=BlockType.IMAGE,
+                order=0,
+                text="",
+                source_reference=SourceReference("Text/cover.xhtml", "/html[1]/body[1]/img[1]"),
+                attributes={"src": "../Images/cover.png", "alt": "Cover", "anchor_ids": "cov-anchor"},
+            ),
+        ),
+    )
+    ch1_sec = DocumentSection(
+        id="sec-ch1",
+        document_id="book-cov",
+        title="Chapter 1",
+        order=1,
+        source_resource_path="Text/ch1.xhtml",
+        blocks=(_block("sec-ch1", "b-c1", "Story begins.", BlockType.PARAGRAPH, 0),),
+    )
+    doc_img = CanonicalDocument(
+        id="book-cov",
+        metadata=BookMetadata(title="Book"),
+        source_language="en",
+        target_language="ru",
+        sections=(cover_sec, ch1_sec),
+        resources=(
+            DocumentResource("r-cov", "Images/cover.png", "image/png", SupportStatus.SUPPORTED),
+        ),
+    )
+    layout_with_synthetic = BookLayout(
+        chapters={},
+        legend=("Line one.",),
+        ipa_key=(IpaSymbol("e", "bed /bed/", "э"),),
+        who_is_who=(),
+        features=LayoutFeatures(False, False, frozenset(), True, False, False, frozenset()),
+    )
+    out_img = tmp_path / "out_img.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc_img,
+            target_path=str(out_img),
+            stored_resource_paths={"Images/cover.png": str(cover_png)},
+            layout=layout_with_synthetic,
+        )
+    )
+    with zipfile.ZipFile(out_img) as zf:
+        opf = etree.fromstring(zf.read("OEBPS/content.opf"))
+        cover_root = etree.fromstring(zf.read("OEBPS/Text/cover.xhtml"))
+    items = {
+        item.get("href"): item.get("properties")
+        for item in opf.iter(f"{{{_OPF_NAMESPACE}}}item")
+    }
+    assert items["Images/cover.png"] == "cover-image"
+    ns = {"x": _XHTML_NAMESPACE}
+    assert cover_root.xpath(".//x:div[contains(@class, 'lg-unit')]", namespaces=ns) == []
+    assert cover_root.xpath(".//x:p[contains(@class, 'lg-src')]", namespaces=ns) == []
+    cover_divs = cover_root.xpath(".//x:div[@class='lg-cover']", namespaces=ns)
+    assert len(cover_divs) == 1
+    assert cover_divs[0].get("id") == "cov-anchor"
+    assert len(cover_divs[0].xpath("./x:img[@src='../Images/cover.png']", namespaces=ns)) == 1
+
+    # 2. Book with opaque SVG cover (<svg><image xlink:href="..."/></svg>).
+    svg_source = tmp_path / "svg_source.epub"
+    with zipfile.ZipFile(svg_source, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/><spine/></package>',
+        )
+        zf.writestr(
+            "OEBPS/cover.xhtml",
+            '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">'
+            "<head><title>Cover</title></head><body>"
+            '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">'
+            '<image width="100" height="100" xlink:href="Images/cover.png"/>'
+            "</svg></body></html>",
+        )
+    svg_cover_sec = DocumentSection(
+        id="sec-svg-cover",
+        document_id="book-svg",
+        title="Cover",
+        order=0,
+        source_resource_path="cover.xhtml",
+        blocks=(
+            DocumentBlock(
+                id="b-svg-cov",
+                section_id="sec-svg-cover",
+                type=BlockType.OTHER,
+                order=0,
+                text="",
+                source_reference=SourceReference("cover.xhtml", "/html[1]/body[1]/svg[1]"),
+                support_status=SupportStatus.PRESERVE_OPAQUE,
+            ),
+        ),
+    )
+    ch1_svg = DocumentSection(
+        id="sec-ch1-svg",
+        document_id="book-svg",
+        title="Chapter 1",
+        order=1,
+        source_resource_path="ch1.xhtml",
+        blocks=(_block("sec-ch1-svg", "b-c1-svg", "Hello.", BlockType.PARAGRAPH, 0),),
+    )
+    doc_svg = CanonicalDocument(
+        id="book-svg",
+        metadata=BookMetadata(title="SVG Book"),
+        source_language="en",
+        target_language="ru",
+        sections=(svg_cover_sec, ch1_svg),
+        resources=(
+            DocumentResource("r-cov-svg", "Images/cover.png", "image/png", SupportStatus.SUPPORTED),
+        ),
+    )
+    out_svg = tmp_path / "out_svg.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc_svg,
+            target_path=str(out_svg),
+            source_epub_path=str(svg_source),
+            stored_resource_paths={"Images/cover.png": str(cover_png)},
+            layout=layout_with_synthetic,
+        )
+    )
+    with zipfile.ZipFile(out_svg) as zf:
+        opf_svg = etree.fromstring(zf.read("OEBPS/content.opf"))
+        svg_cover_root = etree.fromstring(zf.read("OEBPS/cover.xhtml"))
+    items_svg = {
+        item.get("href"): item.get("properties")
+        for item in opf_svg.iter(f"{{{_OPF_NAMESPACE}}}item")
+    }
+    assert items_svg["Images/cover.png"] == "cover-image"
+    assert svg_cover_root.xpath(".//x:div[contains(@class, 'lg-unit')]", namespaces=ns) == []
+    svg_cover_divs = svg_cover_root.xpath(".//x:div[@class='lg-cover']", namespaces=ns)
+    assert len(svg_cover_divs) == 1
+    assert any(node.tag.endswith("svg") for node in svg_cover_divs[0].iter())
+
+    # 3. Book WITHOUT cover section WITH synthetic pages (legend + ipa-key) does not fail.
+    doc_no_cover = CanonicalDocument(
+        id="book-no-cov",
+        metadata=BookMetadata(title="No Cover"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id="sec-ch1-nc",
+                document_id="book-no-cov",
+                title="Chapter 1",
+                order=0,
+                source_resource_path="ch1.xhtml",
+                blocks=(_block("sec-ch1-nc", "b-nc", "Just text.", BlockType.PARAGRAPH, 0),),
+            ),
+        ),
+    )
+    out_no_cov = tmp_path / "out_no_cov.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc_no_cover,
+            target_path=str(out_no_cov),
+            layout=layout_with_synthetic,
+        )
+    )
+    with zipfile.ZipFile(out_no_cov) as zf:
+        opf_nc = etree.fromstring(zf.read("OEBPS/content.opf"))
+    assert all(
+        item.get("properties") != "cover-image"
+        for item in opf_nc.iter(f"{{{_OPF_NAMESPACE}}}item")
+    )
+
+
+def test_leading_empty_pagebreak_removed_before_reserve_and_ids_transferred_to_section(tmp_path) -> None:
+    """WP7: leading empty pagebreak (PAGE_BREAK and opaque p.pagebreak) drops before _reserve_opaque_ids and moves id to section."""
+    import zipfile
+
+    from lxml import etree
+
+    from linguary.adapters.epub.writer import EpubExportWriter, _EPUB_NAMESPACE, _XHTML_NAMESPACE
+    from linguary.domain import InlineAnnotation, InlineAnnotationType, SupportStatus
+
+    source_epub = tmp_path / "pb_source.epub"
+    with zipfile.ZipFile(source_epub, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest/><spine/></package>',
+        )
+        zf.writestr(
+            "OEBPS/ch1.xhtml",
+            '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ch 1</title></head><body>'
+            '<p class="pagebreak" id="ch1-top"><span id="ch1-extra">&#160;</span></p>'
+            "<h1>Chapter 1</h1>"
+            '<p class="pagebreak" id="mid-pb">&#160;</p>'
+            "<p>Opening text.</p>"
+            "</body></html>",
+        )
+
+    pb_opaque = DocumentBlock(
+        id="b-pb-top",
+        section_id="sec-ch1",
+        type=BlockType.OTHER,
+        order=0,
+        text="\xa0",
+        source_reference=SourceReference("ch1.xhtml", "/html[1]/body[1]/p[1]", element_id="ch1-top"),
+        support_status=SupportStatus.PRESERVE_OPAQUE,
+        attributes={"anchor_ids": "ch1-top ch1-extra"},
+    )
+    ch1_heading = _block("sec-ch1", "b-c1-h", "Chapter 1", BlockType.HEADING, 1)
+    pb_mid = DocumentBlock(
+        id="b-pb-mid",
+        section_id="sec-ch1",
+        type=BlockType.OTHER,
+        order=2,
+        text="\xa0",
+        source_reference=SourceReference("ch1.xhtml", "/html[1]/body[1]/p[2]", element_id="mid-pb"),
+        support_status=SupportStatus.PRESERVE_OPAQUE,
+        attributes={"anchor_ids": "mid-pb"},
+    )
+    ch1_p = DocumentBlock(
+        id="b-c1-p",
+        section_id="sec-ch1",
+        type=BlockType.PARAGRAPH,
+        order=3,
+        text="See top and extra.",
+        source_reference=SourceReference("ch1.xhtml", "/html[1]/body[1]/p[3]"),
+        inline_annotations=(
+            InlineAnnotation(InlineAnnotationType.LINK, 4, 7, "ch1.xhtml#ch1-top"),
+            InlineAnnotation(InlineAnnotationType.LINK, 12, 17, "ch1.xhtml#ch1-extra"),
+        ),
+    )
+    ch2_pb_supported = DocumentBlock(
+        id="b-pb-sup",
+        section_id="sec-ch2",
+        type=BlockType.PAGE_BREAK,
+        order=0,
+        text="",
+        source_reference=SourceReference("ch2.xhtml", "/html[1]/body[1]/span[1]"),
+        support_status=SupportStatus.SUPPORTED,
+        attributes={"anchor_ids": "ch2-top"},
+    )
+    ch2_p = DocumentBlock(
+        id="b-c2-p",
+        section_id="sec-ch2",
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text="Back to chapter 1 or chapter 2.",
+        source_reference=SourceReference("ch2.xhtml", "/html[1]/body[1]/p[1]"),
+        inline_annotations=(
+            InlineAnnotation(InlineAnnotationType.LINK, 8, 17, "ch1.xhtml#ch1-top"),
+            InlineAnnotation(InlineAnnotationType.LINK, 21, 30, "ch2.xhtml#ch2-top"),
+        ),
+    )
+    doc = CanonicalDocument(
+        id="book-pb",
+        metadata=BookMetadata(title="PB Book"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id="sec-ch1",
+                document_id="book-pb",
+                title="Chapter 1",
+                order=0,
+                source_resource_path="ch1.xhtml",
+                blocks=(pb_opaque, ch1_heading, pb_mid, ch1_p),
+            ),
+            DocumentSection(
+                id="sec-ch2",
+                document_id="book-pb",
+                title="Chapter 2",
+                order=1,
+                source_resource_path="ch2.xhtml",
+                blocks=(ch2_pb_supported, ch2_p),
+            ),
+        ),
+    )
+    out = tmp_path / "pb_out.epub"
+    exported = EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc,
+            target_path=str(out),
+            source_epub_path=str(source_epub),
+        )
+    )
+    assert exported.warnings == ()
+
+    ns = {"x": _XHTML_NAMESPACE}
+    with zipfile.ZipFile(out) as zf:
+        ch1_root = etree.fromstring(zf.read("OEBPS/ch1.xhtml"))
+        ch2_root = etree.fromstring(zf.read("OEBPS/ch2.xhtml"))
+
+    ch1_sec = ch1_root.xpath(".//x:section", namespaces=ns)[0]
+    assert ch1_sec.get(f"{{{_EPUB_NAMESPACE}}}type") == "chapter"
+    assert ch1_sec.get("id") == "ch1-top"
+    assert ch1_sec.xpath(".//x:div[@class='linguary-anchors']/x:span[@id='ch1-extra']", namespaces=ns)
+    # Leading p.pagebreak removed, mid-chapter p.pagebreak kept.
+    pagebreaks = ch1_sec.xpath(".//x:p[@class='pagebreak']", namespaces=ns)
+    assert [pb.get("id") for pb in pagebreaks] == ["mid-pb"]
+    assert {a.get("href") for a in ch1_sec.xpath(".//x:a", namespaces=ns)} == {
+        "#ch1-top",
+        "#ch1-extra",
+    }
+
+    ch2_sec = ch2_root.xpath(".//x:section", namespaces=ns)[0]
+    assert ch2_sec.get("id") == "ch2-top"
+    assert ch2_sec.xpath(".//*[@epub:type='pagebreak']", namespaces={**_ns_epub()}) == []
+    assert {a.get("href") for a in ch2_sec.xpath(".//x:a", namespaces=ns)} == {
+        "ch1.xhtml#ch1-top",
+        "#ch2-top",
+    }
+
+
+def _ns_epub() -> dict[str, str]:
+    from linguary.adapters.epub.writer import _EPUB_NAMESPACE
+
+    return {"epub": _EPUB_NAMESPACE}
+
+
+def test_multibook_front_matter_preserves_chapter_numbering_and_previous_recap() -> None:
+    """WP7: title/dedication between books stays source-only and does not shift chapter numbers or Previously in."""
+    from lxml import etree
+
+    from linguary.adapters.epub.writer import _EPUB_NAMESPACE, _XHTML_NAMESPACE
+    from linguary.application.layout.book import LayoutInputs, build_book_layout
+    from linguary.domain import (
+        BlockProcessingResult,
+        BlockTreatment,
+        GlossaryHint,
+        LearningMaterial,
+    )
+
+    cover = DocumentSection(
+        id="sec-cover",
+        document_id="multi-1",
+        title="Cover",
+        order=0,
+        source_resource_path="cover.xhtml",
+        blocks=(_block("sec-cover", "b-cov", "", BlockType.IMAGE, 0),),
+    )
+    title1 = DocumentSection(
+        id="sec-title1",
+        document_id="multi-1",
+        title="Title Page",
+        order=1,
+        source_resource_path="title1.xhtml",
+        blocks=(_block("sec-title1", "b-t1", "The First Chronicle", BlockType.HEADING, 0),),
+    )
+    ch1 = DocumentSection(
+        id="sec-ch1",
+        document_id="multi-1",
+        title="Chapter 1",
+        order=2,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "b-c1-h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "b-c1-p", "Alice opened the door.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    title2 = DocumentSection(
+        id="sec-title2",
+        document_id="multi-1",
+        title="Title Page",
+        order=3,
+        source_resource_path="title2.xhtml",
+        blocks=(_block("sec-title2", "b-t2", "The Second Chronicle", BlockType.HEADING, 0),),
+    )
+    ded2 = DocumentSection(
+        id="sec-ded2",
+        document_id="multi-1",
+        title="Dedication",
+        order=4,
+        source_resource_path="ded2.xhtml",
+        blocks=(_block("sec-ded2", "b-d2", "For my sister.", BlockType.PARAGRAPH, 0),),
+    )
+    ch2 = DocumentSection(
+        id="sec-ch2",
+        document_id="multi-1",
+        title="Chapter 2",
+        order=5,
+        source_resource_path="ch2.xhtml",
+        blocks=(
+            _block("sec-ch2", "b-c2-h", "Chapter 2", BlockType.HEADING, 0),
+            _block("sec-ch2", "b-c2-p", "She stepped outside.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    doc = CanonicalDocument(
+        id="multi-1",
+        metadata=BookMetadata(title="Omnibus"),
+        source_language="en",
+        target_language="ru",
+        sections=(cover, title1, ch1, title2, ded2, ch2),
+    )
+    results = {
+        "b-c1-p": BlockProcessingResult(
+            "b-c1-p",
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("opened", "открыла", ""),),
+        ),
+        "b-d2": BlockProcessingResult(
+            "b-d2",
+            BlockTreatment.TRANSLATE,
+            translated_text="Для моей сестры.",
+        ),
+        "b-c2-p": BlockProcessingResult(
+            "b-c2-p",
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("stepped", "шагнула", ""),),
+        ),
+    }
+    materials = {
+        "sec-ch1": LearningMaterial(section_id="sec-ch1", chapter_summary="Alice opened the door."),
+        "sec-title2": LearningMaterial(section_id="sec-title2", chapter_summary="Must not recap title2."),
+        "sec-ded2": LearningMaterial(section_id="sec-ded2", chapter_summary="Must not recap ded2."),
+        "sec-ch2": LearningMaterial(section_id="sec-ch2", chapter_summary="She stepped outside."),
+    }
+    layout = build_book_layout(
+        LayoutInputs(document=doc, results=results, analyses=(), concepts=(), reader_level="a2")
+    )
+    request = EpubWriteRequest(
+        document=doc,
+        target_path="multi.epub",
+        layout=layout,
+        learning_materials=materials,
+    )
+    chapters = _render_chapters(request, opaque=_OpaqueSource(None), warnings=_ExportWarnings())
+    assert [c.section_id for c in chapters] == [
+        "sec-cover",
+        "sec-title1",
+        "sec-ch1",
+        "sec-title2",
+        "sec-ded2",
+        "sec-ch2",
+    ]
+    leading, rest = _split_leading_front_matter(chapters, request)
+    assert [c.section_id for c in leading] == ["sec-cover", "sec-title1"]
+    assert [c.section_id for c in rest] == ["sec-ch1", "sec-title2", "sec-ded2", "sec-ch2"]
+
+    by_id = {c.section_id: c.root for c in chapters}
+    ns = {"x": _XHTML_NAMESPACE}
+
+    # Mid-book title2 & ded2 are source-only frontmatter with no translation or recap.
+    for mid_id in ("sec-title2", "sec-ded2"):
+        sec = by_id[mid_id].xpath(".//x:section", namespaces=ns)[0]
+        assert sec.get(f"{{{_EPUB_NAMESPACE}}}type") == "frontmatter"
+        html = etree.tostring(by_id[mid_id], encoding="unicode")
+        assert "lg-tr" not in html
+        assert "linguary-previously" not in html
+        assert "Для моей сестры." not in html
+
+    # Chapter 1 is ln-ch01-001; Chapter 2 is ln-ch02-001 and recaps Chapter 1 (not ded2/title2).
+    ch1_notes = by_id["sec-ch1"].xpath(".//x:ol[@class='lg-notes']/x:li", namespaces=ns)
+    assert [n.get("id") for n in ch1_notes] == ["ln-ch01-001"]
+    ch2_notes = by_id["sec-ch2"].xpath(".//x:ol[@class='lg-notes']/x:li", namespaces=ns)
+    assert [n.get("id") for n in ch2_notes] == ["ln-ch02-001"]
+    ch2_text = "".join(by_id["sec-ch2"].itertext())
+    assert "Previously in Chapter 1" in ch2_text
+    assert "Alice opened the door." in ch2_text
+    assert "Must not recap" not in ch2_text

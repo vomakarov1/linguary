@@ -32,9 +32,14 @@
     <p>Импорт завершён. Следующий шаг — анализ глав через LLM.</p>
     {% if llm_ready %}
       {% set init_level = data.conditions.reader_level or default_reader_level|default('b2') %}
+      {% set has_saved_conditions = data.conditions.conditions_id %}
+      {% set recommended_variant = recommended_pronunciation_variant|default('us') %}
+      {% set init_pronunciation = data.conditions.pronunciation_help_enabled if has_saved_conditions else (init_level == 'a2') %}
+      {% set init_variant = data.conditions.pronunciation_variant if has_saved_conditions else (recommended_variant if init_pronunciation else '') %}
       <form class="actions" method="post" action="/books/{{ data.book.id }}/analyze">
         <label>Уровень английского
-          <select name="reader_level">
+          <select name="reader_level"
+            onchange="const toggle = this.form.querySelector('input[name=&quot;pronunciation_help_enabled&quot;]'); if (toggle && toggle.dataset.userTouched !== 'true') { const shouldEnable = this.value === 'a2'; toggle.checked = shouldEnable; const variant = this.form.querySelector('[data-pronunciation-variant]'); if (variant) { variant.closest('label').hidden = !shouldEnable; variant.required = shouldEnable; if (shouldEnable) { variant.name = 'pronunciation_variant'; if (!variant.value) { variant.value = variant.dataset.recommendedVariant || 'us'; } } else { variant.removeAttribute('name'); } } }">
             <option value="a2" {% if init_level == 'a2' %}selected{% endif %}>A2</option>
             <option value="b1" {% if init_level == 'b1' %}selected{% endif %}>B1</option>
             <option value="b2" {% if init_level == 'b2' %}selected{% endif %}>B2</option>
@@ -43,13 +48,13 @@
         </label>
         <label><input type="checkbox" name="english_help" value="true" {% if data.conditions.english_help %}checked{% endif %}> Пояснять сложные места простым английским</label>
         {% if data.book.source_language == 'en' %}
-          <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if data.conditions.pronunciation_help_enabled %}checked{% endif %}
-            onchange="const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>
-          <label {% if not data.conditions.pronunciation_help_enabled %}hidden{% endif %}>Вариант английского
-            <select data-pronunciation-variant {% if data.conditions.pronunciation_help_enabled %}name="pronunciation_variant" required{% endif %}>
-              <option value="" {% if not data.conditions.pronunciation_variant %}selected{% endif %}>Выберите вариант</option>
-              <option value="uk" {% if data.conditions.pronunciation_variant == 'uk' %}selected{% endif %}>Британский (UK)</option>
-              <option value="us" {% if data.conditions.pronunciation_variant == 'us' %}selected{% endif %}>Американский (US)</option>
+          <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if init_pronunciation %}checked{% endif %} {% if has_saved_conditions %}data-user-touched="true"{% endif %}
+            onchange="this.dataset.userTouched = 'true'; const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; if (!variant.value) { variant.value = variant.dataset.recommendedVariant || 'us'; } } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>
+          <label {% if not init_pronunciation %}hidden{% endif %}>Вариант английского
+            <select data-pronunciation-variant data-recommended-variant="{{ recommended_variant }}" {% if init_pronunciation %}name="pronunciation_variant" required{% endif %}>
+              <option value="" {% if not init_variant %}selected{% endif %}>Выберите вариант</option>
+              <option value="uk" {% if init_variant == 'uk' %}selected{% endif %}>Британский (UK)</option>
+              <option value="us" {% if init_variant == 'us' %}selected{% endif %}>Американский (US)</option>
             </select>
           </label>
         {% endif %}

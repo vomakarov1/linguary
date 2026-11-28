@@ -317,6 +317,10 @@ class CheckSettings:
     Defaults are selected so that checks detect technical defects rather than literary decisions:
     target alphabet share is checked only on long full translations, while n-gram repetition remains
     a warning.
+
+    `language_notes_per_chapter` sets the base per-chapter allowance (default 8); for long chapters
+    (> 35 body blocks, when the base setting is >= 6) it scales automatically up to 18 via
+    `scaled_chapter_note_limit`.
     """
 
     glossary_confidence_threshold: float = 0.8
@@ -326,6 +330,7 @@ class CheckSettings:
     language_check_min_length: int = 80
     repetition_ngram_size: int = 6
     repetition_min_repeats: int = 3
+    #: Base per-chapter language note allowance; scales automatically up to 18 on long chapters (> 35 body blocks).
     language_notes_per_chapter: int = 8
     auto_approve_glossary: bool = False
     auto_start_processing: bool = False

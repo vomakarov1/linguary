@@ -538,5 +538,21 @@ def test_correction_prompts_sync_orthography_warnings_and_review_criteria() -> N
     }
 
 
+def test_wp6_correction_prompts_guard_free_indirect_speech_and_expand_calque_checklist() -> None:
+    for prompt in (CORRECTION_PROMPT_V2, CORRECTION_REVIEW_PROMPT):
+        assert "грубые бытовые и телесные кальки" in prompt
+        assert "очевидные лексико-смысловые сдвиги" in prompt
+        assert "несобственно-прямой речи" in prompt
+        assert "<br/>" in prompt
+        assert "закрытой реплики со словами автора" in prompt
+
+    assert "Избегай гиперкоррекции" in CORRECTION_PROMPT_V2
+    assert "Отклоняй (needs_human) случаи гиперкоррекции" in CORRECTION_REVIEW_PROMPT
+    assert "условиям книги" not in CORRECTION_PROMPT_V2
+    assert "условия книги" not in CORRECTION_PROMPT_V2
+    assert "proposal_sha256" not in CORRECTION_REVIEW_PROMPT
+
+
+
 
 

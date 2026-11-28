@@ -3109,14 +3109,15 @@ def test_name_policy_backfills_unmatched_prior_chapter_key_candidates_preserving
     # Matched Allie keeps suggested translation and enriches description from GlossaryCandidate.
     assert "- Allie [person] -> Элли — описание: Сокращённое имя Александры." in text
     assert "Allie [person] -> Элли" in text and "непрозрачное=false" not in text.split("Allie [person] -> Элли")[1].splitlines()[0]
-    # Overlapping TermConcept(SUGGESTED) + GlossaryCandidate for Lief keeps description and непрозрачное=false.
+    # Unmatched TermConcept(SUGGESTED) + GlossaryCandidate for Lief is backfilled compactly
+    # (preserving translation and непрозрачное=false without verbose description/note).
     lief_line = next(line for line in text.splitlines() if line.startswith("- Lief [person] -> Лист"))
-    assert "(мужской род)" in lief_line
-    assert "Мальчик, чьё имя происходит от слова leaf." in lief_line
     assert "непрозрачное=false" in lief_line
-    # Key unmatched types + requires_review term are backfilled; plain TERM without review is excluded.
-    assert "Alexandra [person] -> Александра" in text
-    assert "Полное имя Элли." in text
+    assert "Мальчик, чьё имя происходит от слова leaf." not in lief_line
+    # Key unmatched types + requires_review term are backfilled compactly without note/description;
+    # plain TERM without review is excluded.
+    assert "- Alexandra [person] -> Александра" in text
+    assert "Полное имя Элли." not in text
     assert text.count("Alexandra") == 1
     assert "ALEXANDRA" not in text
     assert "- Afterlights [fictional_concept] -> Послесветы — непрозрачное=false" in text
@@ -4236,5 +4237,367 @@ def test_narrative_prompt_forbids_rhymed_verse_and_schema_describes_glossary_hin
     assert "GLOSSARY_ONLY" in hints_prop.get("description", "")
     assert "minItems" not in hints_prop
     assert "glossary_hints" in schema["required"]
+
+
+def test_narrative_prompt_describes_joint_speech_and_visual_facts_anti_pattern() -> None:
+    """WP1: narrative instructions document joint=true/false choral speech and forbid subject_anchor in visual_facts."""
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    assert "joint=true" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "joint=false" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "subject_anchor" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "никогда не используй subject_anchor внутри visual_facts" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+
+def test_narrative_prompt_caps_200_prior_candidates_with_compact_backfill_and_dedupes_findings() -> None:
+    """WP2: matched terms keep metadata, 200 unmatched candidates fit compact backfill byte budget (<45KB prompt)."""
+    from linguary.application.context_builder import (
+        DEFAULT_MAX_BACKFILL_BYTES,
+        FragmentFindings,
+        _name_context,
+    )
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import (
+        GlossaryCandidate,
+        TermConcept,
+        TermStatus,
+        TermVariant,
+    )
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationEvidence,
+        NameTranslationMethod,
+        NameTranslationObservation,
+        NameTranslationPolicy,
+        NameTranslationStrategy,
+    )
+
+    section = make_analysis_section(
+        section_id="sec-budget",
+        title="Chapter 10",
+        order=10,
+        texts=("Harry and Ron spoke to Allie in the corridor.",),
+    )
+    document = make_analysis_document((section,))
+    long_note = "Важная пометка о роде и склонении персонажа. " * 10
+    long_desc = "Подробное описание персонажа из предыдущих глав романа. " * 15
+
+    suggested_allie = TermConcept(
+        id="tc-allie",
+        book_id=document.id,
+        canonical_source_text="Allie",
+        type=ConceptType.PERSON,
+        status=TermStatus.SUGGESTED,
+        note="женский род",
+        variants=(TermVariant("tc-allie", "ru", "Элли", TermStatus.SUGGESTED),),
+    )
+    cand_allie = GlossaryCandidate(
+        id="cand-allie",
+        analysis_id="an-1",
+        source_text="Allie",
+        type=ConceptType.PERSON,
+        suggested_translation="Элли",
+        confidence=0.95,
+        model_flagged_review=False,
+        requires_review=False,
+        description="Сокращённое имя Александры.",
+        name_translation_evidence=NameTranslationEvidence(
+            version=1,
+            conditions_id="cond-1",
+            policy_version=1,
+            strategy=NameTranslationStrategy.MEANING,
+            observations=(
+                NameTranslationObservation(
+                    suggested_translation="Элли",
+                    confidence=0.95,
+                    model_flagged_review=False,
+                    assessment=NameTranslationAssessment(
+                        applied_method=NameTranslationMethod.MEANING,
+                        eligible_without_review=True,
+                        review_reasons=(),
+                        rationale="Прозрачное имя.",
+                        opaque_name=False,
+                    ),
+                ),
+            ),
+        ),
+    )
+    unmatched = tuple(
+        GlossaryCandidate(
+            id=f"cand-prior-{i}",
+            analysis_id="an-1",
+            source_text=f"PriorCharacter{i:03d} Surname{i:03d}",
+            type=ConceptType.PERSON,
+            suggested_translation=f"Персонаж{i:03d} Фамилия{i:03d}",
+            confidence=0.9,
+            model_flagged_review=False,
+            requires_review=False,
+            note=f"{long_note}#{i}",
+            description=f"{long_desc}#{i}",
+        )
+        for i in range(200)
+    )
+
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=NameTranslationPolicy(
+            version=1,
+            strategy=NameTranslationStrategy.MEANING,
+        ),
+    )
+    findings = FragmentFindings(
+        summary="Prior fragment summary.",
+        instructions="Keep tone.",
+        expressions=(),
+        candidates=(
+            GlossaryCandidateResponse(
+                source_text="Allie",
+                type=ConceptType.PERSON,
+                suggested_translation="Элли",
+                confidence=0.95,
+                model_flagged_review=False,
+                note="дубль",
+                description="не должен дублироваться",
+            ),
+            GlossaryCandidateResponse(
+                source_text="BrandNewEntity",
+                type=ConceptType.PLACE,
+                suggested_translation="Новое Место",
+                confidence=0.9,
+                model_flagged_review=False,
+                note="новое",
+                description="Новая локация текущей главы.",
+            ),
+        ),
+    )
+    ctx = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        accumulated_candidates=(cand_allie, *unmatched),
+        nonbinding_suggestions=(suggested_allie,),
+        findings=findings,
+    )
+    text = ctx.request.input_text
+    total_prompt_bytes = len(ctx.request.instructions.encode("utf-8")) + len(text.encode("utf-8"))
+
+    # Matched SUGGESTED TermConcept retains full enriched metadata.
+    allie_line = next(line for line in text.splitlines() if line.startswith("- Allie [person] -> Элли"))
+    assert "(женский род)" in allie_line
+    assert "Сокращённое имя Александры." in allie_line
+    assert "непрозрачное=false" in allie_line
+
+    # Unmatched candidates are rendered compactly without note/description and capped by DEFAULT_MAX_BACKFILL_BYTES.
+    backfill_lines = [line for line in text.splitlines() if line.startswith("- PriorCharacter")]
+    assert backfill_lines
+    assert len(backfill_lines) < 200
+    assert all("описание:" not in line and "Важная пометка" not in line for line in backfill_lines)
+    assert len("\n".join(backfill_lines).encode("utf-8")) <= DEFAULT_MAX_BACKFILL_BYTES
+    assert total_prompt_bytes < 45_000
+
+    # Findings candidates deduplicate entries already shown in _name_context while keeping new ones.
+    findings_section = text.split("Кандидаты глоссария из предыдущих частей этой главы:")[1]
+    assert "BrandNewEntity [place] -> Новое Место" in findings_section
+    assert "Allie [person]" not in findings_section
+
+    # _name_context degrades optional_items (drops description, then note) when exceeding max_optional_bytes.
+    heavy_optional = tuple(
+        GlossaryCandidate(
+            id=f"heavy-{i}",
+            analysis_id="an-1",
+            source_text=f"HeavyTerm{i}",
+            type=ConceptType.PERSON,
+            suggested_translation=f"Термин{i}",
+            confidence=0.9,
+            model_flagged_review=False,
+            requires_review=False,
+            note="Длинная пометка " * 20,
+            description="Длинное описание " * 40,
+        )
+        for i in range(5)
+    )
+    _, degraded_no_desc = _name_context((), heavy_optional, "ru", max_optional_bytes=4_000)
+    assert "описание:" not in degraded_no_desc
+    assert "Длинная пометка" in degraded_no_desc
+    assert "- HeavyTerm0 [person] -> Термин0" in degraded_no_desc
+
+    _, degraded_minimal = _name_context((), heavy_optional, "ru", max_optional_bytes=400)
+    assert "описание:" not in degraded_minimal
+    assert "Длинная пометка" not in degraded_minimal
+    assert "- HeavyTerm0 [person] -> Термин0" in degraded_minimal
+    assert "- HeavyTerm4 [person] -> Термин4" in degraded_minimal
+
+
+def test_narrative_prompt_includes_masculine_title_declension_and_note_scaling_docs() -> None:
+    """WP4: narrative prompt specifies masculine title declension before female surnames; settings/helper document scaling."""
+    from linguary.adapters.config.settings import CheckSettings
+    from linguary.application.context_builder import (
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        scaled_chapter_note_limit,
+    )
+
+    assert "Мужские титулы и должности" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    for title in ("профессор", "доктор", "директор", "инспектор"):
+        assert title in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "перед женской фамилией" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "Второстепенных сквозных персонажей" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "говорящая" in _NARRATIVE_ANALYSIS_INSTRUCTIONS
+    assert "18" in (scaled_chapter_note_limit.__doc__ or "")
+    assert "18" in (CheckSettings.__doc__ or "")
+
+
+def test_wp6_a2_linguistic_prompt_rules_and_pedagogical_traps() -> None:
+    """WP6: A2/content-plan-v3 prompts encode linguistic, note-discipline, recap-tense, and trap-priority rules."""
+    from linguary.application.book_conditions import A2_CONTENT_PLAN_V8_VERSIONS
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _TRANSLATION_CONTEXT_V2,
+    )
+    from linguary.application.reader_text import (
+        _A2_DIALOGUE_AND_CALQUE_RULES,
+        _A2_NOTE_DISCIPLINE,
+        learner_instructions,
+    )
+
+    templates_a2 = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+
+    # Note discipline rules propagate to A2 learner_instructions, translation, processing, and pedagogical prompts.
+    for text in (
+        _A2_NOTE_DISCIPLINE,
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING_V3,
+        learner_instructions("a2"),
+        templates_a2["content_processing"],
+        templates_a2["learner_quality"],
+        templates_a2["pedagogical_analysis"],
+    ):
+        assert "speech_style («Речь персонажа.»)" in text
+        assert "нестандартные формы английского оригинала" in text
+        assert "не разбирая приёмы русского перевода" in text
+        assert "в конце реплики" in text
+        assert "Для уровня A2 пиши грамматические заметки лаконично" in text
+        assert "15–30 слов" in text
+        assert "географический и языковой контекст заметок" in text
+        assert "португальский" in text
+        assert "прозрачные идиомы с прямым русским аналогом" in text
+        assert "грамматику уровня C1" in text
+        assert "glossary_hints.translation" in text
+        assert "точное контекстное значение сцены" in text
+        assert "без лишних синонимов" in text
+
+    # Dialogue, register, gender consistency, redundant possessives, and realia glossing rules.
+    for text in (
+        _A2_DIALOGUE_AND_CALQUE_RULES,
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING_V3,
+        learner_instructions("a2"),
+        templates_a2["content_processing"],
+        templates_a2["learner_quality"],
+    ):
+        assert "сквозь все реплики этого персонажа" in text
+        assert "единство грамматического рода животных" in text
+        assert "мантия" in text
+        assert "плащ" in text
+        assert "избыточных притяжательных местоимений" in text
+        assert "his/her/their" in text
+        assert "словарное толкование внутрь художественной фразы" in text
+
+    # Book-agnostic: no specific character names hardcoded in universal linguistic rules.
+    for text in (_A2_NOTE_DISCIPLINE, _A2_DIALOGUE_AND_CALQUE_RULES, _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS):
+        assert "Хагрид" not in text
+        assert "Hagrid" not in text
+
+    # Tense agreement in A2 Previously in… recap (does not leak into B2 learner_instructions).
+    a2_learner = learner_instructions("a2")
+    assert "согласование времён" in a2_learner
+    assert "Previously in…" in a2_learner
+    assert "в прошедшем времени" in a2_learner
+    assert "Previously in…" not in learner_instructions("b2")
+
+    # Pedagogical analysis A2->B1 trap priority and note budget balance.
+    ped_text = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2"
+    )
+    for text in (ped_text, templates_a2["pedagogical_analysis"]):
+        assert "had had" in text
+        assert "can't/couldn't help + V-ing" in text
+        assert "had better" in text
+        assert "первому появлению" in text
+        assert "не больше 50% заметок главы на блоки TRANSLATE" in text
+
+    # Frozen version dictionary must remain untouched.
+    assert A2_CONTENT_PLAN_V8_VERSIONS == {
+        "runtime": 1,
+        "context_builder": 6,
+        "validators": 4,
+        "schemas": 5,
+        "prompts": 8,
+    }
+
+
+def test_unmatched_suggested_concepts_use_compact_backfill_and_do_not_evict_matched_metadata() -> None:
+    """M-1 regression: many unmatched TermConcept(SUGGESTED) must stay in compact backfill."""
+    from linguary.domain.analysis import GlossaryCandidate
+    from linguary.domain.glossary import TermConcept, TermStatus, TermVariant
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    section = make_analysis_section(
+        section_id="sec-ch5",
+        title="Chapter 5",
+        order=4,
+        texts=("Harry walked past Hagrid in the lane.",),
+    )
+    document = make_analysis_document((section,))
+    matched_cand = GlossaryCandidate(
+        id="cand-hagrid",
+        analysis_id="an-1",
+        source_text="Hagrid",
+        type=ConceptType.PERSON,
+        suggested_translation="Хагрид",
+        confidence=0.95,
+        model_flagged_review=False,
+        requires_review=False,
+        note="мужской род",
+        description="Великан-лесничий с густой бородой.",
+    )
+    unmatched_suggestions = tuple(
+        TermConcept(
+            id=f"c-extra-{idx}",
+            book_id="book-1",
+            type=ConceptType.PERSON,
+            canonical_source_text=f"SideCharacter{idx:03d}",
+            status=TermStatus.SUGGESTED,
+            note=f"подробная заметка {idx} " + ("описание " * 30),
+            variants=(TermVariant(f"c-extra-{idx}", "ru", f"Персонаж{idx:03d}", TermStatus.SUGGESTED),),
+        )
+        for idx in range(100)
+    )
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=NameTranslationPolicy(
+            version=1, strategy=NameTranslationStrategy.SOUND
+        ),
+    )
+    ctx = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        accumulated_candidates=(matched_cand,),
+        nonbinding_suggestions=unmatched_suggestions,
+    )
+    text = ctx.request.input_text
+    assert "Великан-лесничий с густой бородой." in text
+    assert "подробная заметка 0" not in text
+    assert "SideCharacter000" in text
+    assert len(text.encode("utf-8")) < 25_000
+
+
+
 
 

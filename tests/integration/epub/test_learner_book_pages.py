@@ -55,8 +55,7 @@ def test_legend_and_ipa_key_in_spine_and_nav(tmp_path: Path) -> None:
     hrefs = spine_hrefs(path)
     legend = _index(hrefs, "legend.xhtml")
     ipa = _index(hrefs, "ipa-key.xhtml")
-    assert _index(hrefs, "cover.xhtml") < legend < ipa
-    assert not any(href.endswith("title.xhtml") for href in hrefs)
+    assert _index(hrefs, "cover.xhtml") < _index(hrefs, "title.xhtml") < legend < ipa
     assert ipa < _index(hrefs, "chapter1.xhtml")
     assert _toc(path) == list(hrefs)
 
@@ -73,8 +72,7 @@ def test_legend_and_ipa_key_in_spine_and_nav(tmp_path: Path) -> None:
     empty_hrefs = spine_hrefs(empty)
     assert not any(href.endswith("legend.xhtml") for href in empty_hrefs)
     assert "Как устроена эта книга" not in _toc_titles(empty)
-    assert not any(href.endswith("title.xhtml") for href in empty_hrefs)
-    assert _index(empty_hrefs, "cover.xhtml") < _index(empty_hrefs, "ipa-key.xhtml")
+    assert _index(empty_hrefs, "cover.xhtml") < _index(empty_hrefs, "title.xhtml") < _index(empty_hrefs, "ipa-key.xhtml")
     assert _index(empty_hrefs, "ipa-key.xhtml") < _index(empty_hrefs, "chapter1.xhtml")
     assert _toc(empty) == list(empty_hrefs)
 
@@ -178,8 +176,8 @@ def test_chapter_front_order(tmp_path: Path) -> None:
     assert "Before You Read" not in third_text
     assert "the Mouse" not in third_text
 
-    assert not any(href.endswith("title.xhtml") for href in spine_hrefs(path))
-    for name in ("cover.xhtml", "chapter1.xhtml", "notes.xhtml"):
+    assert any(href.endswith("title.xhtml") for href in spine_hrefs(path))
+    for name in ("cover.xhtml", "title.xhtml", "chapter1.xhtml", "notes.xhtml"):
         root = _document(path, name)
         assert not _fronts(root)
         text = "".join(root.itertext())
@@ -236,6 +234,24 @@ def test_export_passes_builtin_checks(tmp_path: Path) -> None:
     assert verify_exported_epub(path, expected_spine=hrefs) == ()
 
 
+def test_wp5_legend_includes_neutral_english_example_when_translation_or_notes_present(
+    tmp_path: Path,
+) -> None:
+    """WP5.5: legend.xhtml includes a compact book-neutral mini-example when has_translation/has_notes and source == 'en'."""
+    path = _export(tmp_path, "legend-example", has_translation=True, has_notes=True)
+    legend_root = _document(path, "legend.xhtml")
+    units = [node for node in elements(legend_root, "div") if "lg-unit" in (node.get("class") or "").split()]
+    assert len(units) == 1
+    src = [node for node in elements(units[0], "p") if node.get("class") == "lg-src"]
+    tr = [node for node in elements(units[0], "p") if node.get("class") == "lg-tr"]
+    terms = [node for node in elements(units[0], "span") if node.get("class") == "lg-term"]
+    assert len(src) == 1 and src[0].get("lang") == "en"
+    assert len(tr) == 1 and tr[0].get("lang") == "ru"
+    assert len(terms) == 1
+    assert len(elements(units[0], "li")) == 2
+    assert verify_exported_epub(path, expected_spine=spine_hrefs(path)) == ()
+
+
 def row_tag(node) -> str:
     return node.tag.rpartition("}")[2]
 
@@ -248,6 +264,8 @@ def _export(
     ipa_key: tuple[IpaSymbol, ...] | None = None,
     who: tuple[WhoEntry, ...] | None = None,
     feature_sections: frozenset[str] = frozenset({"before_you_read"}),
+    has_translation: bool = False,
+    has_notes: bool = False,
 ) -> Path:
     """Import a small book and export it with an explicit layout."""
     source = build_epub(
@@ -380,7 +398,9 @@ def _export(
         legend=_LEGEND if legend is None else legend,
         ipa_key=_IPA if ipa_key is None else ipa_key,
         who_is_who=book_who if who is None else who,
-        features=LayoutFeatures(False, False, frozenset(), False, False, False, feature_sections),
+        features=LayoutFeatures(
+            has_translation, has_notes, frozenset(), False, False, False, feature_sections
+        ),
     )
     target = tmp_path / f"{name}.epub"
     EpubExportWriter().write(

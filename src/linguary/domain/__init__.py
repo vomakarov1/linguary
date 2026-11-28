@@ -34,6 +34,7 @@ from linguary.domain.document import (
     InlineAnnotationType,
     SourceReference,
     SupportStatus,
+    detect_english_variant,
 )
 from linguary.domain.errors import (
     ActiveRunConflictError,
@@ -194,6 +195,7 @@ __all__ = [
     "build_block_id",
     "build_language_note_id",
     "compute_requires_review",
+    "detect_english_variant",
     "ensure_transition_allowed",
     "footnote_marker",
     "footnote_references",

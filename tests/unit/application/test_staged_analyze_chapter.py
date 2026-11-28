@@ -1251,11 +1251,23 @@ async def test_partial_segment_coverage_rejected(stored_book):
 
 
 async def test_segments_for_short_block_rejected(stored_book):
-    """A one-span block, including a block with no stored segments, rejects segments."""
+    """A one-span block normalizes consistent `segments` and rejects mismatched `segments`."""
     _, uow, _ = stored_book
+    # Consistent single-segment list normalizes cleanly to whole-block treatment.
+    ok_result = await scenario(
+        uow,
+        FakeLLMClient([
+            narrative(),
+            plan_reply("READ_AS_IS", [dict(index=1, treatment="READ_AS_IS")]),
+        ]),
+    )(COMMAND)
+    assert ok_result.analysis.is_complete
+    # Mismatched single-segment list is still rejected.
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
     client = FakeLLMClient([
         narrative(),
-        plan_reply("READ_AS_IS", [dict(index=1, treatment="READ_AS_IS")]),
+        plan_reply("READ_AS_IS", [dict(index=1, treatment="TRANSLATE")]),
     ])
     with pytest.raises(ResultValidationError, match="одного сегмента"):
         await scenario(uow, client)(COMMAND)
@@ -4959,7 +4971,7 @@ async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh
     assert v6_result.analysis.is_complete
     assert [c.source_text for c in v6_result.analysis.glossary_candidates] == ['Longbottom']
 
-    # 3. Under V7 (prompts == 7), cached_frag 1 with conflicting candidate IS rejected.
+    # 3. Under V7 (prompts == 7), cached_frag 1 with conflicting candidate IS rejected and self-heals to cache-miss.
     v7_id = str(uuid4())
     v7_conditions = BookConditions(
         id=v7_id,
@@ -4977,9 +4989,10 @@ async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh
     with uow.transaction() as tx:
         tx.analyses.delete_passes_for_book(BOOK_ID)
         tx.work.add_conditions(v7_conditions)
+    v7_client = FakeLLMClient([FakeReply.of_payload(frag0_raw)])
     ac_v7 = scenario(
         uow,
-        FakeLLMClient([]),
+        v7_client,
         context=ctx,
         max_fragment_blocks=1,
         name_translation_policy=policy,
@@ -4993,8 +5006,9 @@ async def test_staged_fragment_cache_preserves_v6_name_policy_and_enforces_fresh
         v7_id,
         scope_key=frag0_scope_key,
     )
-    with pytest.raises(Exception, match='review_reasons'):
+    with pytest.raises(ResultValidationError, match='review_reasons'):
         await ac_v7(COMMAND)
+    assert len(v7_client.requests) == 1
 
 
 async def test_pedagogical_max_fragment_blocks_budget_and_balanced_split(stored_book, monkeypatch):
@@ -5530,6 +5544,639 @@ async def test_staged_narrative_merge_still_fails_and_clears_cache_for_scene_par
     assert exc.value.violation.rule_code == 'spoiler_name_leak'
     with uow.transaction() as tx:
         assert tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id) == ()
+
+
+@pytest.mark.parametrize('cap_stage', [NARRATIVE, PEDAGOGICAL])
+async def test_staged_context_capacity_error_splits_fragment_and_preserves_usage(stored_book, cap_stage):
+    """WP2: LLMContextCapacityError (no .usage attr) splits >1-block fragment cleanly and preserves accumulated usage."""
+    from linguary.application.ports.llm import LLMContextCapacityError
+    from linguary.domain import TokenUsage
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(texts=tuple(f'Holmes opens door {n}.' for n in range(4)))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    cap_error = LLMContextCapacityError('prompt exceeds context limit')
+    assert not hasattr(cap_error, 'usage')
+
+    # Fail attempt 1 with a validation error (carrying usage), then hit capacity error on attempt 2,
+    # verifying accumulated usage from attempt 1 survives the split.
+    bad_nar = replace(narrative(('b1', 'b2', 'b3', 'b4'), scenes=False), usage=TokenUsage(100, 20))
+    ok_nar_half = replace(narrative(('b1', 'b2')), usage=TokenUsage(50, 10))
+    ok_nar_full = replace(narrative(('b1', 'b2', 'b3', 'b4')), usage=TokenUsage(80, 15))
+    bad_ped = replace(pedagogical(aliases=()), usage=TokenUsage(100, 20))
+    ok_ped_half = replace(pedagogical(('b1', 'b2')), usage=TokenUsage(50, 10))
+    ok_ped_full = replace(pedagogical(('b1', 'b2', 'b3', 'b4')), usage=TokenUsage(80, 15))
+
+    if cap_stage == NARRATIVE:
+        replies = [bad_nar, cap_error, ok_nar_half, ok_nar_half, ok_ped_full]
+    else:
+        replies = [ok_nar_full, bad_ped, cap_error, ok_ped_half, ok_ped_half]
+
+    client = FakeLLMClient(replies)
+    result = await scenario(uow, client, attempts=3)(COMMAND)
+    assert result.attempts == 5
+    assert result.usage == TokenUsage(100 + 50 + 50 + 80, 20 + 10 + 10 + 15)
+    assert result.analysis.is_complete
+    assert len(result.analysis.scenes) == 1
+
+
+async def test_staged_context_capacity_error_raises_on_single_block_fragment(stored_book):
+    """WP2: LLMContextCapacityError on a 1-block fragment propagates cleanly without retry."""
+    from linguary.application.ports.llm import LLMContextCapacityError
+
+    _, uow, _ = stored_book
+    client = FakeLLMClient([LLMContextCapacityError('still too large')])
+    with pytest.raises(LLMContextCapacityError, match='still too large'):
+        await scenario(uow, client, attempts=3)(COMMAND)
+    assert len(client.requests) == 1
+
+
+async def test_staged_repair_omits_oversized_assistant_response_for_format_and_local_validation_errors(stored_book):
+    """WP2: 40KB error.raw_content is omitted from repair_turns while keeping RETRY_WITH_REPAIR; local scope clears is_local_turn."""
+    _, uow, _ = stored_book
+    huge_raw = '{"bad": "' + ('x' * 40_000) + '"}'
+
+    # 1. LLMResponseFormatError with 40KB raw_content -> RETRY_WITH_REPAIR with schema message, assistant_response=None.
+    format_err = LLMResponseFormatError('поле scenes отсутствует', raw_content=huge_raw)
+    client_fmt = FakeLLMClient([format_err, narrative(), pedagogical()])
+    result_fmt = await scenario(uow, client_fmt, attempts=2)(COMMAND)
+    assert result_fmt.analysis.is_complete
+    retry_req_fmt = client_fmt.requests[1]
+    assert retry_req_fmt.repair_instructions
+    assert 'поле scenes отсутствует' in retry_req_fmt.repair_instructions[0]
+    assert retry_req_fmt.repair_turns == ((None, retry_req_fmt.repair_instructions[0]),)
+    assert huge_raw not in str(retry_req_fmt.repair_turns)
+
+    # 2. ResultValidationError with scope='local' and >20KB response raw_content -> assistant_response=None and no local-turn phrasing.
+    section = make_analysis_section(texts=('Holmes opens door one.', 'Watson follows.'))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+    bad_local_payload = {
+        'translation_instructions': 'Инструкция ' + ('а' * 25_000),
+        'chapter_summary': 'Holmes opens door.',
+        'glossary_candidates': [],
+        'context_facts': [],
+        'scenes': [
+            {
+                'start_block_id': 'b1',
+                'end_block_id': 'b1',  # missing b2 -> local coverage error
+                'summary': 'Scene 1',
+                'location': 'Baker Street',
+                'participants': ['Holmes'],
+                'visual_facts': [],
+                'visual_assumptions': [],
+            }
+        ],
+    }
+    bad_reply = FakeReply.of_payload(bad_local_payload)
+    assert len(bad_reply.content.encode('utf-8')) > 20_000
+    client_val = FakeLLMClient([bad_reply, narrative(('b1', 'b2')), pedagogical(('b1', 'b2'))])
+    result_val = await scenario(uow, client_val, attempts=2)(COMMAND)
+    assert result_val.analysis.is_complete
+    retry_req_val = client_val.requests[1]
+    assert retry_req_val.repair_instructions
+    assert retry_req_val.repair_turns == ((None, retry_req_val.repair_instructions[0]),)
+    # Because raw_content=None was passed into RetryPolicy.decide, is_local_turn is False (no reference to previous assistant turn).
+    assert 'исправь только' not in retry_req_val.repair_instructions[0].lower()
+
+
+async def test_staged_narrative_findings_dedupes_instructions_and_caps_bytes_and_visual_facts(stored_book):
+    """WP2: findings.instructions deduplicates repeated lines, caps at <=4000 UTF-8 bytes, and keeps <=8 latest visual_facts."""
+    import json
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            'Holmes opens door 1 with lantern.',
+            'Holmes opens door 2 with hat.',
+            'Holmes opens door 3 with coat.',
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    repeated_instr = '\n'.join(f'Правило стиля {i}: ' + ('текст ' * 35) for i in range(25))
+    many_visual_facts = [
+        {
+            'anchor': {'block_id': 'b1', 'quote': 'Holmes'},
+            'subject': f'Subject{i}',
+            'detail': f'Detail{i}',
+        }
+        for i in range(12)
+    ]
+    frag0 = json.loads(narrative(('b1',)).content)
+    frag0['translation_instructions'] = repeated_instr
+    frag0['scenes'][0]['visual_facts'] = many_visual_facts
+
+    frag1 = json.loads(narrative(('b1',)).content)
+    frag1['translation_instructions'] = repeated_instr
+    frag1['scenes'][0]['visual_facts'] = many_visual_facts
+
+    frag2 = json.loads(narrative(('b1',)).content)
+
+    client = FakeLLMClient([
+        FakeReply.of_payload(frag0),
+        FakeReply.of_payload(frag1),
+        FakeReply.of_payload(frag2),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+    ])
+    result = await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
+    assert result.analysis.is_complete
+
+    third_input = client.requests[2].input_text
+    instr_block = third_input.split('Указания: ')[1].split('\nВыражения:')[0]
+    assert len(instr_block.encode('utf-8')) <= 4_000
+    assert 'Последняя сцена: {' in instr_block
+    scene_json = json.loads(instr_block.split('Последняя сцена: ')[1])
+    assert len(scene_json['visual_facts']) == 8
+    assert [f['subject'] for f in scene_json['visual_facts']] == [f'Subject{i}' for i in range(4, 12)]
+
+
+async def test_staged_pedagogical_rejection_logs_aliases_not_uuids(stored_book, monkeypatch):
+    """WP3.1: record_rejection and repair prompt receive `bN` aliases (batched) and zero raw UUIDs."""
+    import json
+    from linguary.application.use_cases import analyze_chapter as ac_mod
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=('Short block one.', 'Short block two.')
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    bad_ped = json.loads(pedagogical(('b1', 'b2')).content)
+    bad_ped['treatment_plan'] = [
+        dict(source_block_id='b1', treatment='READ_AS_IS', segments=[dict(index=1, treatment='TRANSLATE')]),
+        dict(source_block_id='b2', treatment='READ_AS_IS', segments=[dict(index=1, treatment='TRANSLATE')]),
+    ]
+    recorded: list[Exception] = []
+    monkeypatch.setattr(ac_mod, 'record_rejection', lambda _uow, _resp, err: recorded.append(err))
+
+    client = FakeLLMClient([
+        narrative(('b1', 'b2')),
+        FakeReply.of_payload(bad_ped),
+        pedagogical(('b1', 'b2')),
+    ])
+    result = await scenario(uow, client, attempts=2)(COMMAND)
+    assert result.analysis.is_complete
+    assert len(recorded) == 1
+    rejected_err = recorded[0]
+    assert 'b1' in str(rejected_err) and 'b2' in str(rejected_err)
+    assert getattr(rejected_err, 'violation', None) is not None
+    assert rejected_err.violation.block_ids == ('b1', 'b2')
+    assert 'b1' in rejected_err.violation.safe_message and 'b2' in rejected_err.violation.safe_message
+    repair_prompt = client.requests[2].repair_instructions[-1]
+    assert 'b1' in repair_prompt and 'b2' in repair_prompt
+    for block in section.blocks:
+        assert block.id not in str(rejected_err)
+        assert block.id not in rejected_err.violation.safe_message
+        assert block.id not in repair_prompt
+
+
+async def test_staged_narrative_heading_and_section_title_in_fragment_known_names(stored_book):
+    """WP3.2: section.title and prior BlockType.HEADING texts enter fragment_known_names without downgrading explicit facts."""
+    import json
+    from linguary.domain import BlockType, DocumentBlock, DocumentSection, SourceReference, SupportStatus
+
+    _, uow, _ = stored_book
+    blocks = (
+        DocumentBlock.create(
+            document_id=BOOK_ID,
+            section_id=COMMAND.section_id,
+            type=BlockType.HEADING,
+            order=0,
+            text='Professor McGonagall',
+            source_reference=SourceReference('ch7.xhtml', '/body/h2[1]'),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+        DocumentBlock.create(
+            document_id=BOOK_ID,
+            section_id=COMMAND.section_id,
+            type=BlockType.PARAGRAPH,
+            order=1,
+            text='‘Stay calm,’ she said softly. ‘It knows everything.’',
+            source_reference=SourceReference('ch7.xhtml', '/body/p[1]'),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+        DocumentBlock.create(
+            document_id=BOOK_ID,
+            section_id=COMMAND.section_id,
+            type=BlockType.PARAGRAPH,
+            order=2,
+            text='Professor McGonagall placed the Sorting Hat on the stool.',
+            source_reference=SourceReference('ch7.xhtml', '/body/p[2]'),
+            support_status=SupportStatus.SUPPORTED,
+        ),
+    )
+    filler = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=COMMAND.section_id,
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text='The Great Hall grew quiet.',
+        source_reference=SourceReference('ch7.xhtml', '/body/p[0]'),
+        support_status=SupportStatus.SUPPORTED,
+    )
+    section4 = DocumentSection(
+        id=COMMAND.section_id,
+        document_id=BOOK_ID,
+        title='Chapter 7: The Sorting Hat',
+        order=0,
+        source_resource_path='ch7.xhtml',
+        blocks=(blocks[0], filler, replace(blocks[1], order=2), replace(blocks[2], order=3)),
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section4,)))
+
+    frag0_2 = json.loads(narrative(('b1', 'b2')).content)
+    frag0_2['scenes'][0]['participants'] = ['Professor McGonagall']
+
+    frag1 = json.loads(narrative(('b1', 'b2')).content)
+    frag1['scenes'][0]['participants'] = ['Professor McGonagall', 'Sorting Hat']
+    frag1['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote='she said')],
+            subject_anchor=dict(block_id='b1', quote='‘Stay calm,’'),
+            value='Professor McGonagall',
+            certainty='explicit',
+        ),
+        dict(
+            kind='pronoun_referent',
+            anchors=[dict(block_id='b1', quote='It knows everything.')],
+            subject_anchor=dict(block_id='b1', quote='It'),
+            value='Sorting Hat',
+            certainty='explicit',
+        ),
+    ]
+
+    client = FakeLLMClient([
+        FakeReply.of_payload(frag0_2),
+        FakeReply.of_payload(frag1),
+        pedagogical(('b1', 'b2')),
+        pedagogical(('b1', 'b2')),
+    ])
+    result = await scenario(uow, client, max_fragment_blocks=2)(COMMAND)
+    assert result.analysis.is_complete
+    certainties = {f.value: f.certainty for f in result.analysis.content_plan.context_facts}
+    assert certainties['Professor McGonagall'] == 'explicit'
+    assert certainties['Sorting Hat'] == 'explicit'
+
+
+async def test_staged_narrative_fragment_downgrade_persists_in_cache_and_from_cache(stored_book):
+    """WP3.2: Per-fragment explicit->inferred downgrade persists downgraded payload in analysis_pass_results and works on from_cache=True."""
+    import json
+    from linguary.application.analysis_pass_cache import decode_pass
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            "The cloaked stranger muttered: ‘Wait in the shadows.’",
+            "Then Voldemort stepped into the light.",
+            "Holmes stood ready by the door.",
+            "Watson checked the hallway.",
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    # Fragment 0 (b1, b2): explicit speaker='Voldemort' on b1 before Voldemort appears in b2.
+    # Per-fragment validation must downgrade to inferred AND persist inferred into fragment cache!
+    frag0_nar = json.loads(narrative(('b1', 'b2')).content)
+    frag0_nar['scenes'][0]['location'] = 'Quiet Road'
+    frag0_nar['scenes'][0]['participants'] = ['the stranger', 'Voldemort']
+    frag0_nar['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote="‘Wait in the shadows.’")],
+            subject_anchor=dict(block_id='b1', quote="‘Wait in the shadows.’"),
+            value='Voldemort',
+            certainty='explicit',
+        ),
+    ]
+    frag0_nar['glossary_candidates'] = [
+        dict(
+            source_text='Voldemort',
+            type='person',
+            suggested_translation='Волдеморт',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    # Fail fragment 1 on first run so fragment 0 stays in analysis_pass_results for inspection.
+    with pytest.raises(RuntimeError, match='transient frag1 boom'):
+        await scenario(
+            uow,
+            FakeLLMClient([FakeReply.of_payload(frag0_nar), RuntimeError('transient frag1 boom')]),
+            max_fragment_blocks=2,
+        )(COMMAND)
+
+    frag0_scope = f'{section.blocks[0].id}:{section.blocks[1].id}'
+    with uow.transaction() as tx:
+        cached_frag0 = tx.analyses.get_pass(
+            BOOK_ID, COMMAND.section_id, AnalysisPassKind.NARRATIVE, scope_key=frag0_scope
+        )
+        assert cached_frag0 is not None
+        assert cached_frag0.payload['response']['context_facts'][0]['certainty'] == 'inferred'
+
+    # Second run reuses cached fragment 0 (0 LLM calls for frag0) and completes cleanly!
+    frag1_nar = json.loads(narrative(('b1', 'b2')).content)
+    frag1_nar['scenes'][0]['location'] = 'Hallway'
+    frag1_nar['scenes'][0]['participants'] = ['Holmes', 'Watson']
+    retry_client = FakeLLMClient([
+        FakeReply.of_payload(frag1_nar),
+        pedagogical(('b1', 'b2')),
+        pedagogical(('b1', 'b2')),
+    ])
+    result = await scenario(uow, retry_client, max_fragment_blocks=2)(COMMAND)
+    assert result.analysis.is_complete
+    assert len(retry_client.requests) == 3  # frag0 reused from cache!
+    b0_facts = [
+        f for f in result.analysis.content_plan.context_facts if f.subject_anchor.block_id == section.blocks[0].id
+    ]
+    assert len(b0_facts) == 1
+    assert b0_facts[0].certainty == 'inferred'
+
+    # Also verify legacy un-downgraded cached fragment (from_cache=True) downgrades into parts without LLM call.
+    import copy
+    from linguary.domain.book_conditions import thaw
+
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
+    legacy_ac = scenario(
+        uow,
+        FakeLLMClient([
+            FakeReply.of_payload(frag1_nar),
+            pedagogical(('b1', 'b2')),
+            pedagogical(('b1', 'b2')),
+        ]),
+        max_fragment_blocks=2,
+    )
+    legacy_payload = copy.deepcopy(thaw(cached_frag0.payload))
+    legacy_payload['response']['context_facts'][0]['certainty'] = 'explicit'
+    legacy_decoded = decode_pass(legacy_payload, pass_kind=AnalysisPassKind.NARRATIVE)
+    legacy_ac._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        cached_frag0.input_sha256,
+        legacy_decoded,
+        None,
+        scope_key=frag0_scope,
+        input_suggestions=(),
+    )
+    legacy_res = await legacy_ac(COMMAND)
+    assert legacy_res.analysis.is_complete
+    legacy_b0_facts = [
+        f for f in legacy_res.analysis.content_plan.context_facts if f.subject_anchor.block_id == section.blocks[0].id
+    ]
+    assert legacy_b0_facts[0].certainty == 'inferred'
+
+
+async def test_staged_chapter_level_downgrade_preserves_known_names(stored_book):
+    """WP3.2: Chapter-level _downgrade_spoiler_explicit_facts receives known_names and keeps known characters explicit."""
+    import json
+    from linguary.domain import ChapterAnalysis, ConceptType, GlossaryCandidate, TreatmentPlan
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            "‘Give it here!’ he yelled. ‘Stay back!’ the stranger hissed.",
+            "Dudley ran as Voldemort stepped out.",
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    # Seed prior chapter analysis with known character Dudley.
+    prior_section = make_analysis_section(section_id='sec-0', order=0, texts=('Dudley lived on Privet Drive.',))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((prior_section, replace(section, order=1))))
+        prior_analysis = ChapterAnalysis.create(
+            id='an-0',
+            section_id='sec-0',
+            treatment_plan=TreatmentPlan.of_treatments('sec-0', ((prior_section.blocks[0].id, BlockTreatment.READ_AS_IS),)),
+            translation_instructions='Keep tone.',
+            chapter_summary='Dudley lived on Privet Drive.',
+            expected_block_ids=(prior_section.blocks[0].id,),
+            glossary_candidates=(
+                GlossaryCandidate(
+                    id='gc-dudley',
+                    analysis_id='an-0',
+                    source_text='Dudley',
+                    type=ConceptType.PERSON,
+                    suggested_translation='Дадли',
+                    confidence=0.95,
+                    model_flagged_review=False,
+                    requires_review=False,
+                ),
+            ),
+        )
+        tx.analyses.save(BOOK_ID, prior_analysis)
+
+    frag0_nar = json.loads(narrative(('b1',)).content)
+    frag0_nar['scenes'][0]['participants'] = ['Dudley', 'the stranger']
+    frag0_nar['context_facts'] = [
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote='he yelled')],
+            subject_anchor=dict(block_id='b1', quote='‘Give it here!’'),
+            value='Dudley',
+            certainty='explicit',
+        ),
+        dict(
+            kind='speaker',
+            anchors=[dict(block_id='b1', quote='the stranger hissed')],
+            subject_anchor=dict(block_id='b1', quote='‘Stay back!’'),
+            value='Voldemort',
+            certainty='explicit',
+        ),
+    ]
+    frag1_nar = json.loads(narrative(('b1',)).content)
+    frag1_nar['scenes'][0]['participants'] = ['Dudley', 'Voldemort']
+    frag1_nar['glossary_candidates'] = [
+        dict(
+            source_text='Voldemort',
+            type='person',
+            suggested_translation='Волдеморт',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='',
+        )
+    ]
+
+    result = await scenario(
+        uow,
+        FakeLLMClient([
+            FakeReply.of_payload(frag0_nar),
+            FakeReply.of_payload(frag1_nar),
+            pedagogical(('b1',)),
+            pedagogical(('b1',)),
+        ]),
+        max_fragment_blocks=1,
+    )(COMMAND)
+    assert result.analysis.is_complete
+    by_value = {f.value: f.certainty for f in result.analysis.content_plan.context_facts}
+    assert by_value == {'Dudley': 'explicit', 'Voldemort': 'inferred'}
+
+
+async def test_staged_corrupted_or_invalid_fragment_cache_self_heals_to_cache_miss(stored_book):
+    """WP3.3: Corrupted checksum or invalid cached fragment clears fragment cache and regenerates cleanly via LLM."""
+    import json
+    from linguary.application.analysis_pass_cache import decode_pass
+    from linguary.domain import AnalysisPassResult
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=(
+            "The stranger whispered in the dark.",
+            "Then Voldemort appeared in the doorway.",
+        )
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    # First run caches fragment 0, then fails on fragment 1 so we get exact frag0 input_sha256.
+    clean_frag0 = json.loads(narrative(('b1',)).content)
+    clean_frag0['scenes'][0]['participants'] = ['the stranger']
+    clean_frag1 = json.loads(narrative(('b1',)).content)
+    clean_frag1['scenes'][0]['participants'] = ['Voldemort']
+
+    with pytest.raises(RuntimeError):
+        await scenario(
+            uow,
+            FakeLLMClient([FakeReply.of_payload(clean_frag0), RuntimeError('stop after frag0')]),
+            max_fragment_blocks=1,
+        )(COMMAND)
+
+    frag0_scope = f'{section.blocks[0].id}:{section.blocks[0].id}'
+    with uow.transaction() as tx:
+        saved_frag0 = tx.analyses.get_pass(
+            BOOK_ID, COMMAND.section_id, AnalysisPassKind.NARRATIVE, scope_key=frag0_scope
+        )
+        assert saved_frag0 is not None
+        # Case A: corrupt output_sha256 -> _cached_pass raises AnalyzeChapterError -> self-heals to cache-miss.
+        tx.analyses.save_pass(
+            AnalysisPassResult(
+                id=saved_frag0.id,
+                book_id=saved_frag0.book_id,
+                section_id=saved_frag0.section_id,
+                pass_kind=saved_frag0.pass_kind,
+                scope_key=saved_frag0.scope_key,
+                input_sha256=saved_frag0.input_sha256,
+                output_sha256='0' * 64,
+                conditions_id=saved_frag0.conditions_id,
+                attempt_id=saved_frag0.attempt_id,
+                payload=saved_frag0.payload,
+            )
+        )
+
+    client_corrupt = FakeLLMClient([
+        FakeReply.of_payload(clean_frag0),
+        FakeReply.of_payload(clean_frag1),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+    ])
+    res_corrupt = await scenario(uow, client_corrupt, max_fragment_blocks=1)(COMMAND)
+    assert res_corrupt.analysis.is_complete
+    assert len(client_corrupt.requests) == 4  # corrupted frag0 regenerated!
+
+    # Case B: valid checksum cached fragment that fails validate(..., from_cache=True) -> self-heals to cache-miss.
+    with uow.transaction() as tx:
+        tx.analyses.delete_passes_for_book(BOOK_ID)
+    bad_cached_frag0 = json.loads(narrative(('b1',)).content)
+    bad_cached_frag0['scenes'] = []  # invalid: missing scene coverage -> fails validate(from_cache=True)
+    bad_decoded = decode_pass({'schema_version': 1, 'response': bad_cached_frag0}, pass_kind=AnalysisPassKind.NARRATIVE)
+
+    client_invalid = FakeLLMClient([
+        FakeReply.of_payload(clean_frag0),
+        FakeReply.of_payload(clean_frag1),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+    ])
+    ac_invalid = scenario(uow, client_invalid, max_fragment_blocks=1)
+    ac_invalid._save_pass(
+        COMMAND,
+        AnalysisPassKind.NARRATIVE,
+        saved_frag0.input_sha256,
+        bad_decoded,
+        None,
+        scope_key=frag0_scope,
+        input_suggestions=(),
+    )
+    res_invalid = await ac_invalid(COMMAND)
+    assert res_invalid.analysis.is_complete
+    assert len(client_invalid.requests) == 4  # invalid cached frag0 cleared & regenerated!
+
+
+async def test_staged_incremental_pedagogical_merge_failure_clears_fragment_cache(stored_book, monkeypatch):
+    """WP3.3: Incremental merge_chapter_analysis failure in PEDAGOGICAL clears fragment passes while keeping whole-chapter NARRATIVE."""
+    from linguary.application.analysis_merge import AnalysisMergeError
+    from linguary.application.use_cases import analyze_chapter as ac_mod
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=('Holmes opened the door.', 'Watson entered the room.')
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    def _always_fail_merge(*_args, **_kwargs):
+        raise AnalysisMergeError('incremental pedagogical conflict')
+
+    monkeypatch.setattr(ac_mod, 'merge_chapter_analysis', _always_fail_merge)
+
+    client = FakeLLMClient([
+        narrative(('b1',)),
+        narrative(('b1',)),
+        pedagogical(('b1',)),  # frag0 succeeds and gets cached!
+        pedagogical(('b1',)),  # frag1 hits incremental merge failure and exhausts attempts=1
+    ])
+    with pytest.raises(ResultValidationError, match='incremental pedagogical conflict'):
+        await scenario(uow, client, max_fragment_blocks=1, attempts=1)(COMMAND)
+
+    with uow.transaction() as tx:
+        passes = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+        # Whole-chapter NARRATIVE is preserved; PEDAGOGICAL fragment passes are cleared!
+        assert [(p.pass_kind, p.scope_key) for p in passes] == [
+            (AnalysisPassKind.NARRATIVE, ''),
+        ]
+
+
+async def test_analyze_chapter_logs_effective_language_notes_limit(stored_book, caplog):
+    """WP4: AnalyzeChapter logs effective_language_notes_limit (scaled from base language_notes_per_chapter)."""
+    import logging
+    from linguary.domain import LLMCallStage
+
+    _, uow, _ = stored_book
+    blocks = tuple(_block(i, f'Sentence number {i} in a long chapter.') for i in range(60))
+    _store(uow, blocks)
+
+    class DynamicStagedClient:
+        async def generate(self, request):
+            count = len(request.ordered_block_ids)
+            aliases = _aliases(count)
+            if request.stage is LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE:
+                reply = narrative(aliases)
+            else:
+                reply = pedagogical(aliases, summary=A2_SUMMARY)
+            return await FakeLLMClient([reply]).generate(request)
+
+    with caplog.at_level(logging.INFO, logger='linguary.application.use_cases.analyze_chapter'):
+        await scenario(uow, DynamicStagedClient(), context=builder('a2'), max_fragment_blocks=100)(COMMAND)
+
+    assert any(
+        'base_language_notes_per_chapter=8' in rec.message
+        and 'effective_language_notes_limit=9' in rec.message
+        for rec in caplog.records
+    )
+
+
 
 
 

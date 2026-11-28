@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import posixpath
 import re
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import unquote
 
-from lxml import etree  # ty: ignore[missing-module-member]
+from lxml import etree, html as lxml_html  # ty: ignore[missing-module-member]
 
 from linguary.domain import InlineAnnotation, InlineAnnotationType
 
@@ -46,6 +48,111 @@ _NOTE_REFERENCE_MARKERS = frozenset({"noteref", "footnoteref", "footnote-ref"})
 _EXTERNAL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
+_DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
+
+#: HTML tag or entity marker in Dublin Core metadata values (`dc:description`, `dc:rights`).
+_DC_HTML_MARKER_RE = re.compile(
+    r"<[A-Za-z/!?][^>]*>|&(?:#\d+|#x[0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]+);"
+)
+
+#: Block/break HTML elements separated by spaces when extracting plain text from DC metadata.
+_DC_BLOCK_TAGS = frozenset(
+    {
+        "p",
+        "div",
+        "br",
+        "li",
+        "tr",
+        "td",
+        "th",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "blockquote",
+        "hr",
+    }
+)
+
+
+def clean_dc_text(raw: str | None) -> str | None:
+    """Strip embedded HTML tags/entities from Dublin Core text and normalize whitespace."""
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if _DC_HTML_MARKER_RE.search(stripped):
+        parser = lxml_html.HTMLParser(no_network=True)
+        try:
+            node = lxml_html.fragment_fromstring(
+                stripped, create_parent="div", parser=parser
+            )
+        except (etree.ParserError, etree.XMLSyntaxError, ValueError):
+            text = stripped
+        else:
+            pieces: list[str] = []
+
+            def _collect(element: etree._Element) -> None:
+                tag = local_name(element)
+                if tag in _NON_TEXT_TAGS:
+                    return
+                is_block = tag in _DC_BLOCK_TAGS
+                if is_block:
+                    pieces.append(" ")
+                if element.text:
+                    pieces.append(element.text)
+                for child in element:
+                    _collect(child)
+                    if child.tail:
+                        pieces.append(child.tail)
+                if is_block:
+                    pieces.append(" ")
+
+            _collect(node)
+            text = "".join(pieces)
+    else:
+        text = stripped
+    normalized = " ".join(text.split())
+    return normalized or None
+
+
+def read_source_language_tag(source_epub_path: str | None) -> str | None:
+    """Read the first non-empty ``dc:language`` tag from the source EPUB OPF."""
+    if not source_epub_path:
+        return None
+    path = Path(source_epub_path)
+    if not path.is_file():
+        return None
+    try:
+        parser = etree.XMLParser(
+            resolve_entities=False, load_dtd=False, no_network=True, recover=False
+        )
+        with zipfile.ZipFile(path) as archive:
+            container = etree.fromstring(
+                archive.read("META-INF/container.xml"), parser=parser
+            )
+            opf_path: str | None = None
+            for element in container.iter():
+                if local_name(element) == "rootfile" and element.get("full-path"):
+                    opf_path = element.get("full-path")
+                    break
+            if not opf_path:
+                return None
+            try:
+                opf_bytes = archive.read(opf_path)
+            except KeyError:
+                opf_bytes = archive.read(unquote(opf_path))
+            opf_root = etree.fromstring(opf_bytes, parser=parser)
+    except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError, ValueError):
+        return None
+    for element in opf_root.findall(f".//{{{_DC_NAMESPACE}}}language"):
+        text = "".join(element.itertext()).strip()
+        if text:
+            return text
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,9 +389,11 @@ def _class_tokens(element: etree._Element) -> frozenset[str]:
 __all__ = [
     "InlineContent",
     "InlineContentBuilder",
+    "clean_dc_text",
     "footnote_element_ids",
     "is_footnote_element",
     "is_footnote_reference",
     "local_name",
+    "read_source_language_tag",
     "resolve_link_target",
 ]

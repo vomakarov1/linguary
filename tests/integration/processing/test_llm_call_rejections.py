@@ -121,7 +121,8 @@ async def test_rejected_analysis_logged_unsuccessful_with_reason(tmp_path: Path)
         assert calls[0].success is False
         assert calls[0].error is not None
         assert calls[0].error.type is ErrorType.VALIDATION
-        assert scenario.block_ids()[1] in calls[0].error.message
+        assert "b2" in calls[0].error.message
+        assert scenario.block_ids()[1] not in calls[0].error.message
         assert calls[1].success is True
     finally:
         application.dispose()

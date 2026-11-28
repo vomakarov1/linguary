@@ -1371,6 +1371,194 @@ def test_cli_glossary_list_and_accept_all_unblock_flagged_terms(tmp_path: Path, 
     assert accepted["remaining_pending"] == 0
 
 
+def test_cli_glossary_list_reports_auto_mandatory_and_summary(tmp_path: Path, capsys) -> None:
+    """WP4: `glossary list --json` and text output report `auto_mandatory` and category summary."""
+    import asyncio
+    import json
+    from dataclasses import replace
+    from linguary.adapters.config import load_settings
+    from linguary.composition import build_application
+    from linguary.domain import (
+        BlockTreatment,
+        BookStatus,
+        ChapterAnalysis,
+        ConceptType,
+        CoverageStatus,
+        GlossaryCandidate,
+        TermConcept,
+        TermStatus,
+        TermVariant,
+        TreatmentPlan,
+        TreatmentPlanItem,
+    )
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationEvidence,
+        NameTranslationObservation,
+        NameTranslationStrategy,
+    )
+
+    config = _config(tmp_path, llm_model="gpt-test", api_key="test-key")
+    assert main(["--config", str(config), "import", str(SYNTHETIC_EPUB), "--book-id", "book-gl-wp4"]) == 0
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        conditions = app.book_conditions.ensure_initial_for_analysis(
+            "book-gl-wp4",
+            validate_conditions=app.book_runtime.settings_for,
+        )
+        strategy = NameTranslationStrategy(
+            conditions.payload["name_translation_policy"]["strategy"]
+        )
+        with app.unit_of_work.transaction() as tx:
+            doc = tx.documents.get("book-gl-wp4")
+            assert doc is not None
+            section = doc.ordered_sections[0]
+            block_text = section.ordered_blocks[0].text
+            # Ensure enough occurrences in the document for auto_mandatory key entity.
+            updated_section = replace(
+                section,
+                blocks=(
+                    replace(
+                        section.ordered_blocks[0],
+                        text=(
+                            f"{block_text} Alice Alice Alice Alice Alice "
+                            "Privet Drive Privet Drive Privet Drive Privet Drive Privet Drive "
+                            "Hogwarts Hogwarts Hogwarts Hogwarts Hogwarts"
+                        ),
+                    ),
+                    *section.ordered_blocks[1:],
+                ),
+            )
+            tx.documents.save(
+                replace(doc, sections=(updated_section, *doc.ordered_sections[1:]))
+            )
+            applied_method = "sound" if strategy is NameTranslationStrategy.SOUND else "meaning"
+            exempt_evidence = NameTranslationEvidence(
+                1,
+                conditions.id,
+                1,
+                strategy,
+                (
+                    NameTranslationObservation(
+                        "Элис",
+                        0.95,
+                        False,
+                        NameTranslationAssessment(
+                            applied_method, True, (), "Однозначное имя.", opaque_name=True
+                        ),
+                    ),
+                ),
+            )
+            tx.analyses.save(
+                "book-gl-wp4",
+                ChapterAnalysis(
+                    id="an-wp4-1",
+                    section_id=section.id,
+                    coverage_status=CoverageStatus.COMPLETE,
+                    treatment_plan=TreatmentPlan(
+                        section_id=section.id,
+                        items=tuple(
+                            TreatmentPlanItem(
+                                block_id=b.id,
+                                treatment=BlockTreatment.TRANSLATE,
+                            )
+                            for b in updated_section.blocks
+                            if b.text.strip()
+                        ),
+                    ),
+                    translation_instructions="",
+                    chapter_summary="Summary.",
+                    glossary_candidates=(
+                        GlossaryCandidate(
+                            id="cand-alice",
+                            analysis_id="an-wp4-1",
+                            source_text="Alice",
+                            type=ConceptType.PERSON,
+                            suggested_translation="Элис",
+                            confidence=0.95,
+                            model_flagged_review=False,
+                            requires_review=False,
+                            name_translation_evidence=exempt_evidence,
+                        ),
+                        GlossaryCandidate(
+                            id="cand-privet",
+                            analysis_id="an-wp4-1",
+                            source_text="Privet Drive",
+                            type=ConceptType.PLACE,
+                            suggested_translation="Привит-драйв",
+                            confidence=0.95,
+                            model_flagged_review=True,
+                            requires_review=True,
+                        ),
+                        GlossaryCandidate(
+                            id="cand-hogwarts",
+                            analysis_id="an-wp4-1",
+                            source_text="Hogwarts",
+                            type=ConceptType.PLACE,
+                            suggested_translation="Хогвартс",
+                            confidence=0.95,
+                            model_flagged_review=False,
+                            requires_review=True,
+                        ),
+                        GlossaryCandidate(
+                            id="cand-term",
+                            analysis_id="an-wp4-1",
+                            source_text="cauldron",
+                            type=ConceptType.TERM,
+                            suggested_translation="котёл",
+                            confidence=0.95,
+                            model_flagged_review=False,
+                            requires_review=False,
+                        ),
+                    ),
+                ),
+            )
+            tx.glossary.save(
+                TermConcept(
+                    id="dec-hogwarts",
+                    book_id="book-gl-wp4",
+                    type=ConceptType.PLACE,
+                    canonical_source_text="Hogwarts",
+                    status=TermStatus.APPROVED,
+                    variants=(
+                        TermVariant(
+                            concept_id="dec-hogwarts",
+                            language="ru",
+                            text="Хогвартс",
+                            status=TermStatus.APPROVED,
+                        ),
+                    ),
+                )
+            )
+            book = tx.books.get("book-gl-wp4")
+            assert book is not None
+            tx.books.save(replace(book, status=BookStatus.GLOSSARY_REVIEW))
+    finally:
+        asyncio.run(app.aclose())
+
+    assert main(["--config", str(config), "glossary", "list", "book-gl-wp4", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["summary"] == {
+        "decided": 1,
+        "auto_mandatory": 1,
+        "awaiting_review": 1,
+        "suggested": 1,
+    }
+    by_source = {item["source_text"]: item for item in listed["items"]}
+    assert by_source["Alice"]["auto_mandatory"] is True
+    assert by_source["Privet Drive"]["auto_mandatory"] is False
+    assert by_source["Hogwarts"]["auto_mandatory"] is False
+    assert by_source["cauldron"]["auto_mandatory"] is False
+
+    assert main(["--config", str(config), "glossary", "list", "book-gl-wp4"]) == 0
+    text_out = capsys.readouterr().out
+    assert "auto_mandatory: 1" in text_out
+    assert "Alice -> Элис (auto_mandatory)" in text_out
+
+
 def test_cli_corrections_list_resolve_and_export_strict_corrections(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
@@ -1622,6 +1810,193 @@ def test_candidate_snippet_extracts_v2_result_segments_glossary_only_and_fallbac
         review=None,
     )
     assert _candidate_snippet(cand_proposal_segs) == (None, "Сегмент 1. Сегмент 2.")
+
+
+def test_cli_retry_preserves_fragment_cache_by_default_and_clears_with_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WP3.3: `cli retry` preserves analysis fragment cache by default and clears it with `--clear-cache`."""
+    import asyncio
+    from uuid import uuid4
+
+    from linguary.adapters.config import load_settings
+    from linguary.composition import build_application
+    from linguary.domain import (
+        AnalysisPassKind,
+        AnalysisPassResult,
+        ErrorType,
+        ProcessingTask,
+        TaskError,
+        TaskStatus,
+        TaskType,
+    )
+
+    config = _config(tmp_path, llm_model="fake-model", api_key="secret")
+    book_id = "retry-cache-book"
+    assert main(["--config", str(config), "import", str(SYNTHETIC_EPUB), "--book-id", book_id]) == 0
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    task_id = str(uuid4())
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        with app.unit_of_work.transaction() as tx:
+            doc = tx.documents.get(book_id)
+            assert doc is not None
+            section_id = doc.ordered_sections[0].id
+            for kind, scope_key, sha_char in (
+                (AnalysisPassKind.NARRATIVE, "", "1"),
+                (AnalysisPassKind.NARRATIVE, "frag:0", "2"),
+                (AnalysisPassKind.PEDAGOGICAL, "frag:0", "3"),
+            ):
+                tx.analyses.save_pass(
+                    AnalysisPassResult(
+                        id=str(uuid4()),
+                        book_id=book_id,
+                        section_id=section_id,
+                        pass_kind=kind,
+                        scope_key=scope_key,
+                        input_sha256=sha_char * 64,
+                        output_sha256=sha_char * 64,
+                        conditions_id=None,
+                        attempt_id=None,
+                        payload={"schema_version": 1, "pass_kind": kind.value},
+                    )
+                )
+            tx.tasks.add(
+                ProcessingTask(
+                    id=task_id,
+                    book_id=book_id,
+                    task_type=TaskType.ANALYZE_CHAPTER,
+                    scope_id=section_id,
+                    status=TaskStatus.FAILED,
+                    attempts=1,
+                    last_error=TaskError(ErrorType.VALIDATION, "ошибка анализа", "detail"),
+                )
+            )
+    finally:
+        asyncio.run(app.aclose())
+
+    # 1. Default `cli retry` preserves fragment passes.
+    assert main(["--config", str(config), "retry", task_id]) == 0
+    out_default = capsys.readouterr().out
+    assert f"Task: {task_id}" in out_default
+    assert "Status: pending" in out_default
+
+    app_check = build_application(settings=load_settings(config_path=config))
+    try:
+        with app_check.unit_of_work.transaction() as tx:
+            passes = tx.analyses.list_passes_for_section(book_id, section_id)
+            assert {(p.pass_kind, p.scope_key) for p in passes} == {
+                (AnalysisPassKind.NARRATIVE, ""),
+                (AnalysisPassKind.NARRATIVE, "frag:0"),
+                (AnalysisPassKind.PEDAGOGICAL, "frag:0"),
+            }
+            task = tx.tasks.get(task_id)
+            assert task is not None
+            tx.tasks.save(
+                task.start().fail(TaskError(ErrorType.VALIDATION, "повторная ошибка", "detail"))
+            )
+    finally:
+        asyncio.run(app_check.aclose())
+
+    # 2. `cli retry --clear-cache` clears fragment passes while preserving whole-chapter NARRATIVE.
+    assert main(["--config", str(config), "retry", task_id, "--clear-cache"]) == 0
+    out_cleared = capsys.readouterr().out
+    assert f"Task: {task_id}" in out_cleared
+    assert "Status: pending" in out_cleared
+
+    app_after = build_application(settings=load_settings(config_path=config))
+    try:
+        with app_after.unit_of_work.transaction() as tx:
+            passes_after = tx.analyses.list_passes_for_section(book_id, section_id)
+            assert [(p.pass_kind, p.scope_key) for p in passes_after] == [
+                (AnalysisPassKind.NARRATIVE, ""),
+            ]
+    finally:
+        asyncio.run(app_after.aclose())
+
+
+def test_wp5_cli_analyze_pronunciation_variant_auto_detects_uk_and_falls_back_to_us(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WP5.1: `cli analyze --pronunciation-help --pronunciation-variant auto` resolves en-GB -> uk and plain en -> us."""
+    import asyncio
+
+    from epub_builder import build_epub, xhtml_document
+    from linguary.adapters.config import load_settings
+    from linguary.adapters.epub.inline import read_source_language_tag
+    from linguary.composition import build_application
+
+    uk_epub = build_epub(
+        tmp_path / "uk-cli.epub",
+        language="en-GB",
+        documents={"chapter1.xhtml": xhtml_document("<h1>Ch 1</h1><p>Hello world.</p>")},
+        toc=[("chapter1.xhtml", "Ch 1")],
+    )
+    en_epub = build_epub(
+        tmp_path / "en-cli.epub",
+        language="en",
+        documents={"chapter1.xhtml": xhtml_document("<h1>Ch 1</h1><p>Hello world.</p>")},
+        toc=[("chapter1.xhtml", "Ch 1")],
+    )
+    assert read_source_language_tag(str(uk_epub)) == "en-GB"
+    assert read_source_language_tag(str(en_epub)) == "en"
+    assert read_source_language_tag(str(tmp_path / "missing.epub")) is None
+
+    config = _config(tmp_path, llm_model="gpt-test", api_key="test-key")
+    assert main(["--config", str(config), "import", str(uk_epub), "--book-id", "book-uk"]) == 0
+    assert main(["--config", str(config), "import", str(en_epub), "--book-id", "book-en"]) == 0
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "book-uk",
+                "--reader-level",
+                "a2",
+                "--pronunciation-help",
+                "--pronunciation-variant",
+                "auto",
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "book-en",
+                "--reader-level",
+                "a2",
+                "--pronunciation-help",
+                "--pronunciation-variant",
+                "auto",
+            ]
+        )
+        == 0
+    )
+
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        with app.unit_of_work.read_transaction() as tx:
+            uk_cond = tx.work.latest_conditions("book-uk")
+            en_cond = tx.work.latest_conditions("book-en")
+            assert uk_cond is not None
+            assert uk_cond.pronunciation_help_enabled is True
+            assert uk_cond.pronunciation_variant == "uk"
+            assert en_cond is not None
+            assert en_cond.pronunciation_help_enabled is True
+            assert en_cond.pronunciation_variant == "us"
+    finally:
+        asyncio.run(app.aclose())
+
 
 
 

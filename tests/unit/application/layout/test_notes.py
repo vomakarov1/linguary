@@ -687,7 +687,7 @@ def test_translate_block_drops_redundant_sentence_term_and_translation_in_note()
     assert [note.term for note in notes] == [None, None, thanks, five, None]
     assert notes[0].body == ("Звук шёл из-за двери.",)
     assert "Низкий рокот" not in "".join(notes[0].body)
-    assert notes[0].marker_end == _end(text, rumbling)
+    assert notes[0].marker_end == _end(text, rumbling.rstrip("."))
     assert notes[1].body == ("Гарри ещё не знает о себе.",)
     assert notes[1].marker_end == _end(text, passage)
     assert notes[2].body == (
@@ -1190,7 +1190,7 @@ def test_hint_markers_match_apostrophes_irregular_verbs_short_doubling_and_gaps(
     cases = (
         ("‘The Potters, that’s right, that’s what I heard –’", "that's right", "верно", "that’s right"),
         ("‘The Potters, that’s right, that’s what I heard –’", "that's what I heard", "вот что я услышал", "that’s what I heard"),
-        ("‘What’s up?’ said Hagrid.", "What's up?", "Что случилось?", "What’s up?"),
+        ("‘What’s up?’ said Hagrid.", "What's up?", "Что случилось?", "What’s up"),
         ("‘Years an’ years ago.’", "Years an' years ago", "Много-много лет назад", "Years an’ years ago"),
         ("He was back in the room.", "to be back", "вернуться", "was back"),
         ("The giant shook his head.", "to shake", "трясти", "shook"),
@@ -1788,6 +1788,140 @@ def test_note_quotes_translation_recognizes_guillemets_straight_and_curly_quotes
         )
         notes = block_notes(block, result, None, ())
         assert notes[0].body == (note_text,)
+
+
+def test_wp5_suppress_hints_covered_by_notes_preserves_ipa_and_glossary_segment_invariant() -> None:
+    """WP5.3: compact covering notes suppress duplicate hints, long unrelated notes do not, IPA stays, and GLOSSARY_ONLY segments keep >= 1 item."""
+    from dataclasses import replace
+
+    from linguary.domain import BlockSegment
+
+    # 1. Duplicate hints suppressed under compact notes (<= 6 words).
+    cases = (
+        (
+            "Fancy seeing you here!",
+            GlossaryHint("Fancy", "надо же"),
+            ("n1", "Fancy seeing", "Восклицание удивления: «надо же увидеть!»."),
+        ),
+        (
+            "How very wrong he was.",
+            GlossaryHint("wrong", "неправый"),
+            ("n2", "How very wrong he was.", "Восклицательная инверсия: как же он ошибался."),
+        ),
+        (
+            "Make Harry get it.",
+            GlossaryHint("to get", "принести"),
+            ("n3", "Make Harry get it.", "Конструкция make someone do something: «заставь Гарри принести это»."),
+        ),
+    )
+    for text, hint, (note_id, excerpt, note_text) in cases:
+        block = _block(text)
+        note = LanguageNote(note_id, block.id, excerpt, note_text)
+        result = _result(block, treatment=BlockTreatment.GLOSSARY_ONLY, hints=(hint,), notes=(note,))
+        projected = block_notes(block, result, None, ())
+        assert [item.origin for item in projected] == ["language_note"], text
+
+    # 2. Long unrelated note (> 6 words, no shared difficulty_id, does not cover translation) does NOT suppress hint.
+    long_text = "She held a tarnished brass lantern in her trembling hand while walking slowly."
+    long_block = _block(long_text)
+    long_hint = GlossaryHint("tarnished", "потускневший")
+    long_note = LanguageNote(
+        "n-long",
+        long_block.id,
+        "held a tarnished brass lantern in her trembling hand",
+        "Длинное замечание про стиль описания сцены без упоминания словаря.",
+    )
+    long_res = _result(
+        long_block,
+        treatment=BlockTreatment.TRANSLATE,
+        translation="Она держала потускневший латунный фонарь.",
+        hints=(long_hint,),
+        notes=(long_note,),
+    )
+    long_projected = block_notes(long_block, long_res, None, ())
+    assert [item.origin for item in long_projected] == ["glossary_hint", "language_note"]
+
+    # 3. Suppressed hint with IPA preserves PronunciationOccurrence as a standalone pronunciation note.
+    ipa_text = "Fancy seeing you here!"
+    ipa_block = _block(ipa_text)
+    ipa_hint = GlossaryHint("Fancy", "надо же")
+    ipa_note = LanguageNote("n-ipa", ipa_block.id, "Fancy seeing", "Восклицание удивления.")
+    ipa_occ = _pron(ipa_block, "Fancy", "ˈfænsi", "uk")
+    ipa_res = _result(
+        ipa_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(ipa_hint,),
+        notes=(ipa_note,),
+    )
+    ipa_projected = block_notes(ipa_block, ipa_res, None, (ipa_occ,))
+    assert [(item.origin, item.term, item.ipa) for item in ipa_projected] == [
+        ("pronunciation", "Fancy", "ˈfænsi"),
+        ("language_note", None, None),
+    ]
+
+    # 4. Segment-level GLOSSARY_ONLY invariant: if covering note marker lands outside the GLOSSARY_ONLY segment,
+    #    the sole hint in that GLOSSARY_ONLY segment is NOT suppressed.
+    s1 = "He held a cauldron. "
+    s2 = "It was heavy."
+    seg_text = s1 + s2
+    seg_block = replace(
+        _block(seg_text),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(seg_text), 1),
+        ),
+    )
+    seg_hint = GlossaryHint("cauldron", "котёл")
+    # Note excerpt spans across s1 into s2 so its marker_end lands inside s2 (outside GLOSSARY_ONLY s1).
+    cross_note = LanguageNote(
+        "n-cross",
+        seg_block.id,
+        "cauldron. It was heavy.",
+        "Пояснение про котёл и его вес.",
+    )
+    seg_res = BlockProcessingResult(
+        block_id=seg_block.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Он был тяжёлым.",
+        segment_treatments=(BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+        segment_translations=(None, "Он был тяжёлым."),
+        glossary_hints=(seg_hint,),
+        language_notes=(cross_note,),
+    )
+    seg_projected = block_notes(seg_block, seg_res, None, ())
+    assert [item.origin for item in seg_projected] == ["glossary_hint", "language_note"]
+
+
+def test_wp5_trim_terminal_punctuation_places_sup_before_period_and_protects_apostrophes_and_abbrevs() -> None:
+    """WP5.3: `_trim_terminal_punctuation` moves markers before `.`/`!`/`?`/`…` while protecting `flyin’`, `Dursleys’`, and `Mr.`."""
+    from linguary.application.layout.notes import _trim_terminal_punctuation
+
+    # 1. `How very wrong he was.` -> marker before `.`
+    t1 = "How very wrong he was."
+    assert _trim_terminal_punctuation(t1, 0, len(t1)) == len("How very wrong he was")
+    b1 = _block(t1)
+    r1 = _result(b1, notes=(LanguageNote("n1", b1.id, t1, "Инверсия."),))
+    assert block_notes(b1, r1, None, ())[0].marker_end == len("How very wrong he was")
+
+    # 2. Dialect & possessive trailing apostrophes (`flyin’`, `Dursleys’`) are NEVER stripped.
+    t2 = "as we was flyin’ over Bristol"
+    s2 = t2.index("as we was flyin’")
+    e2 = s2 + len("as we was flyin’")
+    assert _trim_terminal_punctuation(t2, s2, e2) == e2
+    t2b = "The Dursleys’ car"
+    assert _trim_terminal_punctuation(t2b, 0, len("The Dursleys’")) == len("The Dursleys’")
+
+    # 3. Abbreviations (`Mr.`, `Mrs.`, `a.m.`, single initial `M.`) keep their period.
+    for abbrev in ("Mr.", "Mrs.", "Ms.", "Dr.", "St.", "Prof.", "at 7 a.m.", "at 9 p.m.", "M."):
+        assert _trim_terminal_punctuation(abbrev, 0, len(abbrev)) == len(abbrev), abbrev
+
+    # 4. Closing quote + period (`‘No.’`) trims both `’` and `.`.
+    t4 = "‘No.’"
+    assert _trim_terminal_punctuation(t4, 0, len(t4)) == len("‘No")
+
+    # 5. Punctuation-only anchor keeps original `end` (lower-bound guard).
+    assert _trim_terminal_punctuation("...", 0, 3) == 3
+    assert _trim_terminal_punctuation("‘.’", 0, 3) == 3
 
 
 

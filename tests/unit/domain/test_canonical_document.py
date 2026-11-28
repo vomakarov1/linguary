@@ -273,3 +273,31 @@ def test_is_cover_section_rejects_title_page_with_heading_and_image() -> None:
 
     assert is_cover_section(title_section) is False
     assert is_cover_section(image_only_section) is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("en-GB", "uk"),
+        ("en_gb", "uk"),
+        ("en-UK", "uk"),
+        ("en-AU", "uk"),
+        ("en-NZ", "uk"),
+        ("en-IE", "uk"),
+        ("en-Latn-GB", "uk"),
+        ("en-US", "us"),
+        ("en-CA", "us"),
+        ("en_US", "us"),
+        ("en", None),
+        ("EN", None),
+        ("fr-FR", None),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+def test_detect_english_variant(raw: str | None, expected: str | None) -> None:
+    """WP5.1: detect_english_variant maps regional English BCP 47 tags to uk/us and leaves bare en/other as None."""
+    from linguary.domain import detect_english_variant
+
+    assert detect_english_variant(raw) == expected

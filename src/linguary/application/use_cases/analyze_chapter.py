@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -46,6 +47,7 @@ from linguary.application.analysis_merge import (
     FragmentAnalysis,
     _extract_block_spoiler_tokens,
     _first_name_block_index,
+    _same_spoiler_name,
     before_you_read_entries,
     content_plan_from_response,
     validate_content_plan,
@@ -97,9 +99,14 @@ from linguary.application.llm_dto import (
     PedagogicalAnalysisResponse,
 )
 from linguary.application.llm_rejections import record_rejection, finalize_response
-from linguary.application.ports.llm import LLMClient, LLMRequest, LLMResponseFormatError
+from linguary.application.ports.llm import (
+    LLMClient,
+    LLMContextCapacityError,
+    LLMRequest,
+    LLMResponseFormatError,
+)
 from linguary.application.ports.language_detection import LanguageDetector
-from linguary.application.ports.persistence import BookRecord, UnitOfWork
+from linguary.application.ports.persistence import BookRecord, PersistenceError, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
@@ -111,6 +118,7 @@ from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
+    BlockType,
     BookEvent,
     BookStatus,
     CanonicalDocument,
@@ -133,6 +141,8 @@ from linguary.domain import (
     AnalysisPassResult,
 )
 
+logger = logging.getLogger(__name__)
+
 #: Sleep between model call attempts. The application layer does not own the event loop,
 #: but must execute the sleep: the retry policy only calculates the duration (ALG-05).
 type Sleep = Callable[[float], Awaitable[None]]
@@ -147,6 +157,39 @@ _A2_VOCAB_NAME_TYPES = frozenset({
     ConceptType.PLACE,
     ConceptType.ORGANIZATION,
 })
+
+_MAX_FRAGMENT_FINDINGS_INSTRUCTIONS_BYTES = 4_000
+_MAX_LAST_SCENE_VISUAL_FACTS = 8
+_MAX_REPAIR_ASSISTANT_BYTES = 20_000
+_MAX_REPAIR_TOTAL_BYTES = 65_000
+
+
+def _bounded_findings_instructions(
+    instruction_lines: Sequence[str],
+    scene_line: str | None,
+    *,
+    max_bytes: int = _MAX_FRAGMENT_FINDINGS_INSTRUCTIONS_BYTES,
+) -> str:
+    if scene_line is not None and len(scene_line.encode("utf-8")) > max_bytes:
+        scene_line = scene_line.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+    scene_bytes = len(scene_line.encode("utf-8")) if scene_line is not None else 0
+    lines_budget = max_bytes - (scene_bytes + 1 if scene_line is not None else 0)
+    kept: list[str] = []
+    used = 0
+    for line in instruction_lines:
+        line_bytes = len(line.encode("utf-8"))
+        sep = 1 if kept else 0
+        if used + sep + line_bytes > lines_budget:
+            if not kept and lines_budget > 0:
+                truncated = line.encode("utf-8")[:lines_budget].decode("utf-8", errors="ignore")
+                if truncated:
+                    kept.append(truncated)
+            break
+        kept.append(line)
+        used += sep + line_bytes
+    if scene_line is not None:
+        kept.append(scene_line)
+    return "\n".join(kept)
 
 
 class AnalyzeChapterError(ApplicationError):
@@ -551,6 +594,8 @@ class AnalyzeChapter:
             suggestions,
             target_language=document.target_language,
         )
+        if isinstance(section.title, str) and section.title.strip():
+            known_names = tuple(dict.fromkeys((*known_names, section.title.strip())))
         expected_conditions_id = (getattr(self._llm_client, 'conditions_id', None)
                                   or self._conditions_id or (conditions.id if conditions else None))
         dependencies = conditions.payload if conditions else {}
@@ -607,6 +652,7 @@ class AnalyzeChapter:
                         aliases=aliases,
                         texts=texts,
                         ordered_block_ids=ordered_block_ids,
+                        known_names=known_names,
                     )
                     if downgraded is None:
                         raise
@@ -935,7 +981,17 @@ class AnalyzeChapter:
                     for saved_pass in saved_passes
                     if saved_pass.pass_kind is pass_kind and saved_pass.scope_key
                 )
-        notes = chapter_note_limit(section, self._context_builder._language_notes_per_chapter)
+        base_notes = self._context_builder._language_notes_per_chapter
+        notes = chapter_note_limit(section, base_notes)
+        if not is_narrative:
+            logger.info(
+                "Chapter analysis note limit: book_id=%s section_id=%s "
+                "base_language_notes_per_chapter=%d effective_language_notes_limit=%d",
+                command.book_id,
+                section.id,
+                base_notes,
+                notes,
+            )
         queue: list[tuple[ChapterFragment, int, int]] = []
         for fragment in fragments:
             byr_quota = 0 if is_narrative else 10 // len(fragments) + (fragment.order < 10 % len(fragments))
@@ -965,8 +1021,17 @@ class AnalyzeChapter:
                 previous = None
                 if parts:
                     raw, _, _ = parts[-1]
-                    instruction_lines = [p[0].translation_instructions for p in parts if p[0].translation_instructions]
+                    instruction_lines = list(
+                        dict.fromkeys(
+                            line.strip()
+                            for p in parts
+                            if p[0].translation_instructions
+                            for line in p[0].translation_instructions.splitlines()
+                            if line.strip()
+                        )
+                    )
                     last_scene = next((s[-1] for _, s, _ in reversed(parts) if s), None)
+                    scene_line: str | None = None
                     if last_scene is not None:
                         scene_info = json.dumps(
                             dict(
@@ -975,17 +1040,17 @@ class AnalyzeChapter:
                                 participants=list(last_scene.participants),
                                 visual_facts=[
                                     dict(quote=f.anchor.quote, subject=f.subject, detail=f.detail)
-                                    for f in last_scene.visual_facts
+                                    for f in last_scene.visual_facts[-_MAX_LAST_SCENE_VISUAL_FACTS:]
                                 ],
                                 visual_assumptions=list(last_scene.visual_assumptions),
                             ),
                             ensure_ascii=False,
                             sort_keys=True,
                         )
-                        instruction_lines.append('Последняя сцена: ' + scene_info)
+                        scene_line = 'Последняя сцена: ' + scene_info
                     previous = FragmentFindings(
                         summary=raw.chapter_summary,
-                        instructions='\n'.join(instruction_lines),
+                        instructions=_bounded_findings_instructions(instruction_lines, scene_line),
                         expressions=(),
                         candidates=_merge_fragment_candidates(parts),
                     )
@@ -1023,19 +1088,33 @@ class AnalyzeChapter:
                 task_id=command.task_id, scope_id=section.id, ordered_block_ids=fragment.block_ids))
 
             fragment_known_names = known_names
-            if is_narrative and parts:
-                prior_part_names = [
-                    name
-                    for part_payload, part_scenes, _ in parts
-                    for name in (
-                        *(c.source_text for c in part_payload.glossary_candidates),
-                        *(c.suggested_translation for c in part_payload.glossary_candidates),
-                        *(p for scene in part_scenes for p in scene.participants),
+            if is_narrative:
+                extra_known_names: list[str] = []
+                if isinstance(section.title, str) and section.title.strip():
+                    extra_known_names.append(section.title.strip())
+                first_frag_id = fragment.blocks[0].id
+                for sec_block in section.ordered_blocks:
+                    if sec_block.id == first_frag_id:
+                        break
+                    if sec_block.type is BlockType.HEADING and sec_block.text.strip():
+                        extra_known_names.append(sec_block.text.strip())
+                if parts:
+                    extra_known_names.extend(
+                        name
+                        for part_payload, part_scenes, _ in parts
+                        for name in (
+                            *(c.source_text for c in part_payload.glossary_candidates),
+                            *(c.suggested_translation for c in part_payload.glossary_candidates),
+                            *(p for scene in part_scenes for p in scene.participants),
+                        )
+                        if isinstance(name, str) and name.strip()
                     )
-                    if isinstance(name, str) and name.strip()
-                ]
-                if prior_part_names:
-                    fragment_known_names = tuple(dict.fromkeys((*known_names, *prior_part_names)))
+                if extra_known_names:
+                    fragment_known_names = tuple(
+                        dict.fromkeys((*known_names, *extra_known_names))
+                    )
+
+            incremental_merge_conflict = False
 
             def validate(
                 payload,
@@ -1045,22 +1124,63 @@ class AnalyzeChapter:
                 _fragment=fragment,
                 _fragment_known_names=fragment_known_names,
             ):
+                nonlocal incremental_merge_conflict
+                incremental_merge_conflict = False
                 if is_narrative:
                     _ensure_candidates_single_script(payload, _context)
                     enforce_v7 = not from_cache or self._should_enforce_v7_name_policy(command)
                     name_policy = self._name_translation_policy if enforce_v7 else None
-                    return validate_narrative_response(payload, _context.block_ids_by_alias,
-                        {b.id: b.text for b in _fragment.blocks}, _context.visible_texts_by_alias,
-                        ordered_block_ids=_fragment.block_ids,
-                        is_notes_only=section.is_notes_only or document.is_front_matter(section),
-                        mandatory_facts=glossary_context_constraints(concepts),
-                        blocks=_fragment.blocks,
-                        source_language=document.source_language,
-                        target_language=document.target_language,
-                        language_detector=self._language_detector,
-                        known_names=_fragment_known_names,
-                        name_translation_policy=name_policy,
-                        enforce_strict_gender_subject=enforce_v7)
+                    frag_texts = {b.id: b.text for b in _fragment.blocks}
+                    try:
+                        resolved_narrative = validate_narrative_response(
+                            payload,
+                            _context.block_ids_by_alias,
+                            frag_texts,
+                            _context.visible_texts_by_alias,
+                            ordered_block_ids=_fragment.block_ids,
+                            is_notes_only=section.is_notes_only or document.is_front_matter(section),
+                            mandatory_facts=glossary_context_constraints(concepts),
+                            blocks=_fragment.blocks,
+                            source_language=document.source_language,
+                            target_language=document.target_language,
+                            language_detector=self._language_detector,
+                            known_names=_fragment_known_names,
+                            name_translation_policy=name_policy,
+                            enforce_strict_gender_subject=enforce_v7,
+                        )
+                    except AnalysisMergeError as error:
+                        if (
+                            error.violation is None
+                            or error.violation.rule_code != "spoiler_name_leak"
+                        ):
+                            raise
+                        downgraded = _downgrade_spoiler_explicit_facts(
+                            payload,
+                            aliases=_context.block_ids_by_alias,
+                            texts=frag_texts,
+                            ordered_block_ids=_fragment.block_ids,
+                            known_names=_fragment_known_names,
+                        )
+                        if downgraded is None:
+                            raise
+                        resolved_narrative = validate_narrative_response(
+                            downgraded,
+                            _context.block_ids_by_alias,
+                            frag_texts,
+                            _context.visible_texts_by_alias,
+                            ordered_block_ids=_fragment.block_ids,
+                            is_notes_only=section.is_notes_only or document.is_front_matter(section),
+                            mandatory_facts=glossary_context_constraints(concepts),
+                            blocks=_fragment.blocks,
+                            source_language=document.source_language,
+                            target_language=document.target_language,
+                            language_detector=self._language_detector,
+                            known_names=_fragment_known_names,
+                            name_translation_policy=name_policy,
+                            enforce_strict_gender_subject=enforce_v7,
+                        )
+                        payload = downgraded
+                    return payload, resolved_narrative
                 assert narrative is not None
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
@@ -1088,15 +1208,19 @@ class AnalyzeChapter:
                         for part in (*parts, candidate_part)
                         for item in part.treatments
                     )
-                    merge_chapter_analysis(
-                        [*parts, candidate_part],
-                        id=self._id_factory(),
-                        section_id=section.id,
-                        expected_block_ids=expected_so_far,
-                        glossary_confidence_threshold=self._glossary_confidence_threshold,
-                        id_factory=self._id_factory,
-                    )
-                return resolved_plan
+                    try:
+                        merge_chapter_analysis(
+                            [*parts, candidate_part],
+                            id=self._id_factory(),
+                            section_id=section.id,
+                            expected_block_ids=expected_so_far,
+                            glossary_confidence_threshold=self._glossary_confidence_threshold,
+                            id_factory=self._id_factory,
+                        )
+                    except (AnalysisMergeError, DomainError):
+                        incremental_merge_conflict = True
+                        raise
+                return payload, resolved_plan
 
             frag_scope_key = f"{fragment.blocks[0].id}:{fragment.blocks[-1].id}" if total > 1 else ""
             frag_input_sha = (
@@ -1115,27 +1239,60 @@ class AnalyzeChapter:
                 if frag_scope_key and chapter_input_sha is not None
                 else None
             )
-            cached_frag = (
-                self._cached_pass(command, pass_kind, frag_input_sha, scope_key=frag_scope_key)
-                if frag_input_sha is not None
-                else None
-            )
-            if cached_frag is not None:
-                saved_frag, payload = cached_frag
-                if (
-                    saved_frag.attempt_id is not None
-                    and saved_frag.conditions_id == expected_conditions_id
-                ):
-                    self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_frag.attempt_id))
-                if not is_narrative:
-                    payload = self._normalize_a2_dialogue(
-                        payload,
-                        fragment.blocks,
-                        context.block_ids_by_alias,
-                        known_names=ped_known_names,
+            cached_frag = None
+            if frag_input_sha is not None:
+                try:
+                    cached_frag = self._cached_pass(
+                        command, pass_kind, frag_input_sha, scope_key=frag_scope_key
                     )
-                resolved = validate(payload, from_cache=True)
+                except (
+                    ValueError,
+                    PersistenceError,
+                    ApplicationError,
+                    DomainError,
+                    ResultValidationError,
+                ):
+                    self._clear_fragment_passes(
+                        command.book_id, command.section_id, pass_kind
+                    )
+                    cached_frag = None
+            cache_hit_result: tuple[
+                NarrativeAnalysisResponse | PedagogicalAnalysisResponse, Any
+            ] | None = None
+            if cached_frag is not None:
+                saved_frag, cached_payload = cached_frag
+                try:
+                    if not is_narrative:
+                        cached_payload = self._normalize_a2_dialogue(
+                            cached_payload,
+                            fragment.blocks,
+                            context.block_ids_by_alias,
+                            known_names=ped_known_names,
+                        )
+                    cache_hit_result = validate(cached_payload, from_cache=True)
+                except (
+                    ValueError,
+                    PersistenceError,
+                    ApplicationError,
+                    DomainError,
+                    ResultValidationError,
+                ):
+                    self._clear_fragment_passes(
+                        command.book_id, command.section_id, pass_kind
+                    )
+                    cache_hit_result = None
+                else:
+                    if (
+                        saved_frag.attempt_id is not None
+                        and saved_frag.conditions_id == expected_conditions_id
+                    ):
+                        self._staged_attempt_ids.set(
+                            (*self._staged_attempt_ids.get(), saved_frag.attempt_id)
+                        )
+            if cache_hit_result is not None:
+                payload, resolved = cache_hit_result
             else:
+                incremental_merge_conflict = False
                 try:
                     payload, resolved, count, usage = await self._request_staged(
                         context,
@@ -1144,18 +1301,29 @@ class AnalyzeChapter:
                         normalize_dialogue=not is_narrative,
                         known_names=ped_known_names,
                     )
-                except LLMResponseFormatError as error:
-                    if not error.truncated or len(fragment.blocks) <= 1:
+                except (LLMResponseFormatError, LLMContextCapacityError) as error:
+                    is_trunc = isinstance(error, LLMResponseFormatError) and error.truncated
+                    is_cap = isinstance(error, LLMContextCapacityError)
+                    if not (is_trunc or is_cap) or len(fragment.blocks) <= 1:
                         raise
                     attempts += getattr(error, 'analysis_attempts', 1)
-                    usages.append(error.usage)
+                    err_usage = getattr(error, 'usage', None)
+                    if err_usage is not None:
+                        usages.append(err_usage)
                     midpoint = len(fragment.blocks) // 2
                     # Accepted siblings already own their shares. Split only this parent's
                     # remaining allocation, including on repeated truncation of its children.
                     queue[:0] = [
                         (ChapterFragment(0, fragment.blocks[:midpoint]), (byr_quota + 1) // 2, (note_quota + 1) // 2),
-                        (ChapterFragment(0, fragment.blocks[midpoint:]), byr_quota // 2, note_quota // 2)]
+                        (ChapterFragment(0, fragment.blocks[midpoint:]), byr_quota // 2, note_quota // 2),
+                    ]
                     continue
+                except Exception:
+                    if incremental_merge_conflict:
+                        self._clear_fragment_passes(
+                            command.book_id, command.section_id, pass_kind
+                        )
+                    raise
                 attempts += count
                 usages.append(usage)
                 if frag_input_sha is not None:
@@ -1186,7 +1354,10 @@ class AnalyzeChapter:
 
     async def _request_staged[ResolutionT](
         self, context: ChapterAnalysisContext,
-        validate: Callable[[NarrativeAnalysisResponse | PedagogicalAnalysisResponse], ResolutionT],
+        validate: Callable[
+            [NarrativeAnalysisResponse | PedagogicalAnalysisResponse],
+            tuple[NarrativeAnalysisResponse | PedagogicalAnalysisResponse, ResolutionT],
+        ],
         *,
         blocks: Sequence[DocumentBlock] = (),
         normalize_dialogue: bool = False,
@@ -1213,7 +1384,8 @@ class AnalyzeChapter:
                             context.block_ids_by_alias,
                             known_names=known_names,
                         ))
-                    resolved = validate(response.payload)
+                    normalized_payload, resolved = validate(response.payload)
+                    response = replace(response, payload=normalized_payload)
                     if isinstance(response.payload, PedagogicalAnalysisResponse):
                         record_reader_warnings(self._unit_of_work, response,
                             [('summary', response.payload.reader_chapter_summary or ''),
@@ -1223,17 +1395,55 @@ class AnalyzeChapter:
                     raise ResultValidationError(str(error), expectation=context.expectation,
                         violation=getattr(error, 'violation', None)) from error
             except Exception as error:
+                worded = _worded_for_the_model(error, context)
                 if response is not None:
-                    record_rejection(self._unit_of_work, response, error)
+                    record_rejection(self._unit_of_work, response, worded)
                     reject_last = getattr(self._llm_client, 'reject_last', None)
                     if callable(reject_last):
                         reject_last()
-                if isinstance(error, LLMResponseFormatError) and error.truncated:
+                if (
+                    (isinstance(error, LLMResponseFormatError) and error.truncated)
+                    or isinstance(error, LLMContextCapacityError)
+                ):
                     cast(Any, error).analysis_attempts = attempts
-                    error.usage = _total_usage([*usages, error.usage] if response is None else usages)
+                    err_usage = getattr(error, 'usage', None)
+                    combined_usages = (
+                        [*usages, err_usage]
+                        if (response is None and err_usage is not None)
+                        else usages
+                    )
+                    cast(Any, error).usage = _total_usage(combined_usages)
                     raise
-                decision = self._retry_policy.decide(_worded_for_the_model(error, context),
-                    attempts=attempts, raw_content=response.raw_content if response else None)
+                candidate_raw = (
+                    (response.raw_content if response is not None else None)
+                    or getattr(error, 'raw_content', None)
+                )
+                existing_turns_bytes = sum(
+                    len((a or '').encode('utf-8')) + len(instr.encode('utf-8'))
+                    for a, instr in request.repair_turns
+                )
+                base_bytes = (
+                    len(request.instructions.encode('utf-8'))
+                    + len(request.input_text.encode('utf-8'))
+                    + existing_turns_bytes
+                )
+                raw_bytes = len((candidate_raw or '').encode('utf-8'))
+                omit_assistant = bool(candidate_raw) and (
+                    raw_bytes > _MAX_REPAIR_ASSISTANT_BYTES
+                    or base_bytes + raw_bytes > _MAX_REPAIR_TOTAL_BYTES
+                )
+                pass_raw_content = (
+                    None
+                    if (omit_assistant and not isinstance(error, LLMResponseFormatError))
+                    else (response.raw_content if response else None)
+                )
+                decision = self._retry_policy.decide(
+                    worded,
+                    attempts=attempts,
+                    raw_content=pass_raw_content,
+                )
+                if omit_assistant and decision.assistant_response is not None:
+                    decision = replace(decision, assistant_response=None)
                 if not decision.should_retry:
                     raise
                 if decision.backoff_seconds > 0:
@@ -1395,6 +1605,14 @@ class AnalyzeChapter:
             document=document, section=section, accumulated_candidates=accumulated,
             user_decisions=user_decisions, nonbinding_suggestions=nonbinding_suggestions,
         )
+        logger.info(
+            "Chapter analysis note limit: book_id=%s section_id=%s "
+            "base_language_notes_per_chapter=%d effective_language_notes_limit=%d",
+            command.book_id,
+            section.id,
+            self._context_builder._language_notes_per_chapter,
+            context.language_notes_per_chapter,
+        )
         context = replace(
             context,
             request=context.request.with_logging(
@@ -1450,6 +1668,15 @@ class AnalyzeChapter:
         attempts = 0
         usages: list[TokenUsage | None] = []
         queue: list[ChapterFragment] = list(fragments)
+        base_notes = self._context_builder._language_notes_per_chapter
+        logger.info(
+            "Chapter analysis note limit: book_id=%s section_id=%s "
+            "base_language_notes_per_chapter=%d effective_language_notes_limit=%d",
+            command.book_id,
+            section.id,
+            base_notes,
+            chapter_note_limit(section, base_notes),
+        )
         base_known_names = _a2_vocab_known_names_from_glossary(
             accumulated,
             user_decisions,
@@ -1822,13 +2049,14 @@ class AnalyzeChapter:
                         ) from error
                     raise
             except Exception as error:
+                worded = _worded_for_the_model(error, context)
                 if response is not None:
-                    record_rejection(self._unit_of_work, response, error)
+                    record_rejection(self._unit_of_work, response, worded)
                     reject_last = getattr(self._llm_client, 'reject_last', None)
                     if callable(reject_last):
                         reject_last()
                 decision = self._retry_policy.decide(
-                    _worded_for_the_model(error, context),
+                    worded,
                     attempts=attempts,
                     raw_content=response.raw_content if response is not None else None,
                 )
@@ -3129,8 +3357,10 @@ def _downgrade_spoiler_explicit_facts(
     aliases: Mapping[str, str],
     texts: Mapping[str, str],
     ordered_block_ids: Sequence[str],
+    known_names: Iterable[str] = (),
 ) -> NarrativeAnalysisResponse | None:
     """Downgrade only explicit speaker/pronoun_referent facts whose name first appears later."""
+    known = tuple(name for name in known_names if isinstance(name, str) and name.strip())
     block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
     block_order = {bid: index for index, bid in enumerate(ordered_block_ids)}
     changed = False
@@ -3141,6 +3371,12 @@ def _downgrade_spoiler_explicit_facts(
             and fact.kind in {"speaker", "pronoun_referent"}
             and fact.value
         ):
+            if any(
+                _same_spoiler_name(fact.value, kn, narrative.glossary_candidates)
+                for kn in known
+            ):
+                updated_facts.append(fact)
+                continue
             resolved_block_id = aliases.get(
                 fact.subject_anchor.block_id, fact.subject_anchor.block_id
             )

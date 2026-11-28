@@ -1803,14 +1803,15 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         assert "не имеет общих значимых основ с narrative_summary" in ch2_ped_req2.repair_instructions[-1]
         assert "не больше 26" in ch3_ped_req2.repair_instructions[-1]
 
-        # Ch. 2 narrative prompt receives Afterlights + Alexandra; Ch. 2 pedagogical receives Ch. 1 topics.
+        # Ch. 2 narrative prompt receives compactly backfilled Afterlights + Alexandra (WP2 omits verbose note/description
+        # on unmatched prior candidates); Ch. 2 pedagogical receives Ch. 1 topics.
         assert "Afterlights" in ch2_nar_req.input_text
         assert "Alexandra" in ch2_nar_req.input_text
-        assert "краткая форма Allie -> Элли" in ch2_nar_req.input_text
+        assert "Александра" in ch2_nar_req.input_text
         assert "Уже объяснено в предыдущих главах" in ch2_ped_req1.input_text
         assert "- silver mist" in ch2_ped_req1.input_text
 
-        # Ch. 3 narrative prompt receives backfilled Afterlights, Alexandra, and Lief/leaf etymology
+        # Ch. 3 narrative prompt receives compactly backfilled Afterlights, Alexandra, and Lief
         # with непрозрачное=false even though neither Afterlights nor Lief appears in Ch. 3 text.
         assert "Afterlights" in ch3_nar_req.input_text
         assert "Alexandra" in ch3_nar_req.input_text
@@ -1819,7 +1820,7 @@ async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_vali
         ]
         assert lief_lines
         assert any(
-            "leaf" in line and "непрозрачное=false" in line for line in lief_lines
+            "Лиф" in line and "непрозрачное=false" in line for line in lief_lines
         )
 
         # Ch. 3 pedagogical prompt receives deduplicated prior_chapter_topics from both Ch. 1 and Ch. 2.

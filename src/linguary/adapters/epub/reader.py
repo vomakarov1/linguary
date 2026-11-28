@@ -31,6 +31,7 @@ from lxml import etree  # ty: ignore[missing-module-member]
 from linguary.adapters.epub.inline import (
     InlineContent,
     InlineContentBuilder,
+    clean_dc_text,
     footnote_element_ids,
     is_footnote_element,
     local_name,
@@ -552,8 +553,8 @@ def _metadata(book: epub.EpubBook, *, source_path: str) -> BookMetadata:
         authors=tuple(value for value, _ in book.get_metadata("DC", "creator")),
         identifier=_first_metadata(book, "identifier"),
         publisher=_first_metadata(book, "publisher"),
-        rights=_first_metadata(book, "rights"),
-        description=_first_metadata(book, "description"),
+        rights=clean_dc_text(_first_metadata(book, "rights")),
+        description=clean_dc_text(_first_metadata(book, "description")),
     )
 
 

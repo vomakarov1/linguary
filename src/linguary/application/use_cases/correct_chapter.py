@@ -269,10 +269,14 @@ def _filtered_chapter_context(
                 ' '.join(window_texts),
             )
     if 'chapter_analysis' in context:
+        block_order: dict[str, int] = {
+            b.id: idx for idx, b in enumerate(ordered_blocks) if hasattr(b, 'id')
+        }
         context['chapter_analysis'] = _llm_chapter_analysis(
             context['chapter_analysis'],
             aliases,
             allowed_block_ids=window_block_ids,
+            block_order=block_order or None,
         )
     return context
 
@@ -300,35 +304,167 @@ def _request_input_json(
     )
 
 
+DEFAULT_CORRECTION_MAX_REQUEST_BYTES = 72_000
+_CORRECTION_FIXED_OVERHEAD_BYTES = 22_000  # instructions + JSON schema + filtered glossary + compact scenes
+
+
+def _serialized_utf8_bytes(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return len(_json(thaw(value)).encode('utf-8'))
+    except TypeError:
+        if hasattr(value, '__dataclass_fields__'):
+            return len(_json(asdict(value)).encode('utf-8'))
+        return len(str(value).encode('utf-8'))
+
+
+def _per_block_analysis_bytes(inputs: Any) -> dict[str, int]:
+    context = getattr(inputs, 'context', None)
+    analysis = context.get('chapter_analysis') if isinstance(context, Mapping) else None
+    if not isinstance(analysis, Mapping):
+        return {}
+    alias_to_id = getattr(inputs, 'alias_to_block_id', None) or {}
+    per_block: dict[str, int] = {}
+    tp = analysis.get('treatment_plan')
+    if isinstance(tp, Mapping) and isinstance(tp.get('items'), (list, tuple)):
+        for item in tp['items']:
+            if isinstance(item, Mapping) and isinstance(item.get('block_id'), str):
+                bid = alias_to_id.get(item['block_id'], item['block_id'])
+                per_block[bid] = per_block.get(bid, 0) + _serialized_utf8_bytes(item)
+    cp = analysis.get('content_plan')
+    if isinstance(cp, Mapping):
+        if isinstance(cp.get('difficulties'), (list, tuple)):
+            for diff in cp['difficulties']:
+                if isinstance(diff, Mapping) and isinstance(diff.get('owner_block_id'), str):
+                    bid = alias_to_id.get(diff['owner_block_id'], diff['owner_block_id'])
+                    per_block[bid] = per_block.get(bid, 0) + _serialized_utf8_bytes(diff)
+        if isinstance(cp.get('context_facts'), (list, tuple)):
+            for fact in cp['context_facts']:
+                if isinstance(fact, Mapping):
+                    subj = fact.get('subject_anchor')
+                    if isinstance(subj, Mapping) and isinstance(subj.get('block_id'), str):
+                        bid = alias_to_id.get(subj['block_id'], subj['block_id'])
+                        per_block[bid] = per_block.get(bid, 0) + _serialized_utf8_bytes(fact)
+    return per_block
+
+
+def _estimate_propose_result_bytes(
+    result: Any,
+    aliases: Mapping[str, str],
+    difficulty_aliases: Mapping[str, str],
+) -> int:
+    if result is None:
+        return 0
+    raw = asdict(result) if hasattr(result, '__dataclass_fields__') else result
+    if isinstance(raw, Mapping):
+        return _serialized_utf8_bytes(
+            _llm_block_result(raw, aliases, difficulty_aliases=difficulty_aliases)
+        )
+    return _serialized_utf8_bytes(raw)
+
+
+def _estimate_candidate_review_bytes(
+    candidate: Any,
+    aliases: Mapping[str, str],
+    difficulty_aliases: Mapping[str, str],
+) -> int:
+    payload = getattr(candidate, 'payload', None)
+    if not isinstance(payload, Mapping):
+        return 0
+    cur_raw = payload.get('current_result')
+    prop_raw = payload.get('result')
+    cur_llm = (
+        _llm_block_result(thaw(cur_raw), aliases, difficulty_aliases=difficulty_aliases)
+        if isinstance(cur_raw, Mapping)
+        else cur_raw
+    )
+    prop_llm = (
+        _llm_block_result(thaw(prop_raw), aliases, difficulty_aliases=difficulty_aliases)
+        if isinstance(prop_raw, Mapping)
+        else prop_raw
+    )
+    changes = (
+        _candidate_changes(cur_llm, prop_llm)
+        if isinstance(cur_llm, Mapping) and isinstance(prop_llm, Mapping)
+        else ()
+    )
+    proposal = payload.get('proposal')
+    issues = proposal.get('issues') if isinstance(proposal, Mapping) else ()
+    return _serialized_utf8_bytes(
+        {
+            'current_result': cur_llm,
+            'proposed_result': prop_llm,
+            'changes': changes,
+            'issues': issues,
+        }
+    )
+
+
 def _chunk_correction_blocks(
     block_ids: Sequence[str],
     inputs: Any,
     max_chars: int | None,
+    *,
+    max_request_bytes: int | None = None,
+    candidates_by_block: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     ordered = tuple(block_ids)
     if not ordered:
         return ()
     blocks = getattr(inputs, 'blocks', None)
-    if not blocks or max_chars is None or max_chars <= 1:
+    char_limit = max_chars if (max_chars is not None and max_chars > 1) else None
+    byte_limit = max_request_bytes if (max_request_bytes is not None and max_request_bytes > 0) else None
+    if not blocks or (char_limit is None and byte_limit is None):
         return (ordered,)
-    lengths = {
-        block.id: len(block.text)
+    blocks_by_id = {
+        block.id: block
         for block in blocks
         if hasattr(block, 'id') and hasattr(block, 'text')
     }
-    if not lengths:
+    if not blocks_by_id:
         return (ordered,)
+
+    per_block_analysis = _per_block_analysis_bytes(inputs) if byte_limit is not None else {}
+    results = (getattr(inputs, 'results', None) or {}) if byte_limit is not None else {}
+    aliases = (getattr(inputs, 'block_aliases', None) or {}) if byte_limit is not None else {}
+    difficulty_aliases = _inputs_difficulty_aliases(inputs) if byte_limit is not None else {}
+
+    def _estimate_block_bytes(bid: str) -> int:
+        block = blocks_by_id.get(bid)
+        text_bytes = len(block.text.encode('utf-8')) if block is not None else 0
+        analysis_bytes = per_block_analysis.get(bid, 0)
+        if candidates_by_block is not None and bid in candidates_by_block:
+            cand_bytes = _estimate_candidate_review_bytes(
+                candidates_by_block[bid], aliases, difficulty_aliases
+            )
+            return text_bytes * 2 + cand_bytes + analysis_bytes + 384
+        res_bytes = _estimate_propose_result_bytes(
+            results.get(bid), aliases, difficulty_aliases
+        )
+        return text_bytes * 2 + res_bytes + analysis_bytes + 256
+
     chunks: list[list[str]] = []
     current: list[str] = []
     current_chars = 0
+    current_bytes = 0
     for block_id in ordered:
-        block_len = lengths.get(block_id, 0)
-        if current and current_chars + block_len > max_chars:
+        block = blocks_by_id.get(block_id)
+        block_len = len(block.text) if block is not None else 0
+        block_bytes = _estimate_block_bytes(block_id) if byte_limit is not None else 0
+        exceeds_chars = char_limit is not None and current_chars + block_len > char_limit
+        exceeds_bytes = (
+            byte_limit is not None
+            and _CORRECTION_FIXED_OVERHEAD_BYTES + current_bytes + block_bytes > byte_limit
+        )
+        if current and (exceeds_chars or exceeds_bytes):
             chunks.append(current)
             current = []
             current_chars = 0
+            current_bytes = 0
         current.append(block_id)
         current_chars += block_len
+        current_bytes += block_bytes
     if current:
         chunks.append(current)
     return tuple(tuple(chunk) for chunk in chunks)
@@ -458,11 +594,83 @@ def _llm_anchor(anchor: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[s
     return out
 
 
+def _compact_llm_scenes(
+    scenes: Sequence[Any],
+    aliases: Mapping[str, str],
+    *,
+    allowed_block_ids: set[str] | None,
+    allowed_with_aliases: set[str] | None,
+    block_order: Mapping[str, int] | None,
+) -> list[Any]:
+    allowed_positions = (
+        [block_order[bid] for bid in allowed_block_ids if bid in block_order]
+        if (allowed_block_ids is not None and block_order)
+        else []
+    )
+    win_min = min(allowed_positions) if allowed_positions else None
+    win_max = max(allowed_positions) if allowed_positions else None
+
+    compacted: list[Any] = []
+    for raw_scene in scenes:
+        if not isinstance(raw_scene, Mapping):
+            compacted.append(raw_scene)
+            continue
+        start_id = raw_scene.get('start_block_id')
+        end_id = raw_scene.get('end_block_id')
+        if allowed_block_ids is not None:
+            if win_min is not None and win_max is not None and block_order is not None:
+                start_pos = block_order.get(start_id) if isinstance(start_id, str) else None
+                end_pos = block_order.get(end_id) if isinstance(end_id, str) else None
+                if start_pos is not None and end_pos is not None:
+                    lo, hi = (start_pos, end_pos) if start_pos <= end_pos else (end_pos, start_pos)
+                    if hi < win_min or lo > win_max:
+                        continue
+                elif start_pos is not None:
+                    if not (win_min <= start_pos <= win_max):
+                        continue
+                elif end_pos is not None:
+                    if not (win_min <= end_pos <= win_max):
+                        continue
+                else:
+                    assert allowed_with_aliases is not None
+                    start_aliased = aliases.get(start_id, start_id) if isinstance(start_id, str) else start_id
+                    end_aliased = aliases.get(end_id, end_id) if isinstance(end_id, str) else end_id
+                    if (
+                        start_id not in allowed_with_aliases
+                        and end_id not in allowed_with_aliases
+                        and start_aliased not in allowed_with_aliases
+                        and end_aliased not in allowed_with_aliases
+                    ):
+                        continue
+            else:
+                assert allowed_with_aliases is not None
+                start_aliased = aliases.get(start_id, start_id) if isinstance(start_id, str) else start_id
+                end_aliased = aliases.get(end_id, end_id) if isinstance(end_id, str) else end_id
+                if (
+                    start_id not in allowed_with_aliases
+                    and end_id not in allowed_with_aliases
+                    and start_aliased not in allowed_with_aliases
+                    and end_aliased not in allowed_with_aliases
+                ):
+                    continue
+        compacted.append(
+            {
+                'start_block_id': aliases.get(start_id, start_id) if isinstance(start_id, str) else start_id,
+                'end_block_id': aliases.get(end_id, end_id) if isinstance(end_id, str) else end_id,
+                'summary': raw_scene.get('summary', ''),
+                'location': raw_scene.get('location', ''),
+                'participants': list(raw_scene.get('participants', ())),
+            }
+        )
+    return compacted
+
+
 def _llm_chapter_analysis(
     analysis: Mapping[str, Any] | None,
     aliases: Mapping[str, str],
     *,
     allowed_block_ids: set[str] | None = None,
+    block_order: Mapping[str, int] | None = None,
 ) -> dict[str, Any] | None:
     if analysis is None:
         return None
@@ -571,7 +779,33 @@ def _llm_chapter_analysis(
                 else:
                     facts.append(f)
             cp['context_facts'] = facts
+        if isinstance(cp.get('scenes'), (list, tuple)):
+            compact_scenes = _compact_llm_scenes(
+                cp['scenes'],
+                aliases,
+                allowed_block_ids=allowed_block_ids,
+                allowed_with_aliases=allowed,
+                block_order=block_order,
+            )
+            if compact_scenes:
+                cp['scenes'] = compact_scenes
+            else:
+                cp.pop('scenes', None)
         out['content_plan'] = cp
+        # ChapterAnalysis.scenes mirrors content_plan.scenes; avoid sending a raw/duplicate copy.
+        out.pop('scenes', None)
+    elif isinstance(out.get('scenes'), (list, tuple)):
+        compact_scenes = _compact_llm_scenes(
+            out['scenes'],
+            aliases,
+            allowed_block_ids=allowed_block_ids,
+            allowed_with_aliases=allowed,
+            block_order=block_order,
+        )
+        if compact_scenes:
+            out['scenes'] = compact_scenes
+        else:
+            out.pop('scenes', None)
     return out
 
 
@@ -1481,15 +1715,38 @@ class CorrectChapterV2(CorrectChapter):
                 missing = model_correction_blocks(tx, inputs)
             max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
             if pending:
-                group_id = pending[0].group_id
-                group_pending = tuple(c for c in pending if c.group_id == group_id)
-                by_block = {c.block_id: c.candidate_id for c in group_pending}
-                for chunk in _chunk_correction_blocks(tuple(by_block), inputs, max_chars):
+                block_order = {
+                    b.id: idx
+                    for idx, b in enumerate(getattr(inputs, 'blocks', ()))
+                    if hasattr(b, 'id')
+                }
+                ordered_pending = sorted(
+                    pending,
+                    key=lambda c: block_order.get(c.block_id, len(block_order)),
+                )
+                by_block: dict[str, str] = {}
+                candidates_by_block: dict[str, Any] = {}
+                for cand in ordered_pending:
+                    if cand.block_id not in by_block:
+                        by_block[cand.block_id] = cand.candidate_id
+                        candidates_by_block[cand.block_id] = cand
+                for chunk in _chunk_correction_blocks(
+                    tuple(by_block),
+                    inputs,
+                    max_chars,
+                    max_request_bytes=DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+                    candidates_by_block=candidates_by_block,
+                ):
                     checked += await self._review_group(
                         command, tuple(by_block[b] for b in chunk)
                     )
             elif missing:
-                for chunk in _chunk_correction_blocks(missing, inputs, max_chars):
+                for chunk in _chunk_correction_blocks(
+                    missing,
+                    inputs,
+                    max_chars,
+                    max_request_bytes=DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+                ):
                     checked += await self._propose_group(command, chunk)
             else:
                 return CorrectChapterResult(command.section_id, inputs.run.id, checked)
@@ -1760,7 +2017,13 @@ class CorrectChapterV2(CorrectChapter):
                     raise RecoveryError('interrupted')
                 max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
                 by_block = {c.block_id: c.candidate_id for c in candidates}
-                chunks = _chunk_correction_blocks(tuple(by_block), inputs, max_chars)
+                chunks = _chunk_correction_blocks(
+                    tuple(by_block),
+                    inputs,
+                    max_chars,
+                    max_request_bytes=DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+                    candidates_by_block={c.block_id: c for c in candidates},
+                )
                 if len(chunks) <= 1:
                     refs = tuple((c.candidate_id, c.proposal_sha256) for c in candidates)
                     base_request = self._review_request(inputs, task, candidates)
@@ -1840,8 +2103,21 @@ class CorrectChapterV2(CorrectChapter):
                             fingerprint=correction_input_fingerprint(after, candidate.block_id))
                     checks = [CorrectionCheck(current.run.id, c.block_id, command.section_id,
                         after.checksums[c.block_id], c.proposal_attempt_id, 'confirmed', c.candidate_id) for c in accepted]
-                    for group_id in {c.group_id for c in live}:
-                        group = tx.work.get_binding('correction_group', group_id)['payload_json']
+                    reviewed_ids = {c.candidate_id for c in live}
+                    for group_id in sorted({c.group_id for c in live}):
+                        group_binding = tx.work.get_binding('correction_group', group_id)
+                        if group_binding is None:
+                            continue
+                        group = group_binding['payload_json']
+                        has_remaining_awaiting_review = any(
+                            cid not in reviewed_ids
+                            and (member := tx.work.get_correction_candidate(cid)) is not None
+                            and member.state == 'awaiting_review'
+                            and candidate_is_current(tx, after, member)
+                            for cid in group.get('candidate_ids', ())
+                        )
+                        if has_remaining_awaiting_review:
+                            continue
                         for block_id in group['unchanged_block_ids']:
                             if (after.checksums[block_id] != group['manifest']['checksums'][block_id]
                                     or after.bindings[block_id] != group['manifest']['bindings'][block_id]):

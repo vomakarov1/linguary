@@ -345,7 +345,7 @@ agreement aid aim air airline airport alarm album alphabet amount anger angle
 animal ankle answer apartment apology app apple appointment area argument arm
 armchair army arrival art article artist assistant athlete atmosphere attack
 attention attitude audience aunt author autumn avenue award
-baby back background backpack bag baggage bakery balance balcony ball balloon
+baby back background backpack bacon bag baggage bakery balance balcony ball balloon
 banana band bank bar base baseball basket basketball bat bath bathroom battery
 beach bean bear beard beauty bed bedroom bee beef beer beginning bell belt bench
 bicycle bike bill bin biology bird birth biscuit bit bite blanket block blog
@@ -367,7 +367,7 @@ contract control conversation cook cookie cooking copy corner cost cottage
 cotton cough counter country countryside couple course court cousin cover cow
 cream credit crew crime crowd crown cry culture cup cupboard curtain cushion
 customer cut cycle
-dad daddy damage dance dancer danger dark data date daughter day deal death
+dad daddy damage dance dancer danger dark darkness data date daughter day deal death
 decision degree delay delivery dentist department description desert design
 designer desk dessert detail development device dialogue diary
 dictionary diet difference difficulty dinner direction director dirt discount
@@ -556,7 +556,7 @@ tall tasty technical teen terrible thick thin thirsty tidy tight tiny tired tiri
 top total true
 ugly uncomfortable underground unhappy uniform united unknown unpleasant unusual
 upset upstairs useful useless usual
-various vegetarian very warm weak weekly welcome well western wet white whole wide
+various vegetarian very violet warm weak weekly welcome well western wet white whole wide
 wild windy wise wonderful wooden woollen woolen working worried worse worst worth
 wrong
 yellow young
@@ -566,7 +566,7 @@ yellow young
 # `likely`, `unlikely`, `mostly`, `roughly` are intentionally excluded; regular
 # `-ly` adverbs derived from `_ADJECTIVES` are matched via `_matches_ly`).
 _ADVERBS: frozenset[str] = _words("""
-abroad again ago ahead almost alone already also always anymore anyway anywhere
+abroad again ago ahead almost alone already also always angrily anymore anyway anywhere
 apart around aside away
 back backward backwards before behind below beside besides best better between
 downstairs early else elsewhere enough especially even ever everywhere
@@ -713,9 +713,9 @@ day week month year hour minute time summer winter spring autumn
 
 _A1_VERBS: frozenset[str] = _words("""
 answer arrive ask be begin believe bring build buy
-call carry change check choose clean close come cook copy cost cry cut
+call carry celebrate change check choose clean close come cook copy cost cry cut
 dance decide die do draw drink drive
-eat end enjoy explain
+eat end enjoy enter explain
 fall feel film find finish fly follow forget
 get give go grow
 happen hate have hear help hold hope
@@ -736,11 +736,11 @@ wait wake walk want wash watch wear win wish work write
 
 _A1_NOUNS: frozenset[str] = _words("""
 air airport animal apple arm
-baby back bag ball bathroom beach bed bedroom beer bicycle bike bird birthday boat book
+baby back bacon bag ball bathroom beach bed bedroom beer bicycle bike bird birthday boat book
 bookshop bookstore box boy bread breakfast brother bus butter
 cake car cat chair cheese chicken child church city classroom clothes cloud coat
 color colour country cow cup
-dad daddy daughter desk dinner dog door dress drink duck
+dad daddy darkness daughter desk dinner dog door dress drink duck
 ear earth egg eye
 face family farm father fire fish floor flower food foot forest friend fruit
 game garden girl glass glasses grandfather grandmother grass
@@ -749,7 +749,7 @@ ice island
 jacket job
 key kitchen knife
 lake lamp leg letter life light lunch
-map market meat milk money moon mother mountain mouth mum mummy man mouse
+map market meat milk mistake money moon mother mountain mouth mum mummy man mouse
 name newspaper nose number
 office oil
 page paper parent party pen pencil person pet picture pig plant plate price
@@ -778,15 +778,15 @@ large last late lazy light little long loud low lucky
 main married modern
 new nice noisy normal
 old open orange
-pink poor popular possible pretty purple
+perfect pink poor popular possible pretty purple
 quick quiet
 ready real red rich right
 sad safe same short sick simple slow small smart soft sorry special strong sweet
 tall terrible thick thin thirsty tired true
-ugly useful
-warm weak wet white whole wide wild wrong
+ugly unusual useful
+violet warm weak wet white whole wide wild wrong
 yellow young
-again ago almost already also always away
+again ago almost already also always angrily away
 down enough even ever far here just later much
 nearly now often only perhaps probably quite really
 sometimes soon still then there together too usually very well yet
@@ -957,6 +957,19 @@ _A1_ARTICLE_NOUN_ROOTS: frozenset[str] = (
     - _A1_FUNCTION_AND_TIME
     - _A1_ADJECTIVES_AND_ADVERBS
     - _ARTICLE_HOMOGRAPH_EXCLUSIONS
+)
+_A1_COMPOUND_ADVERBS: frozenset[str] = _words("""
+again ago almost already also always angrily away
+down enough even ever far here just later much
+nearly now often only perhaps probably quite really
+sometimes soon still then there together too usually very well yet
+""")
+_A1_COMPOUND_MODIFIER_ROOTS: frozenset[str] = (
+    (_A1_NOUNS | _A1_INTERNATIONALISMS | _A1_ADJECTIVES_AND_ADVERBS)
+    - _NON_CORE_OVERRIDE
+    - _A1_VERBS
+    - _A1_FUNCTION_AND_TIME
+    - _A1_COMPOUND_ADVERBS
 )
 
 
@@ -1148,8 +1161,28 @@ def is_trivial_a1_hint(original: str) -> bool:
         if len(parts) == 2 and parts[0] in _LEADING_ARTICLES:
             cleaned = parts[1].lstrip()
             has_article_prefix = True
-    if not cleaned or any(ch.isspace() for ch in cleaned):
+    if not cleaned:
         return False
+    if any(ch.isspace() for ch in cleaned):
+        if has_to_prefix:
+            return False
+        words = cleaned.split()
+        if len(words) != 2:
+            return False
+        first, second = words
+        if not (first.isascii() and first.isalpha() and second.isascii() and second.isalpha()):
+            return False
+        if (
+            first in _NON_CORE_OVERRIDE
+            or first in _SUFFIX_FALSE_POSITIVES
+            or second in _NON_CORE_OVERRIDE
+            or second in _SUFFIX_FALSE_POSITIVES
+        ):
+            return False
+        return first in _A1_COMPOUND_MODIFIER_ROOTS and (
+            second in _A1_ARTICLE_NOUN_ROOTS
+            or _matches_plural_or_3sg(second, _A1_ARTICLE_NOUN_ROOTS)
+        )
     if not cleaned.isascii() or not cleaned.isalpha():
         return False
     if cleaned in _NON_CORE_OVERRIDE or cleaned in _SUFFIX_FALSE_POSITIVES:

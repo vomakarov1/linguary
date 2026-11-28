@@ -799,3 +799,172 @@ def test_review_computes_mention_and_chapter_counts_unconditionally() -> None:
     assert without_counter.items[0].mention_count == 0
     assert without_counter.items[0].chapter_count == 2
 
+
+@pytest.mark.parametrize(
+    "concept_type",
+    [
+        pytest.param(ConceptType.PERSON, id="person"),
+        pytest.param(ConceptType.PLACE, id="place"),
+        pytest.param(ConceptType.ORGANIZATION, id="organization"),
+        pytest.param(ConceptType.FICTIONAL_CONCEPT, id="fictional-concept"),
+    ],
+)
+def test_exempt_key_entities_auto_promoted_to_mandatory_without_note(
+    concept_type: ConceptType,
+) -> None:
+    """WP4: exempt_type_review key entities enter mandatory_entries as APPROVED with empty note."""
+    from linguary.application.analysis_merge import (
+        glossary_context_constraints,
+        validate_fact_glossary,
+    )
+    from linguary.domain.content_plan import ContentPlan, ContextFact, SourceAnchor
+
+    candidate = replace(
+        observed_candidate(translation="Дурсль"),
+        source_text="Dursley",
+        type=concept_type,
+        note="мужской род",
+    )
+    book = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(candidate),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 2,
+        min_mentions=5,
+        min_chapters=3,
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    (item,) = book.items
+    assert item.exempt_type_review is True
+    assert item.requires_review is False
+    assert item not in book.awaiting_decision
+    assert item.is_auto_mandatory is True
+
+    snapshot = glossary_snapshot(book, language=TARGET_LANGUAGE)
+    (entry,) = snapshot.entries
+    assert entry.status is TermStatus.APPROVED
+    assert entry.translation == "Дурсль"
+    assert entry.note == ""
+    assert snapshot.mandatory_entries == (entry,)
+
+    # Empty note prevents validate_fact_glossary deadlocks on unreviewed model gender notes.
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(),
+        context_facts=(
+            ContextFact(
+                id="f1",
+                kind="gender",
+                anchors=(SourceAnchor(block_id="b1", start=0, end=7, quote="Dursley"),),
+                subject_anchor=SourceAnchor(block_id="b1", start=0, end=7, quote="Dursley"),
+                value="female",
+                certainty="explicit",
+            ),
+        ),
+    )
+    validate_fact_glossary(plan, glossary_context_constraints(snapshot.mandatory_entries))
+
+    # promote_exempt=False preserves legacy SUGGESTED behavior.
+    non_promoted = glossary_snapshot(book, language=TARGET_LANGUAGE, promote_exempt=False)
+    assert non_promoted.entries[0].status is TermStatus.SUGGESTED
+    assert non_promoted.mandatory_entries == ()
+
+
+def test_is_auto_mandatory_edge_cases_stay_suggested() -> None:
+    """WP4: mention_count==0 with is_frequent=False, blank translation, TERM, and SKIP stay SUGGESTED."""
+    # 1. mention_count == 0 and is_frequent == False (single chapter) -> stays SUGGESTED
+    zero_mentions = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(observed_candidate(translation="Элис")),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 0,
+        min_mentions=5,
+        min_chapters=3,
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    assert zero_mentions.items[0].exempt_type_review is True
+    assert zero_mentions.items[0].is_frequent is False
+    assert zero_mentions.items[0].is_auto_mandatory is False
+    assert glossary_snapshot(zero_mentions, language=TARGET_LANGUAGE).entries[0].status is TermStatus.SUGGESTED
+
+    # 2. mention_count == 1 and chapter_count == 1 with is_frequent == False -> stays SUGGESTED
+    single_mention = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(observed_candidate(translation="Элис")),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_mentions=5,
+        min_chapters=3,
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    assert single_mention.items[0].is_auto_mandatory is False
+    assert glossary_snapshot(single_mention, language=TARGET_LANGUAGE).entries[0].status is TermStatus.SUGGESTED
+
+    # 3. chapter_count >= 2 even with mention_count == 1 -> auto-mandatory
+    two_chapters = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(
+            chapter_one(observed_candidate(analysis_id="analysis-1", translation="Элис")),
+            chapter_two(observed_candidate(analysis_id="analysis-2", translation="Элис")),
+        ),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_mentions=5,
+        min_chapters=3,
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    assert two_chapters.items[0].is_auto_mandatory is True
+    assert glossary_snapshot(two_chapters, language=TARGET_LANGUAGE).entries[0].status is TermStatus.APPROVED
+
+    # 4. Empty/whitespace suggested_translation -> stays SUGGESTED
+    from linguary.application.glossary_review import GlossaryReviewItem
+
+    blank_item = GlossaryReviewItem(
+        concept_id="c-blank",
+        source_text="Alice",
+        type=ConceptType.PERSON,
+        suggested_translation="   ",
+        confidence=0.95,
+        model_flagged_review=False,
+        has_translation_conflict=False,
+        requires_review=False,
+        is_frequent=True,
+        mention_count=10,
+        chapter_count=3,
+        exempt_type_review=True,
+    )
+    assert blank_item.is_auto_mandatory is False
+
+    # 5. ConceptType.TERM -> never auto-mandatory even when exempt_type_review=True
+    term_cand = replace(observed_candidate(translation="паприкаш"), type=ConceptType.TERM)
+    term_book = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(term_cand),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 10,
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    assert term_book.items[0].is_auto_mandatory is False
+    assert glossary_snapshot(term_book, language=TARGET_LANGUAGE).entries[0].status is TermStatus.SUGGESTED
+
+    # 6. Explicit user SKIP (TermConcept with status=SUGGESTED) -> respected, stays SUGGESTED
+    skipped_book = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(observed_candidate(translation="Элис")),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 10,
+        decisions=(decision("Alice", text="Элис", status=TermStatus.SUGGESTED),),
+        name_translation_policy=POLICY,
+        conditions_id="conditions-1",
+    )
+    assert skipped_book.items[0].exempt_type_review is True
+    assert skipped_book.items[0].is_auto_mandatory is False
+    assert glossary_snapshot(skipped_book, language=TARGET_LANGUAGE).entries[0].status is TermStatus.SUGGESTED
+    assert glossary_snapshot(skipped_book, language=TARGET_LANGUAGE).mandatory_entries == ()
+
