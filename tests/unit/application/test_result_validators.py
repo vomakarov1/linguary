@@ -3800,6 +3800,9 @@ def test_post_speech_narrative_paragraph_allows_1_line_and_3_line_and_rejects_ab
     assert _count_post_speech_narrative_sentences("‘Yes.’ ‘No.’") == 0
     assert _count_post_speech_narrative_sentences('‘He said, “Wait.” Next.’') == 0
     assert _count_post_speech_narrative_sentences('"Hello," he said. "How are you?"') == 0
+    assert _count_post_speech_narrative_sentences("‘Hello,’ said Mr. Ollivander. ‘Wait.’") == 0
+    assert _count_post_speech_narrative_sentences("‘Hello,’ he said. Then he ran.") == 1
+    assert _count_post_speech_narrative_sentences("‘Hello!’ he cried. Then he ran.") == 1
 
     one_line = (
         "— Что ж, мистер Поттер. Посмотрим. "
@@ -3832,7 +3835,13 @@ def test_post_speech_narrative_paragraph_allows_1_line_and_3_line_and_rejects_ab
     unit = make_unit((block,))
     assert paragraph_violation("b1", source_text=ollivander_source, translated_text=one_line) is None
     assert paragraph_violation("b1", source_text=ollivander_source, translated_text=three_line) is None
-    assert validate(make_response((make_block_result(block, translated_text=one_line),)), unit=unit, validation_policy="v3")[0].translated_text == one_line
+    assert paragraph_violation(
+        "b1",
+        source_text="‘Hello,’ he said. Then he ran.",
+        translated_text="— Привет, — сказал он.\nПотом он убежал.",
+    ) is None
+    with pytest.raises(ResultValidationError, match="самостоятельное авторское предложение"):
+        validate(make_response((make_block_result(block, translated_text=one_line),)), unit=unit, validation_policy="v3")
     assert validate(make_response((make_block_result(block, translated_text=three_line),)), unit=unit, validation_policy="v3")[0].translated_text == three_line
 
     assert paragraph_violation("b1", source_text=ollivander_source, translated_text=absorbed_neighbor) is not None
