@@ -402,6 +402,7 @@ def test_v5_schema_omits_constant_fields_while_v1_schema_unchanged() -> None:
             "subject_anchor",
             "value",
             "certainty",
+            "joint",
         }
 
     v3_schema = strict_json_schema(
@@ -625,3 +626,98 @@ def test_difficulty_kind_schema_lists_vocabulary_first() -> None:
         "wordplay",
         "parody",
     }
+
+
+def test_quoted_context_fact_joint_schema_validation_and_payload() -> None:
+    import json
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.adapters.llm.schemas import NarrativeAnalysisSchema, QuotedContextFactSchema
+    from linguary.application.ports.llm import LLMResponseKind
+
+    schema = strict_json_schema(NarrativeAnalysisSchema)
+    cf_def = schema["$defs"]["QuotedContextFactSchema"]
+    assert "joint" in cf_def["properties"]
+    assert "joint" in cf_def["required"]
+
+    valid_joint = QuotedContextFactSchema.model_validate(
+        {
+            "kind": "speaker",
+            "anchors": [{"block_id": "b1", "quote": "they said together."}],
+            "subject_anchor": {"block_id": "b1", "quote": "‘Hermione!’"},
+            "value": "Harry Potter",
+            "certainty": "inferred",
+            "joint": True,
+        }
+    )
+    assert valid_joint.joint is True
+
+    default_joint = QuotedContextFactSchema.model_validate(
+        {
+            "kind": "speaker",
+            "anchors": [{"block_id": "b1", "quote": "said Harry."}],
+            "subject_anchor": {"block_id": "b1", "quote": "‘Hi,’"},
+            "value": "Harry Potter",
+            "certainty": "explicit",
+        }
+    )
+    assert default_joint.joint is False
+
+    for bad_payload in (
+        {
+            "kind": "gender",
+            "anchors": [{"block_id": "b1", "quote": "he"}],
+            "subject_anchor": {"block_id": "b1", "quote": "he"},
+            "value": "male",
+            "certainty": "explicit",
+            "joint": True,
+        },
+        {
+            "kind": "pronoun_referent",
+            "anchors": [{"block_id": "b1", "quote": "he"}],
+            "subject_anchor": {"block_id": "b1", "quote": "he"},
+            "value": "Harry",
+            "certainty": "inferred",
+            "joint": True,
+        },
+        {
+            "kind": "speaker",
+            "anchors": [{"block_id": "b1", "quote": "they said"}],
+            "subject_anchor": {"block_id": "b1", "quote": "‘Hi,’"},
+            "value": None,
+            "certainty": "unknown",
+            "joint": True,
+        },
+        {
+            "kind": "speaker",
+            "anchors": [{"block_id": "b1", "quote": "they said"}],
+            "subject_anchor": {"block_id": "b1", "quote": "‘Hi,’"},
+            "value": "Harry",
+            "certainty": "inferred",
+            "joint": 1,
+        },
+    ):
+        with pytest.raises(ValidationError):
+            QuotedContextFactSchema.model_validate(bad_payload)
+
+    narrative_json = json.dumps(
+        {
+            "translation_instructions": "Keep tone.",
+            "chapter_summary": "Summary.",
+            "glossary_candidates": [],
+            "context_facts": [
+                {
+                    "kind": "speaker",
+                    "anchors": [{"block_id": "b1", "quote": "they said together."}],
+                    "subject_anchor": {"block_id": "b1", "quote": "‘Hermione!’"},
+                    "value": "Harry Potter",
+                    "certainty": "inferred",
+                    "joint": True,
+                }
+            ],
+            "scenes": [],
+        }
+    )
+    parsed = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, narrative_json)
+    assert parsed.context_facts[0].joint is True
+

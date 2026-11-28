@@ -434,6 +434,7 @@ class QuotedContextFactResponse:
     subject_anchor: QuotedSourceAnchorResponse
     value: str | None = None
     certainty: str = 'unknown'
+    joint: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'anchors', tuple(self.anchors))

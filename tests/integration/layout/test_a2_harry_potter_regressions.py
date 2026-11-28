@@ -1497,15 +1497,16 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     )
     names = _archive_names(target)
     assert "OEBPS/cover.xhtml" in names
-    assert "OEBPS/title.xhtml" not in names
+    assert "OEBPS/title.xhtml" in names
     assert "OEBPS/hp01_experience_en-gb.html" not in names
     spine = _spine_hrefs(target)
     navigation = _nav_hrefs(target)
     assert "cover.xhtml" in spine
     assert "cover.xhtml" in navigation
-    for dropped in ("title.xhtml", "hp01_experience_en-gb.html"):
-        assert dropped not in spine
-        assert dropped not in navigation
+    assert "title.xhtml" in spine
+    assert "title.xhtml" in navigation
+    assert "hp01_experience_en-gb.html" not in spine
+    assert "hp01_experience_en-gb.html" not in navigation
 
     pages = _read_pages(target)
     _assert_who_page_absent(target, pages)

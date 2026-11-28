@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from epub_builder import build_epub, xhtml_document
 from lxml import etree
-from export_pipeline import documents_of, elements, run_export, spine_hrefs
+from export_pipeline import documents_of, elements, package_of, run_export, spine_hrefs
 
 from linguary.adapters.epub import (
     EbookLibEpubReader,
@@ -766,14 +766,23 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     assert "Alice follows the White Rabbit" in ch2_text
 
 
-def test_learner_export_keeps_cover_and_drops_other_front_matter(tmp_path: Path) -> None:
-    """Learner export keeps the cover and leaves every other front-matter section out."""
+def test_learner_export_keeps_editorial_front_matter_and_drops_toc_and_promo(tmp_path: Path) -> None:
+    """Learner export keeps cover/title/dedication/copyright source-only and drops duplicate TOC and promos."""
     epub_path = build_epub(
         tmp_path / "cover-and-front.epub",
         documents={
             "cover.xhtml": xhtml_document("<h1>Cover</h1><p>The cloak.</p>", title="Cover"),
             "title.xhtml": xhtml_document("<h1>The Great Novel</h1>", title="Title Page"),
             "dedication.xhtml": xhtml_document("<p>For my friends.</p>", title="Dedication"),
+            "copyright.xhtml": xhtml_document(
+                "<p>Copyright 2026 Author. All rights reserved.</p>", title="Copyright"
+            ),
+            "contents.xhtml": xhtml_document(
+                "<h1>Contents</h1><p>Chapter One</p>", title="Contents"
+            ),
+            "also_by.xhtml": xhtml_document(
+                "<h1>Also by the Author</h1><p>Other books.</p>", title="Also by the Author"
+            ),
             "chapter1.xhtml": xhtml_document(
                 "<h1>Chapter One</h1><p>The tale starts on this page.</p>",
                 title="Chapter One",
@@ -783,6 +792,9 @@ def test_learner_export_keeps_cover_and_drops_other_front_matter(tmp_path: Path)
             ("cover.xhtml", "Cover"),
             ("title.xhtml", "Title Page"),
             ("dedication.xhtml", "Dedication"),
+            ("copyright.xhtml", "Copyright"),
+            ("contents.xhtml", "Contents"),
+            ("also_by.xhtml", "Also by the Author"),
             ("chapter1.xhtml", "Chapter One"),
         ],
         title="The Great Novel",
@@ -804,31 +816,121 @@ def test_learner_export_keeps_cover_and_drops_other_front_matter(tmp_path: Path)
     cover = section_at("cover.xhtml")
     title = section_at("title.xhtml")
     dedication = section_at("dedication.xhtml")
+    copyright_sec = section_at("copyright.xhtml")
+    contents = section_at("contents.xhtml")
+    also_by = section_at("also_by.xhtml")
     chapter = section_at("chapter1.xhtml")
     assert document.is_cover_section(cover) and document.is_front_matter(cover)
     assert document.is_front_matter(title) and not document.is_cover_section(title)
     assert document.is_front_matter(dedication) and not document.is_cover_section(dedication)
+    assert document.is_front_matter(copyright_sec) and not document.is_cover_section(copyright_sec)
+    assert document.is_front_matter(contents)
+    assert document.is_front_matter(also_by)
     assert not document.is_front_matter(chapter)
     paragraph = next(
         block for block in chapter.ordered_blocks if block.type is BlockType.PARAGRAPH
+    )
+    ded_block = next(
+        block for block in dedication.ordered_blocks if block.type is BlockType.PARAGRAPH
     )
     run = run_export(
         epub_path,
         tmp_path=tmp_path / "full",
         book_id="book-cover",
         block_results={
+            ded_block.id: BlockProcessingResult(
+                block_id=ded_block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Для моих друзей.",
+            ),
             paragraph.id: BlockProcessingResult(
                 block_id=paragraph.id,
                 treatment=BlockTreatment.TRANSLATE,
                 translated_text="Сказка начинается на этой странице.",
-            )
+            ),
         },
     )
 
     _expect_front_matter_file(run.path, "cover.xhtml", listed=True)
-    _expect_front_matter_file(run.path, "title.xhtml", listed=False)
-    _expect_front_matter_file(run.path, "dedication.xhtml", listed=False)
+    _expect_front_matter_file(run.path, "title.xhtml", listed=True)
+    _expect_front_matter_file(run.path, "dedication.xhtml", listed=True)
+    _expect_front_matter_file(run.path, "copyright.xhtml", listed=True)
+    _expect_front_matter_file(run.path, "contents.xhtml", listed=False)
+    _expect_front_matter_file(run.path, "also_by.xhtml", listed=False)
     _expect_front_matter_file(run.path, "chapter1.xhtml", listed=True)
+
+    # Editorial front matter stays source-only even when block_results contains a translation.
+    ded_doc = documents_of(run.path)["OEBPS/dedication.xhtml"]
+    assert "For my friends." in "".join(ded_doc.itertext())
+    assert "Для моих друзей." not in "".join(ded_doc.itertext())
+    assert not any(
+        "lg-tr" in (el.get("class") or "").split() for el in elements(ded_doc, "p")
+    )
+
+
+def test_wp7_end_to_end_cover_pagebreak_and_clean_dc_metadata(tmp_path: Path) -> None:
+    """WP7 e2e: cover-image property, clean .lg-cover, leading pagebreak id transfer, and verify_exported_epub."""
+    from linguary.adapters.epub.writer import verify_exported_epub
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    source = build_epub(
+        tmp_path / "wp7-source.epub",
+        documents={
+            "cover.xhtml": xhtml_document(
+                '<img src="cover.png" alt="Book Cover"/>', title="Cover"
+            ),
+            "chapter1.xhtml": xhtml_document(
+                '<p class="pagebreak" id="ch1-anchor">&#160;</p>'
+                "<h1>Chapter One</h1>"
+                "<p>Harry waited quietly.</p>",
+                title="Chapter One",
+            ),
+            "chapter2.xhtml": xhtml_document(
+                "<h1>Chapter Two</h1>"
+                '<p>Return to <a href="chapter1.xhtml#ch1-anchor">chapter one</a>.</p>',
+                title="Chapter Two",
+            ),
+        },
+        toc=[
+            ("cover.xhtml", "Cover"),
+            ("chapter1.xhtml", "Chapter One"),
+            ("chapter2.xhtml", "Chapter Two"),
+        ],
+        extra_files={"cover.png": png_bytes},
+        title="WP7 Book",
+    )
+
+    run = run_export(source, tmp_path=tmp_path / "out", book_id="book-wp7")
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+
+    pkg = package_of(run.path)
+    cover_items = [
+        item
+        for item in pkg.iter("{http://www.idpf.org/2007/opf}item")
+        if item.get("href") == "cover.png"
+    ]
+    assert len(cover_items) == 1
+    assert cover_items[0].get("properties") == "cover-image"
+
+    docs = documents_of(run.path)
+    cover_doc = docs["OEBPS/cover.xhtml"]
+    assert any("lg-cover" in (el.get("class") or "").split() for el in elements(cover_doc, "div"))
+    assert not any("lg-unit" in (el.get("class") or "").split() for el in elements(cover_doc, "div"))
+
+    ch1_doc = docs["OEBPS/chapter1.xhtml"]
+    ch1_sections = [
+        el
+        for el in elements(ch1_doc, "section")
+        if el.get("{http://www.idpf.org/2007/ops}type") == "chapter"
+    ]
+    assert len(ch1_sections) == 1
+    assert ch1_sections[0].get("id") == "ch1-anchor"
+    assert not any(
+        "pagebreak" in (el.get("class") or "").split() for el in elements(ch1_doc, "p")
+    )
+
+    ch2_doc = docs["OEBPS/chapter2.xhtml"]
+    assert any(a.get("href") == "chapter1.xhtml#ch1-anchor" for a in elements(ch2_doc, "a"))
 
 
 def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path) -> None:

@@ -131,6 +131,9 @@ def encode_pass(payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse
     for item in response.get("treatment_plan", ()):
         if not item.get("segments"):
             item.pop("segments", None)
+    for fact in response.get("context_facts", ()):
+        if not fact.get("joint"):
+            fact.pop("joint", None)
     _omit_absent_anchor_offsets(response)
     return {"schema_version": 1, "response": response}
 
@@ -227,6 +230,7 @@ def decode_pass(
                     f,
                     anchors=tuple(anchor(a) for a in f["anchors"]),
                     subject_anchor=anchor(f["subject_anchor"]),
+                    joint=bool(f.get("joint", False)),
                 )
             )
             for f in body["context_facts"]

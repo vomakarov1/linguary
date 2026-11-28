@@ -849,6 +849,7 @@ def _quoted_context_fact(schema: QuotedContextFactSchema, index: int) -> QuotedC
         subject_anchor=QuotedSourceAnchorResponse(**schema.subject_anchor.model_dump()),
         value=schema.value,
         certainty=schema.certainty,
+        joint=schema.joint,
     )
 
 

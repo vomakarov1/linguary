@@ -536,3 +536,81 @@ def test_web_and_cli_analyze_share_ensure_initial_for_analysis(
     assert notify_calls == 2
 
 
+def test_wp5_detail_preselects_pronunciation_for_a2_with_lazy_zip_detection_only_for_imported_html(
+    configured_client, configured_application, monkeypatch, tmp_path
+):
+    """WP5.1: detail.html preselects pronunciation for A2 with UK/US detection from OPF, strictly on IMPORTED HTML without touching quality_review."""
+    from epub_builder import build_epub, xhtml_document
+    from linguary.web.routes import books as books_route
+
+    uk_epub = build_epub(
+        tmp_path / "uk-book.epub",
+        language="en-GB",
+        documents={"chapter1.xhtml": xhtml_document("<h1>Ch 1</h1><p>Hello.</p>")},
+        toc=[("chapter1.xhtml", "Ch 1")],
+    )
+    scenario = store_book(
+        configured_application,
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+    )
+    with configured_application.unit_of_work.transaction() as tx:
+        book = tx.books.get(scenario.book_id)
+        tx.books.save(replace(book, source_epub_path=str(uk_epub)))
+
+    read_calls: list[str | None] = []
+    orig_read = books_route.read_source_language_tag
+
+    def spy_read(path: str | None) -> str | None:
+        read_calls.append(path)
+        return orig_read(path)
+
+    monkeypatch.setattr(books_route, "read_source_language_tag", spy_read)
+    monkeypatch.setattr(
+        type(configured_application.settings.reading),
+        "normalized_level",
+        property(lambda _self: "a2"),
+    )
+
+    # 1. JSON request does NOT read ZIP.
+    json_resp = configured_client.get(f"/books/{scenario.book_id}")
+    assert json_resp.status_code == 200
+    assert read_calls == []
+
+    # 2. HTML request on IMPORTED without saved conditions reads ZIP once and preselects pronunciation + uk.
+    html_resp = configured_client.get(
+        f"/books/{scenario.book_id}", headers={"Accept": "text/html"}
+    )
+    assert html_resp.status_code == 200
+    assert len(read_calls) == 1
+    tree = html.fromstring(html_resp.text)
+    analyze_form = tree.xpath(f'//form[@action="/books/{scenario.book_id}/analyze"]')[0]
+    toggle = analyze_form.xpath('.//input[@name="pronunciation_help_enabled"]')[0]
+    select = analyze_form.xpath('.//select[@data-pronunciation-variant]')[0]
+    assert toggle.get("checked") is not None
+    assert select.getparent().get("hidden") is None
+    assert select.get("name") == "pronunciation_variant"
+    assert select.get("required") is not None
+    assert select.get("data-recommended-variant") == "uk"
+    assert select.xpath('./option[@selected]')[0].get("value") == "uk"
+
+    # 3. Non-IMPORTED status (e.g. ANALYZING) does NOT read ZIP on HTML polling.
+    with configured_application.unit_of_work.transaction() as tx:
+        book = tx.books.get(scenario.book_id)
+        tx.books.save(replace(book, status=BookStatus.ANALYZING))
+    poll_resp = configured_client.get(
+        f"/books/{scenario.book_id}", headers={"Accept": "text/html"}
+    )
+    assert poll_resp.status_code == 200
+    assert len(read_calls) == 1
+
+    # 4. Programmatic default BookConditionsService.create(pronunciation_help_enabled=False) is preserved.
+    with configured_application.unit_of_work.transaction() as tx:
+        book = tx.books.get(scenario.book_id)
+        created = configured_application.book_conditions.create(
+            tx, book, configured_application.runtime_settings.revision, reader_level="a2"
+        )
+        assert created.pronunciation_help_enabled is False
+        assert created.pronunciation_variant is None
+
+

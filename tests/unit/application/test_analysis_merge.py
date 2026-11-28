@@ -2494,12 +2494,12 @@ def test_plan_item_from_response_wraps_all_segment_errors_as_local_violation() -
             "block-missing",
             None,
         ),
-        # 2. single-segment block
+        # 2. single-segment block with mismatched segment treatment
         (
             TreatmentPlanItemResponse(
                 "b1",
                 BlockTreatment.TRANSLATE,
-                (SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),),
+                (SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),),
             ),
             single_block.id,
             single_block,
@@ -5518,5 +5518,692 @@ def test_normalize_demotes_vacuous_mixed_glossary_segments_across_levels_and_pre
         BlockTreatment.TRANSLATE,
         BlockTreatment.GLOSSARY_ONLY,
     ]
+
+
+def test_context_fact_joint_domain_invariants_and_backward_compat_sha256() -> None:
+    """ContextFact.joint=True is restricted to known speakers; joint=False preserves legacy dict & SHA-256."""
+    from linguary.domain import DomainError
+    from linguary.domain.content_plan import ContentPlan, ContextFact, SourceAnchor, canonical_sha
+
+    anchor = SourceAnchor("b1", 0, 11, "‘Hermione!’")
+    single = ContextFact("f1", "speaker", (anchor,), anchor, "Harry Potter", "inferred")
+    assert single.joint is False
+    assert "joint" not in single.to_dict()
+    expected_single_dict = {
+        "id": "f1",
+        "kind": "speaker",
+        "anchors": ({"block_id": "b1", "start": 0, "end": 11, "quote": "‘Hermione!’"},),
+        "subject_anchor": {"block_id": "b1", "start": 0, "end": 11, "quote": "‘Hermione!’"},
+        "value": "Harry Potter",
+        "certainty": "inferred",
+    }
+    assert single.to_dict() == expected_single_dict
+    assert single.canonical_id == canonical_sha(
+        {"version": 3, **{k: v for k, v in expected_single_dict.items() if k != "id"}}
+    )
+
+    plan_single = ContentPlan(version=3, profile="content-plan-v3", context_facts=(single,))
+    expected_plan_sha = canonical_sha(
+        {
+            "version": 3,
+            "profile": "content-plan-v3",
+            "difficulties": [],
+            "before_you_read_evidence": [],
+            "context_facts": [expected_single_dict],
+        }
+    )
+    assert plan_single.sha256 == expected_plan_sha
+
+    joint_harry = ContextFact(
+        "f-harry", "speaker", (anchor,), anchor, "Harry Potter", "inferred", joint=True
+    )
+    joint_ron = ContextFact(
+        "f-ron", "speaker", (anchor,), anchor, "Ron Weasley", "inferred", joint=True
+    )
+    assert joint_harry.to_dict()["joint"] is True
+
+    # Invalid joint combinations are rejected by ContextFact.__post_init__.
+    for bad_kwargs in (
+        {"kind": "gender", "value": "male", "certainty": "explicit", "joint": True},
+        {"kind": "pronoun_referent", "value": "Harry", "certainty": "inferred", "joint": True},
+        {"kind": "speaker", "value": None, "certainty": "unknown", "joint": True},
+        {"kind": "speaker", "value": "Harry", "certainty": "inferred", "joint": 1},
+    ):
+        with pytest.raises(DomainError):
+            ContextFact("f-bad", anchors=(anchor,), subject_anchor=anchor, **bad_kwargs)  # type: ignore[arg-type]
+
+    # ContentPlan allows multiple joint=True speakers with distinct values on the same subject_anchor.
+    joint_plan = ContentPlan(
+        version=3, profile="content-plan-v3", context_facts=(joint_harry, joint_ron)
+    )
+    assert len(joint_plan.context_facts) == 2
+
+    # ContentPlan rejects non-joint conflict, mixed joint=True/False, and same value with differing certainty.
+    non_joint_ron = ContextFact("f-ron2", "speaker", (anchor,), anchor, "Ron Weasley", "inferred")
+    with pytest.raises(DomainError, match="конфликт атрибуций одного субъекта"):
+        ContentPlan(version=3, profile="content-plan-v3", context_facts=(single, non_joint_ron))
+    with pytest.raises(DomainError, match="конфликт атрибуций одного субъекта"):
+        ContentPlan(version=3, profile="content-plan-v3", context_facts=(joint_harry, non_joint_ron))
+    joint_harry_explicit = ContextFact(
+        "f-harry-exp", "speaker", (anchor,), anchor, "Harry Potter", "explicit", joint=True
+    )
+    with pytest.raises(DomainError, match="конфликт атрибуций одного субъекта"):
+        ContentPlan(
+            version=3, profile="content-plan-v3", context_facts=(joint_harry, joint_harry_explicit)
+        )
+
+
+def test_joint_speech_end_to_end_pipeline_hermione_and_twins() -> None:
+    """Full narrative -> merge -> combine -> content_plan pipeline accepts choral speech with joint=True or defensive normalization."""
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        content_plan_from_response,
+        merge_narrative_fragments,
+        validate_narrative_response,
+    )
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSceneResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+
+    b0 = make_analysis_block(section_id="sec-1", order=0, text="Harry Potter and Ron Weasley stared at Fred and George.")
+    b1 = make_analysis_block(section_id="sec-1", order=1, text="‘Hermione!’ they said together.")
+    b2 = make_analysis_block(section_id="sec-1", order=2, text="‘Harry Potter,’ chorused the twins.")
+    blocks = (b0, b1, b2)
+    aliases = {"b1": b0.id, "b2": b1.id, "b3": b2.id}
+    texts = {b.id: b.text for b in blocks}
+    visible = {"b1": b0.text, "b2": b1.text, "b3": b2.text}
+    id_aliases = {b.id: b.id for b in blocks}
+    id_visible = {b.id: b.text for b in blocks}
+
+    for pass_joint in (True, False):
+        narrative = NarrativeAnalysisResponse(
+            translation_instructions="Keep names consistent.",
+            chapter_summary="Harry, Ron, and the twins speak in unison.",
+            glossary_candidates=(
+                GlossaryCandidateResponse("Harry Potter", ConceptType.PERSON, "Гарри Поттер", 0.9, False),
+                GlossaryCandidateResponse("Ron Weasley", ConceptType.PERSON, "Рон Уизли", 0.9, False),
+                GlossaryCandidateResponse("Fred", ConceptType.PERSON, "Фред", 0.9, False),
+                GlossaryCandidateResponse("George", ConceptType.PERSON, "Джордж", 0.9, False),
+            ),
+            context_facts=(
+                QuotedContextFactResponse(
+                    "cf-1",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b2", "they said together."),),
+                    QuotedSourceAnchorResponse("b2", "‘Hermione!’"),
+                    "Harry Potter",
+                    "inferred",
+                    joint=pass_joint,
+                ),
+                QuotedContextFactResponse(
+                    "cf-2",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b2", "they said together."),),
+                    QuotedSourceAnchorResponse("b2", "‘Hermione!’"),
+                    "Ron Weasley",
+                    "inferred",
+                    joint=pass_joint,
+                ),
+                QuotedContextFactResponse(
+                    "cf-3",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b3", "chorused the twins."),),
+                    QuotedSourceAnchorResponse("b3", "‘Harry Potter,’"),
+                    "Fred",
+                    "inferred",
+                    joint=pass_joint,
+                ),
+                QuotedContextFactResponse(
+                    "cf-4",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b3", "chorused the twins."),),
+                    QuotedSourceAnchorResponse("b3", "‘Harry Potter,’"),
+                    "George",
+                    "explicit" if not pass_joint else "inferred",
+                    joint=pass_joint,
+                ),
+            ),
+            scenes=(
+                QuotedSceneResponse(
+                    "b1",
+                    "b3",
+                    "Гарри, Рон и близнецы говорят хором.",
+                    location="Коридор",
+                    participants=("Harry Potter", "Ron Weasley", "Fred", "George"),
+                ),
+            ),
+        )
+
+        scenes, facts = validate_narrative_response(
+            narrative,
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+            ordered_block_ids=tuple(b.id for b in blocks),
+            blocks=blocks,
+        )
+        assert len(facts) == 4
+        assert all(fact.joint is True for fact in facts)
+
+        merged_raw, merged_scenes, merged_facts = merge_narrative_fragments(
+            [(narrative, scenes, facts)], section_blocks=blocks
+        )
+        assert len(merged_facts) == 4
+        assert all(fact.joint is True for fact in merged_raw.context_facts)
+
+        pedagogical = PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(b0.id, BlockTreatment.TRANSLATE),
+                TreatmentPlanItemResponse(b1.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse(b2.id, BlockTreatment.GLOSSARY_ONLY),
+            ),
+        )
+        combined = combine_staged_analysis_responses(
+            merged_raw, pedagogical, resolved_scenes=merged_scenes, resolved_blocks=blocks
+        )
+        plan = content_plan_from_response(
+            combined,
+            id_aliases,
+            texts,
+            visible_texts_by_alias=id_visible,
+            blocks=blocks,
+        )
+        assert plan is not None
+        assert len(plan.context_facts) == 4
+        assert all(fact.joint is True for fact in plan.context_facts)
+        by_block = {
+            bid: {f.value for f in plan.context_facts if f.subject_anchor.block_id == bid}
+            for bid in (b1.id, b2.id)
+        }
+        assert by_block[b1.id] == {"Harry Potter", "Ron Weasley"}
+        assert by_block[b2.id] == {"Fred", "George"}
+
+
+def test_joint_speech_normalization_negative_cases_do_not_mask_conflicts() -> None:
+    """Words inside dialogue quotes or in neighboring sentences never trigger defensive joint normalization."""
+    from linguary.application.analysis_merge import validate_narrative_response
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSceneResponse,
+        QuotedSourceAnchorResponse,
+    )
+
+    b1 = make_analysis_block(section_id="sec-1", order=0, text="‘Let’s go together,’ said Harry.")
+    b2 = make_analysis_block(section_id="sec-1", order=1, text="‘Hermione!’ they said together. ‘Run!’ said Harry.")
+    for block, subject_quote, anchor_quote in (
+        (b1, "‘Let’s go together,’", "said Harry."),
+        (b2, "‘Run!’", "‘Run!’ said Harry."),
+    ):
+        payload = NarrativeAnalysisResponse(
+            translation_instructions="Keep tone.",
+            chapter_summary="Harry speaks.",
+            context_facts=(
+                QuotedContextFactResponse(
+                    "cf-1",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b1", anchor_quote),),
+                    QuotedSourceAnchorResponse("b1", subject_quote),
+                    "Harry",
+                    "inferred",
+                    joint=False,
+                ),
+                QuotedContextFactResponse(
+                    "cf-2",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b1", anchor_quote),),
+                    QuotedSourceAnchorResponse("b1", subject_quote),
+                    "Ron",
+                    "inferred",
+                    joint=False,
+                ),
+            ),
+            scenes=(QuotedSceneResponse("b1", "b1", "Сцена.", participants=("Harry", "Ron")),),
+        )
+        with pytest.raises(AnalysisMergeError) as err:
+            validate_narrative_response(
+                payload,
+                {"b1": block.id},
+                {block.id: block.text},
+                visible_texts_by_alias={"b1": block.text},
+                ordered_block_ids=(block.id,),
+                blocks=(block,),
+            )
+        assert err.value.violation is not None
+        assert err.value.violation.rule_code == "context_fact_conflict"
+
+
+def test_joint_speaker_atomic_remark_promotion() -> None:
+    """Joint speaker group promotes inferred -> explicit only if every participant is named in the remark."""
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        content_plan_from_response,
+        merge_narrative_fragments,
+        validate_narrative_response,
+    )
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSceneResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+
+    partial_block = make_analysis_block(section_id="sec-1", order=0, text="‘Hermione!’ said Harry and his friend together.")
+    both_block = make_analysis_block(section_id="sec-1", order=1, text="‘Hello!’ said Fred and George.")
+    blocks = (partial_block, both_block)
+    aliases = {"b1": partial_block.id, "b2": both_block.id}
+    texts = {b.id: b.text for b in blocks}
+    visible = {"b1": partial_block.text, "b2": both_block.text}
+
+    narrative = NarrativeAnalysisResponse(
+        translation_instructions="Keep tone.",
+        chapter_summary="Characters speak together.",
+        context_facts=(
+            QuotedContextFactResponse(
+                "cf-1",
+                "speaker",
+                (QuotedSourceAnchorResponse("b1", "said Harry and his friend together."),),
+                QuotedSourceAnchorResponse("b1", "‘Hermione!’"),
+                "Harry",
+                "inferred",
+                joint=True,
+            ),
+            QuotedContextFactResponse(
+                "cf-2",
+                "speaker",
+                (QuotedSourceAnchorResponse("b1", "said Harry and his friend together."),),
+                QuotedSourceAnchorResponse("b1", "‘Hermione!’"),
+                "Ron",
+                "inferred",
+                joint=True,
+            ),
+            QuotedContextFactResponse(
+                "cf-3",
+                "speaker",
+                (QuotedSourceAnchorResponse("b2", "said Fred and George."),),
+                QuotedSourceAnchorResponse("b2", "‘Hello!’"),
+                "Fred",
+                "inferred",
+                joint=True,
+            ),
+            QuotedContextFactResponse(
+                "cf-4",
+                "speaker",
+                (QuotedSourceAnchorResponse("b2", "said Fred and George."),),
+                QuotedSourceAnchorResponse("b2", "‘Hello!’"),
+                "George",
+                "inferred",
+                joint=True,
+            ),
+        ),
+        scenes=(
+            QuotedSceneResponse("b1", "b2", "Разговор.", participants=("Harry", "Ron", "Fred", "George")),
+        ),
+    )
+
+    scenes, facts = validate_narrative_response(
+        narrative,
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+        ordered_block_ids=tuple(b.id for b in blocks),
+        blocks=blocks,
+    )
+    partial_certainties = {f.value: f.certainty for f in facts if f.subject_anchor.block_id == partial_block.id}
+    both_certainties = {f.value: f.certainty for f in facts if f.subject_anchor.block_id == both_block.id}
+    assert partial_certainties == {"Harry": "inferred", "Ron": "inferred"}
+    assert both_certainties == {"Fred": "explicit", "George": "explicit"}
+
+    merged_raw, merged_scenes, _ = merge_narrative_fragments([(narrative, scenes, facts)], section_blocks=blocks)
+    combined = combine_staged_analysis_responses(
+        merged_raw,
+        PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(partial_block.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse(both_block.id, BlockTreatment.GLOSSARY_ONLY),
+            )
+        ),
+        resolved_scenes=merged_scenes,
+        resolved_blocks=blocks,
+    )
+    plan = content_plan_from_response(
+        combined,
+        {b.id: b.id for b in blocks},
+        texts,
+        visible_texts_by_alias={b.id: b.text for b in blocks},
+        blocks=blocks,
+    )
+    assert plan is not None
+    plan_partial = {f.value: f.certainty for f in plan.context_facts if f.subject_anchor.block_id == partial_block.id}
+    plan_both = {f.value: f.certainty for f in plan.context_facts if f.subject_anchor.block_id == both_block.id}
+    assert plan_partial == {"Harry": "inferred", "Ron": "inferred"}
+    assert plan_both == {"Fred": "explicit", "George": "explicit"}
+
+
+def test_joint_context_fact_cache_and_db_mapping_round_trip() -> None:
+    """Pass cache and DB mapping preserve joint=True, stay compatible with legacy rows, and reject non-bool joint."""
+    import copy
+    import json
+
+    from linguary.adapters.db.mapping import _decode_content_plan, _encode_content_plan
+    from linguary.application.analysis_pass_cache import decode_pass, encode_pass
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.application.ports.persistence import PersistenceError
+    from linguary.domain import AnalysisPassKind
+    from linguary.domain.content_plan import ContentPlan, ContextFact, SourceAnchor
+
+    narrative = NarrativeAnalysisResponse(
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        context_facts=(
+            QuotedContextFactResponse(
+                "cf-single",
+                "speaker",
+                (QuotedSourceAnchorResponse("b1", "said Harry."),),
+                QuotedSourceAnchorResponse("b1", "‘Hi,’"),
+                "Harry",
+                "inferred",
+                joint=False,
+            ),
+            QuotedContextFactResponse(
+                "cf-joint-1",
+                "speaker",
+                (QuotedSourceAnchorResponse("b2", "they said together."),),
+                QuotedSourceAnchorResponse("b2", "‘Hermione!’"),
+                "Harry",
+                "inferred",
+                joint=True,
+            ),
+        ),
+    )
+    encoded_pass = encode_pass(narrative)
+    assert "joint" not in encoded_pass["response"]["context_facts"][0]
+    assert encoded_pass["response"]["context_facts"][1]["joint"] is True
+    decoded_pass = decode_pass(json.loads(json.dumps(encoded_pass)), pass_kind=AnalysisPassKind.NARRATIVE)
+    assert decoded_pass.context_facts[0].joint is False
+    assert decoded_pass.context_facts[1].joint is True
+
+    # DB mapping round-trip for ContentPlan v3.
+    a1 = SourceAnchor("b1", 0, 5, "‘Hi,’")
+    a2 = SourceAnchor("b2", 0, 11, "‘Hermione!’")
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        context_facts=(
+            ContextFact("cf-1", "speaker", (a1,), a1, "Harry", "inferred", joint=False),
+            ContextFact("cf-2", "speaker", (a2,), a2, "Harry", "inferred", joint=True),
+            ContextFact("cf-3", "speaker", (a2,), a2, "Ron", "inferred", joint=True),
+        ),
+    )
+    encoded_plan = _encode_content_plan(plan)
+    assert encoded_plan is not None
+    by_id = {row["id"]: row for row in encoded_plan["context_facts"]}
+    assert "joint" not in by_id["cf-1"]
+    assert by_id["cf-2"]["joint"] is True
+    assert by_id["cf-3"]["joint"] is True
+    decoded_plan = _decode_content_plan(encoded_plan)
+    assert decoded_plan == plan
+
+    # Legacy row without 'joint' decodes cleanly with joint=False.
+    legacy = copy.deepcopy(encoded_plan)
+    legacy["context_facts"] = [by_id["cf-1"]]
+    assert _decode_content_plan(legacy).context_facts[0].joint is False  # type: ignore[union-attr]
+
+    # Non-bool joint (0/1) in stored JSON is rejected strictly by _boolean.
+    for bad_joint in (0, 1, "true"):
+        corrupted = copy.deepcopy(encoded_plan)
+        corrupted["context_facts"][0]["joint"] = bad_joint
+        with pytest.raises(PersistenceError):
+            _decode_content_plan(corrupted)
+
+
+def test_plan_items_from_response_normalizes_single_segment_and_batches_errors_with_aliases() -> None:
+    """WP3.1: Consistent single-segment `segments` normalize cleanly; multiple broken blocks batch with `bN` aliases."""
+    from linguary.application.analysis_merge import plan_items_from_response
+    from linguary.application.llm_dto import SegmentTreatmentResponse
+    from linguary.domain import BlockSegment
+
+    single_ok = make_analysis_block(section_id=SECTION_ID, order=0, text="Single ok.")
+    single_mismatch = make_analysis_block(section_id=SECTION_ID, order=1, text="Single bad.")
+    two_text = "First sentence. Second sentence."
+    split_at = len("First sentence. ")
+    two_seg_1 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=2, text=two_text),
+        segments=(BlockSegment(0, split_at, 0), BlockSegment(split_at, len(two_text), 1)),
+    )
+    two_seg_2 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=3, text=two_text),
+        segments=(BlockSegment(0, split_at, 0), BlockSegment(split_at, len(two_text), 1)),
+    )
+
+    # 1. Single-segment block with matching segment treatment normalizes cleanly to whole-block treatment.
+    ok_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),),
+            ),
+        ),
+    )
+    items = plan_items_from_response(
+        ok_payload,
+        block_ids_by_alias={"b1": single_ok.id},
+        blocks=(single_ok,),
+        require_all=True,
+    )
+    assert len(items) == 1
+    assert items[0].block_id == single_ok.id
+    assert items[0].treatment is BlockTreatment.TRANSLATE
+    assert items[0].segment_treatments == ()
+
+    # 2. Batch errors across b16 (out-of-range), b28 (single-segment mismatch), b51 (TreatmentPlanError)
+    #    report all 3 aliases in one error with zero raw UUIDs.
+    batched_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b16",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            TreatmentPlanItemResponse(
+                "b28",
+                BlockTreatment.TRANSLATE,
+                (SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),),
+            ),
+            TreatmentPlanItemResponse(
+                "b51",
+                BlockTreatment.GLOSSARY_ONLY,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+        ),
+    )
+    aliases = {
+        "b16": two_seg_1.id,
+        "b28": single_mismatch.id,
+        "b51": two_seg_2.id,
+    }
+    with pytest.raises(AnalysisMergeError) as exc:
+        plan_items_from_response(
+            batched_payload,
+            block_ids_by_alias=aliases,
+            blocks=(two_seg_1, single_mismatch, two_seg_2),
+            require_all=True,
+        )
+    msg = str(exc.value)
+    assert "b16" in msg and "b28" in msg and "b51" in msg
+    for raw_id in aliases.values():
+        assert raw_id not in msg
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == "invalid_segment_treatment"
+    assert exc.value.violation.block_ids == (two_seg_1.id, single_mismatch.id, two_seg_2.id)
+
+    # 3. require_all=True still raises KeyError(missing_alias).
+    missing_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=(),
+    )
+    with pytest.raises(KeyError, match="b16"):
+        plan_items_from_response(
+            missing_payload,
+            block_ids_by_alias={"b16": two_seg_1.id},
+            blocks=(two_seg_1,),
+            require_all=True,
+        )
+
+
+def test_collect_spoiler_name_leaks_skips_known_names_for_mapped_facts() -> None:
+    """WP3.2: _collect_spoiler_name_leaks skips known_names for mapped_facts (speaker & pronoun_referent)."""
+    from linguary.application.analysis_merge import _collect_spoiler_name_leaks
+    from linguary.domain.content_plan import ContextFact, SourceAnchor
+
+    b1_id = "blk-1"
+    b2_id = "blk-2"
+    texts = {
+        b1_id: "‘Put it on,’ he said. She watched him silently.",
+        b2_id: "Dudley stared as Professor McGonagall held up the Sorting Hat while Voldemort watched.",
+    }
+    ordered = (b1_id, b2_id)
+    block_order = {b1_id: 0, b2_id: 1}
+    aliases_by_id = {b1_id: "b1", b2_id: "b2"}
+
+    def _fact(fid: str, kind: str, value: str, quote: str) -> ContextFact:
+        start = texts[b1_id].index(quote)
+        anchor = SourceAnchor(b1_id, start, start + len(quote), quote)
+        return ContextFact(fid, kind, (anchor,), anchor, value, "explicit")
+
+    known_facts = (
+        _fact("f-dudley", "speaker", "Dudley", "‘Put it on,’"),
+        _fact("f-hat", "pronoun_referent", "Sorting Hat", "it"),
+        _fact("f-mcgonagall", "pronoun_referent", "Professor McGonagall", "She"),
+    )
+    details, block_ids = _collect_spoiler_name_leaks(
+        scenes=(),
+        mapped_facts=known_facts,
+        texts=texts,
+        ordered_block_ids=ordered,
+        block_order=block_order,
+        known_names=("Dudley Dursley", "Chapter 7: The Sorting Hat", "McGonagall"),
+        glossary_candidates=(),
+        aliases_by_block_id=aliases_by_id,
+    )
+    assert details == []
+    assert block_ids == []
+
+    # Unknown name in b1 before first mention in b2 is still caught as a spoiler.
+    spoiler_fact = _fact("f-voldemort", "pronoun_referent", "Voldemort", "him")
+    sp_details, sp_blocks = _collect_spoiler_name_leaks(
+        scenes=(),
+        mapped_facts=(*known_facts, spoiler_fact),
+        texts=texts,
+        ordered_block_ids=ordered,
+        block_order=block_order,
+        known_names=("Dudley Dursley", "Chapter 7: The Sorting Hat", "McGonagall"),
+        glossary_candidates=(),
+        aliases_by_block_id=aliases_by_id,
+    )
+    assert len(sp_details) == 1
+    assert "Voldemort" in sp_details[0]
+    assert sp_blocks == [b1_id]
+
+
+def test_wp5_promote_overloaded_glossary_only_for_blocks_segments_and_post_stoplist() -> None:
+    """WP5.2: GLOSSARY_ONLY blocks and segments with > 4 unique non-A2 words promote to TRANSLATE (including post-stoplist)."""
+    from linguary.application.analysis_merge import normalize_pedagogical_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment
+
+    # b1: whole GLOSSARY_ONLY block with 5 non-A2 words -> promoted to TRANSLATE.
+    b1 = make_analysis_block(
+        section_id=SECTION_ID,
+        order=0,
+        text="He clutched a tarnished cauldron, a battered satchel, and a dusty parchment.",
+    )
+    # b2: whole GLOSSARY_ONLY block with <= 4 non-A2 words -> stays GLOSSARY_ONLY.
+    b2 = make_analysis_block(
+        section_id=SECTION_ID,
+        order=1,
+        text="He held a dusty cauldron near the door.",
+    )
+    # b3: segmented block with 2 GLOSSARY_ONLY segments (seg1 <= 4 non-A2, seg2 >= 5 non-A2) -> seg2 promoted to TRANSLATE.
+    s1 = "She saw a dusty cauldron. "
+    s2 = "He clutched a tarnished goblet, a battered satchel, and a wrinkled parchment."
+    b3 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=2, text=s1 + s2),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(s1) + len(s2), 1),
+        ),
+    )
+    # b4: starts as READ_AS_IS, lifted to GLOSSARY_ONLY by _promote_a2_stoplist_item, then promoted to TRANSLATE by overload (> 4 non-A2).
+    b4 = make_analysis_block(
+        section_id=SECTION_ID,
+        order=3,
+        text="She clutched a tarnished goblet, a battered satchel, and a wrinkled parchment.",
+    )
+
+    blocks = (b1, b2, b3, b4)
+    aliases = {f"b{i + 1}": b.id for i, b in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b2", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse(
+                "b3",
+                BlockTreatment.GLOSSARY_ONLY,
+                segments=(
+                    SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse("b4", BlockTreatment.READ_AS_IS),
+        ),
+    )
+
+    normalized = normalize_pedagogical_response(
+        payload,
+        blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+    )
+    by_id = {item.source_block_id: item for item in normalized.treatment_plan}
+
+    assert by_id["b1"].treatment is BlockTreatment.TRANSLATE
+    assert by_id["b2"].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert by_id["b3"].treatment is BlockTreatment.TRANSLATE
+    assert [seg.treatment for seg in by_id["b3"].segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert by_id["b4"].treatment is BlockTreatment.TRANSLATE
+    assert by_id["b4"].segments == ()
+
+
 
 

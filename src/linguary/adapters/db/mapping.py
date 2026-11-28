@@ -825,6 +825,12 @@ def _integer(value: object) -> int:
     return value
 
 
+def _boolean(value: object) -> bool:
+    if type(value) is not bool:
+        raise ValueError("ожидалось булево значение")
+    return value
+
+
 def _array(value: object) -> list[Any]:
     if type(value) is not list:
         raise ValueError("ожидался список")
@@ -918,13 +924,21 @@ def _context_fact(value):
     fields = {'id', 'kind', 'anchors', 'subject_anchor', 'certainty'}
     if isinstance(value, dict) and value.get('certainty') != 'unknown':
         fields.add('value')
+    if isinstance(value, dict) and 'joint' in value:
+        fields.add('joint')
     data = _object(value, fields)
     def anchor(item):
         item = _object(item, {'block_id', 'start', 'end', 'quote'})
         return SourceAnchor(_string(item['block_id']), _integer(item['start']), _integer(item['end']), _string(item['quote']))
-    return ContextFact(_string(data['id']), _string(data['kind']),
-        tuple(anchor(item) for item in _array(data['anchors'])), anchor(data['subject_anchor']),
-        None if data['certainty'] == 'unknown' else _string(data['value']), _string(data['certainty']))
+    return ContextFact(
+        _string(data['id']),
+        _string(data['kind']),
+        tuple(anchor(item) for item in _array(data['anchors'])),
+        anchor(data['subject_anchor']),
+        None if data['certainty'] == 'unknown' else _string(data['value']),
+        _string(data['certainty']),
+        joint=_boolean(data['joint']) if 'joint' in data else False,
+    )
 
 
 def _scene(value: object) -> Scene:

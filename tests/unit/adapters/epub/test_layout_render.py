@@ -990,3 +990,128 @@ def test_unnumbered_note_gets_lg_note_plain_class_and_css_rules() -> None:
         assert ".center" in sheet
         assert ".pagebreak" in sheet
         assert "p.pagebreak" in sheet
+
+
+def test_long_unit_class_by_volume_and_sentence_count_and_css_rules() -> None:
+    """WP7: translated units > 450 chars (src+tr+notes) or >= 4 sentences get .lg-unit-long."""
+    short_block = _block("One sentence here.", block_id="b-short", order=0)
+    untranslated_long = _block(
+        "One. Two. Three. Four. " + "Long enough text. " * 30,
+        block_id="b-untr",
+        order=1,
+    )
+    volume_block = _block("A" * 160, block_id="b-vol", order=2)
+    notes_push_block = _block("B" * 140, block_id="b-notes", order=3)
+    four_sent_block = _block(
+        "One short sentence. Two short ones. Three now! Four at last?",
+        block_id="b-4s",
+        order=4,
+    )
+    abbrev_three_sent = _block(
+        "Mr. Dursley sat down. Mrs. Dursley stood up. Harry blinked.",
+        block_id="b-3s",
+        order=5,
+    )
+    blocks = (
+        short_block,
+        untranslated_long,
+        volume_block,
+        notes_push_block,
+        four_sent_block,
+        abbrev_three_sent,
+    )
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=blocks,
+    )
+    root = _chapter(
+        *blocks,
+        layout=_layout(
+            section,
+            {
+                short_block.id: (_unit(short_block, translation="Одно предложение."),),
+                untranslated_long.id: (_unit(untranslated_long, translation=None),),
+                volume_block.id: (_unit(volume_block, translation="П" * 300),),  # 160 + 300 = 460 > 450
+                notes_push_block.id: (
+                    _unit(
+                        notes_push_block,
+                        translation="Т" * 140,
+                        notes=(_note(1, ("З" * 180,), marker_end=10),),  # 140 + 140 + 180 = 460 > 450
+                    ),
+                ),
+                four_sent_block.id: (_unit(four_sent_block, translation="Четыре предложения."),),
+                abbrev_three_sent.id: (_unit(abbrev_three_sent, translation="Три предложения."),),
+            },
+        ),
+    )
+    units = _units(root)
+    assert len(units) == 6
+    assert "lg-unit-long" not in _classes(units[0])
+    assert "lg-unit-long" not in _classes(units[1])
+    assert "lg-unit-long" in _classes(units[2])
+    assert "lg-unit-long" in _classes(units[3])
+    assert "lg-unit-long" in _classes(units[4])
+    assert "lg-unit-long" not in _classes(units[5])
+
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    for sheet in (_STYLESHEET, web):
+        long_match = re.search(r"\.lg-unit\.lg-unit-long\s*\{([^}]+)\}", sheet)
+        assert long_match is not None
+        compact_long = re.sub(r"\s+", " ", long_match.group(1))
+        assert "page-break-inside: auto;" in compact_long
+        assert "break-inside: auto;" in compact_long
+        assert re.search(r"\.lg-cover\s*\{", sheet)
+        cover_img = re.search(r"\.lg-cover\s+img\s*\{([^}]+)\}", sheet)
+        assert cover_img is not None
+        compact_img = re.sub(r"\s+", " ", cover_img.group(1))
+        assert "max-width: 100%;" in compact_img
+        assert "max-height: 100%;" in compact_img
+
+
+def test_cover_section_image_renders_clean_lg_cover_without_unit_chrome() -> None:
+    """WP7: BlockType.IMAGE in a cover section renders inside div.lg-cover without .lg-unit or p.lg-src."""
+    cover_block = DocumentBlock(
+        id="b-cov",
+        section_id="sec-cover",
+        type=BlockType.IMAGE,
+        order=0,
+        text="",
+        source_reference=SourceReference("cover.xhtml", "/body/img[1]"),
+        attributes={"src": "cover.jpg", "alt": "Cover image", "anchor_ids": "cov-id"},
+    )
+    cover_section = DocumentSection(
+        id="sec-cover",
+        document_id="book-1",
+        title="Cover",
+        order=0,
+        source_resource_path="cover.xhtml",
+        blocks=(cover_block,),
+    )
+    document = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Story"),
+        source_language="en",
+        target_language="ru",
+        sections=(cover_section,),
+    )
+    rendered = _render_chapters(
+        EpubWriteRequest(document=document, target_path="unused.epub"),
+        opaque=_OpaqueSource(None),
+        warnings=_ExportWarnings(),
+    )
+    root = rendered[0].root
+    assert _units(root) == []
+    assert not any("lg-src" in _classes(node) for node in _elements(root, "p"))
+    covers = [node for node in _elements(root, "div") if "lg-cover" in _classes(node)]
+    assert len(covers) == 1
+    assert covers[0].get("id") == "cov-id"
+    imgs = _elements(covers[0], "img")
+    assert len(imgs) == 1
+    assert imgs[0].get("src") == "cover.jpg"
+    assert imgs[0].get("alt") == "Cover image"

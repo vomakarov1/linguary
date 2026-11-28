@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
-from typing import Mapping
+from typing import Collection, Mapping
 
 from linguary.domain.errors import DomainError
 
@@ -106,6 +106,22 @@ def artifact_key(kind: str, block_id: str, content: object) -> str:
     return canonical_sha({"kind": kind, "block_id": block_id, "content": content})
 
 
+def has_subject_attribution_conflict(
+    kind: str,
+    entries: Collection[tuple[str | None, str, bool]],
+) -> bool:
+    """Whether multiple attribution tuples `(value, certainty, joint)` conflict for `(kind, subject_anchor)`."""
+    if len(entries) <= 1:
+        return False
+    if kind != 'speaker':
+        return True
+    return not (
+        all(joint for _, _, joint in entries)
+        and all(certainty != 'unknown' for _, certainty, _ in entries)
+        and len({value for value, _, _ in entries}) == len(entries)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ContextFact:
     """Source-bound attribution; uncertainty is retained rather than guessed."""
@@ -115,6 +131,7 @@ class ContextFact:
     subject_anchor: SourceAnchor
     value: str | None = None
     certainty: str = 'unknown'
+    joint: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, 'anchors', tuple(sorted(self.anchors, key=lambda a: (a.block_id, a.start, a.end, a.quote))))
@@ -129,6 +146,10 @@ class ContextFact:
                 raise DomainError('неизвестная атрибуция не может иметь значение')
         elif not isinstance(self.value, str) or not self.value.strip():
             raise DomainError('атрибуция требует непустое значение')
+        if type(self.joint) is not bool:
+            raise DomainError('признак совместной речи должен быть булевым')
+        if self.joint and (self.kind != 'speaker' or self.certainty == 'unknown'):
+            raise DomainError('совместная атрибуция допустима только для известного speaker')
 
     def validate(self, texts):
         for anchor in self.anchors:
@@ -139,6 +160,8 @@ class ContextFact:
         value = asdict(self)
         if self.certainty == 'unknown':
             value.pop('value')
+        if not self.joint:
+            value.pop('joint')
         return value
 
     @property
@@ -217,18 +240,18 @@ class ContentPlan:
         fact_ids = [fact.id for fact in self.context_facts]
         if len(fact_ids) != len(set(fact_ids)):
             raise DomainError('идентификаторы контекстных фактов повторяются')
-        subjects: dict[tuple[str, SourceAnchor], list[tuple[str | None, str]]] = {}
+        subjects: dict[tuple[str, SourceAnchor], list[tuple[str | None, str, bool]]] = {}
         for fact in self.context_facts:
             key = (fact.kind, fact.subject_anchor)
-            value = (fact.value, fact.certainty)
-            values = subjects.setdefault(key, [])
-            if value not in values:
-                values.append(value)
+            entry = (fact.value, fact.certainty, fact.joint)
+            entries = subjects.setdefault(key, [])
+            if entry not in entries:
+                entries.append(entry)
         conflicts = [
             f"{kind}@{anchor.block_id}({anchor.quote!r}): "
-            + " vs ".join(f"{value}/{certainty}" for value, certainty in values)
-            for (kind, anchor), values in subjects.items()
-            if len(values) > 1
+            + " vs ".join(f"{value}/{certainty}" for value, certainty, _ in entries)
+            for (kind, anchor), entries in subjects.items()
+            if has_subject_attribution_conflict(kind, entries)
         ]
         if conflicts:
             raise DomainError(f"конфликт атрибуций одного субъекта: {'; '.join(conflicts)}")

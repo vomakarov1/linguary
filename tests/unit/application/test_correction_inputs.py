@@ -2893,5 +2893,524 @@ def test_correct_chapter_v2_request_passes_aliased_validator_warnings_separately
     assert "validator_warnings" not in v1_body["blocks"][0]
 
 
+def test_llm_chapter_analysis_strips_scene_ballast_unconditionally_and_filters_by_ordered_blocks():
+    """WP2: _llm_chapter_analysis compacts scenes to 5 keys even when allowed_block_ids=None, and filters via section.ordered_blocks."""
+    from dataclasses import asdict
+    from linguary.application.use_cases.correct_chapter import (
+        _filtered_chapter_context,
+        _llm_chapter_analysis,
+    )
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Scene,
+        SceneVisualFact,
+        SourceAnchor,
+    )
+
+    section = make_analysis_section(
+        texts=("B1.", "B2.", "B3.", "B4.", "B5.", "B6.", "B7.", "B8."),
+    )
+    doc = make_analysis_document((section,))
+    blocks = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        tuple((b.id, BlockTreatment.TRANSLATE) for b in blocks),
+    )
+    scene1 = Scene(
+        id="sc-11111111-2222-3333-4444-555555555555",
+        order=0,
+        start_block_id=blocks[0].id,
+        end_block_id=blocks[2].id,
+        summary="Early scene.",
+        location="Kitchen",
+        participants=("Harry",),
+        visual_facts=(
+            SceneVisualFact(
+                anchor=SourceAnchor(block_id=blocks[0].id, start=0, end=2, quote="B1"),
+                subject="Harry",
+                detail="glasses",
+            ),
+        ),
+        visual_assumptions=("morning light",),
+    )
+    scene2 = Scene(
+        id="sc-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        order=1,
+        start_block_id=blocks[5].id,
+        end_block_id=blocks[7].id,
+        summary="Late scene.",
+        location="Hall",
+        participants=("Ron",),
+        visual_facts=(
+            SceneVisualFact(
+                anchor=SourceAnchor(block_id=blocks[6].id, start=0, end=2, quote="B7"),
+                subject="Ron",
+                detail="red hair",
+            ),
+        ),
+        visual_assumptions=("torchlight",),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        scenes=(scene1, scene2),
+    )
+    analysis = ChapterAnalysis.create(
+        id="an-scenes",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="Summary.",
+        expected_block_ids=tuple(b.id for b in blocks),
+        content_plan=content_plan,
+    )
+    aliases = {b.id: f"b{i}" for i, b in enumerate(blocks, start=1)}
+
+    # 1. Unconditional cleanup when allowed_block_ids=None (whole-chapter chunk).
+    unfiltered = _llm_chapter_analysis(asdict(analysis), aliases, allowed_block_ids=None)
+    assert unfiltered is not None
+    assert "scenes" not in unfiltered  # no raw duplicate at top level
+    cp_scenes = unfiltered["content_plan"]["scenes"]
+    assert len(cp_scenes) == 2
+    for scene_dict in cp_scenes:
+        assert set(scene_dict.keys()) == {
+            "start_block_id",
+            "end_block_id",
+            "summary",
+            "location",
+            "participants",
+        }
+    assert cp_scenes[0]["start_block_id"] == "b1"
+    assert cp_scenes[0]["end_block_id"] == "b3"
+    assert cp_scenes[1]["start_block_id"] == "b6"
+    assert cp_scenes[1]["end_block_id"] == "b8"
+    dumped = json.dumps(unfiltered, ensure_ascii=False)
+    assert "visual_facts" not in dumped
+    assert "visual_assumptions" not in dumped
+    assert scene1.id not in dumped
+    assert blocks[0].id not in dumped
+
+    # 2. Windowed filtering via _filtered_chapter_context uses section.ordered_blocks before aliasing.
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=blocks,
+        results={
+            b.id: BlockProcessingResult(
+                block_id=b.id, treatment=BlockTreatment.TRANSLATE, translated_text="П."
+            )
+            for b in blocks
+        },
+        bindings={b.id: None for b in blocks},
+    )
+    # Target only block 7 -> window is blocks 5..8 (indices 4..7), which overlaps only scene2 (indices 5..7).
+    ctx = _filtered_chapter_context(inputs, allowed_block_ids={blocks[6].id})
+    filtered_scenes = ctx["chapter_analysis"]["content_plan"]["scenes"]
+    assert len(filtered_scenes) == 1
+    assert filtered_scenes[0]["summary"] == "Late scene."
+    assert filtered_scenes[0]["start_block_id"] == "b6"
+    assert filtered_scenes[0]["end_block_id"] == "b8"
+
+    # 3. Empty scenes list after filtering removes 'scenes' key cleanly.
+    no_overlap = _llm_chapter_analysis(
+        asdict(analysis),
+        aliases,
+        allowed_block_ids={blocks[3].id},
+        block_order={b.id: idx for idx, b in enumerate(blocks)},
+    )
+    assert no_overlap is not None
+    assert "scenes" not in no_overlap["content_plan"]
+
+
+def test_chunk_correction_blocks_uses_per_block_byte_budget_for_propose_and_review():
+    """WP2: per-block byte chunking does not degrade to 1 block on large chapter_analysis and weighs review candidates."""
+    from dataclasses import asdict
+    from linguary.application.use_cases.correct_chapter import (
+        DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+        _chunk_correction_blocks,
+    )
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    section = make_analysis_section(
+        texts=tuple(f"Sentence number {i} with moderate narrative text." for i in range(40)),
+    )
+    doc = make_analysis_document((section,))
+    blocks = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        tuple((b.id, BlockTreatment.TRANSLATE) for b in blocks),
+    )
+    # Large chapter_analysis across all 40 blocks (~60KB total, ~1.5KB per block).
+    difficulties = tuple(
+        Difficulty(
+            id=f"df-{i:04d}",
+            anchors=(SourceAnchor(block_id=b.id, start=0, end=8, quote="Sentence"),),
+            owner_block_id=b.id,
+            kind="idiom",
+            priority="critical",
+            help_kind="explanation",
+            required_points=(
+                RequiredPoint(id="p1", description="Длинное объяснение смысла трудности " * 15),
+            ),
+        )
+        for i, b in enumerate(blocks)
+    )
+    analysis = ChapterAnalysis.create(
+        id="an-big",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep style.",
+        chapter_summary="Summary.",
+        expected_block_ids=tuple(b.id for b in blocks),
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=difficulties),
+    )
+    results = {
+        b.id: BlockProcessingResult(
+            block_id=b.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Перевод предложения " * 20,
+        )
+        for b in blocks
+    }
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=blocks,
+        results=results,
+        bindings={b.id: None for b in blocks},
+    )
+    # Whole chapter_analysis JSON is large (> 50KB), yet per-block chunking packs multiple blocks per chunk!
+    assert len(json.dumps(inputs.context["chapter_analysis"], ensure_ascii=False).encode("utf-8")) > 50_000
+
+    block_ids = tuple(b.id for b in blocks)
+    propose_chunks = _chunk_correction_blocks(
+        block_ids,
+        inputs,
+        max_chars=8_000,
+        max_request_bytes=DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+    )
+    assert len(propose_chunks) >= 2
+    assert all(len(chunk) > 1 for chunk in propose_chunks[:-1])
+    assert tuple(bid for chunk in propose_chunks for bid in chunk) == block_ids
+
+    # Review mode includes current_result + proposed_result + changes + issues, so chunks are tighter.
+    candidates_by_block = {
+        b.id: SimpleNamespace(
+            candidate_id=f"cand-{idx}",
+            block_id=b.id,
+            payload={
+                "current_result": asdict(results[b.id]),
+                "result": asdict(
+                    replace(results[b.id], translated_text="Исправленный перевод предложения " * 25)
+                ),
+                "proposal": {
+                    "issues": [
+                        {
+                            "field_path": "translated_text",
+                            "problem": "Подробное описание проблемы " * 20,
+                        }
+                    ]
+                },
+            },
+        )
+        for idx, b in enumerate(blocks)
+    }
+    review_chunks = _chunk_correction_blocks(
+        block_ids,
+        inputs,
+        max_chars=8_000,
+        max_request_bytes=DEFAULT_CORRECTION_MAX_REQUEST_BYTES,
+        candidates_by_block=candidates_by_block,
+    )
+    assert len(review_chunks) > len(propose_chunks)
+    assert tuple(bid for chunk in review_chunks for bid in chunk) == block_ids
+
+
+@pytest.mark.asyncio
+async def test_correct_chapter_v2_batches_candidates_across_groups_and_checks_unchanged_only_when_group_complete(
+    monkeypatch,
+):
+    """WP2: CorrectChapterV2 batches 3 candidates from 3 groups into 1 review call, and splits 1 group cleanly."""
+    import linguary.application.use_cases.correct_chapter as module
+    from linguary.application.correction_dto import (
+        ChapterCorrectionReviewResponse,
+        CorrectionVerdict,
+    )
+    from linguary.application.use_cases.correct_chapter import CorrectChapterV2
+    from linguary.domain.correction import CorrectionCandidate
+
+    section = make_analysis_section(
+        texts=("Block 1.", "Block 2.", "Block 3.", "Block 4."),
+    )
+    b1, b2, b3, _b4 = section.blocks
+
+    # Part 1: 3 pending candidates from 3 different group_ids (plus a 2nd candidate on b1) -> batched in chapter order.
+    c1 = SimpleNamespace(candidate_id="cand-1", block_id=b1.id, group_id="grp-a", payload={})
+    c1_dup = SimpleNamespace(candidate_id="cand-1b", block_id=b1.id, group_id="grp-d", payload={})
+    c2 = SimpleNamespace(candidate_id="cand-2", block_id=b2.id, group_id="grp-b", payload={})
+    c3 = SimpleNamespace(candidate_id="cand-3", block_id=b3.id, group_id="grp-c", payload={})
+
+    waves = [(c3, c1, c2, c1_dup), (c1_dup,), ()]
+    monkeypatch.setattr(module, "model_correction_blocks", lambda tx, inp: ())
+    monkeypatch.setattr(
+        module,
+        "current_correction_candidates",
+        lambda tx, inp, states=None: waves.pop(0),
+    )
+
+    inputs_stub = SimpleNamespace(run=SimpleNamespace(id="run-1"), blocks=section.blocks)
+    snapshot_stub = SimpleNamespace(parameters={"max_attempts": 1, "max_unit_source_chars": 8_000})
+    v2 = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(None)),
+        llm_client=None,
+        snapshot=snapshot_stub,
+        validator=None,
+    )
+    v2._load = lambda tx, command: (inputs_stub, None, None)
+    review_batches: list[tuple[str, ...]] = []
+
+    async def fake_review(command, candidate_ids):
+        review_batches.append(tuple(candidate_ids))
+        return len(candidate_ids)
+
+    v2._review_group = fake_review
+    res = await v2(SimpleNamespace(section_id=section.id))
+    assert review_batches == [("cand-1", "cand-2", "cand-3"), ("cand-1b",)]
+    assert res.checked_blocks == 4
+
+    # Part 2: 1 proposal group with 2 candidates (b1, b2) and 1 unchanged block (b3),
+    # split across 2 review chunks -> unchanged check for b3 is written ONLY after chunk 2!
+    doc = make_analysis_document((section,))
+    results = {
+        b.id: BlockProcessingResult(
+            block_id=b.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=f"Перевод {idx}.",
+        )
+        for idx, b in enumerate(section.blocks, start=1)
+    }
+    cond_id = "11111111-1111-4111-8111-111111111111"
+    bindings = {
+        b.id: {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "attempt_id": f"att-orig-{idx}",
+            "artifact_revision_id": f"rev-orig-{idx}",
+        }
+        for idx, b in enumerate(section.blocks, start=1)
+    }
+    from linguary.application.correction_dto import CORRECTION_VERSIONS_V2, CorrectionSnapshotV2
+
+    real_snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 500,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 10,  # forces 2 candidates (8 chars each) into 2 chunks inside _review_group!
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    full_inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=None,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(id=cond_id, payload={"schema_version": 1}),
+        snapshot=real_snapshot,
+        blocks=section.blocks,
+        results=results,
+        bindings=bindings,
+        input_generations={b.id: 1 for b in section.blocks},
+    )
+    from dataclasses import asdict
+    from linguary.domain.content_plan import canonical_sha
+
+    def _make_cand(cid: str, block) -> CorrectionCandidate:
+        payload = json.loads(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "book_id": doc.id,
+                    "run_id": "run-1",
+                    "conditions_id": cond_id,
+                    "section_id": section.id,
+                    "block_id": block.id,
+                    "input_sha256": full_inputs.checksums[block.id],
+                    "input_generation": 1,
+                    "group_id": "grp-split",
+                    "proposal_attempt_id": "grp-split",
+                    "context_sha256": full_inputs.context_sha256,
+                    "source_binding": bindings[block.id],
+                    "original": {"text": block.text},
+                    "current_result": asdict(results[block.id]),
+                    "result": asdict(results[block.id]),
+                    "proposal": {"issues": []},
+                    "evidence_valid": True,
+                }
+            )
+        )
+        return CorrectionCandidate(
+            candidate_id=cid,
+            book_id=doc.id,
+            run_id="run-1",
+            conditions_id=cond_id,
+            section_id=section.id,
+            block_id=block.id,
+            input_sha256=full_inputs.checksums[block.id],
+            input_generation=1,
+            proposal_sha256=canonical_sha(payload),
+            payload=payload,
+            group_id="grp-split",
+            proposal_attempt_id="grp-split",
+            state="awaiting_review",
+        )
+
+    cand_store = {
+        "cand-a": _make_cand("cand-a", b1),
+        "cand-b": _make_cand("cand-b", b2),
+    }
+    group_binding = {
+        "payload_json": {
+            "candidate_ids": ["cand-a", "cand-b"],
+            "unchanged_block_ids": [b3.id],
+            "manifest": full_inputs.manifest,
+        }
+    }
+    recorded_checks: list[tuple] = []
+    review_bindings: dict[str, dict] = {}
+    attempts_store: dict[str, SimpleNamespace] = {}
+
+    class FakeWork:
+        def get_correction_candidate(self, cid):
+            return cand_store.get(cid)
+
+        def bind(self, kind, key, **kwargs):
+            review_bindings[(kind, key)] = {"payload_json": kwargs["payload"]}
+            attempts_store[key] = SimpleNamespace(
+                id=key,
+                state="validated",
+                task_id="task-1",
+                run_id="run-1",
+                conditions_id=cond_id,
+                context={},
+            )
+
+        def get_binding(self, kind, key):
+            if kind == "correction_group" and key == "grp-split":
+                return group_binding
+            return review_bindings.get((kind, key))
+
+        def get_attempt(self, aid):
+            return attempts_store.get(aid)
+
+        def archive_artifacts(self, items):
+            return [f"art-{len(items)}"]
+
+        def transition_attempt(self, aid, state, expected_state=None):
+            attempts_store[aid].state = state
+
+        def record_correction_verdict(self, cid, **kwargs):
+            cand_store[cid] = replace(cand_store[cid], state=kwargs["state"], review=kwargs["review"])
+
+        def replace_correction_checks(self, run_id, section_id, checks):
+            recorded_checks.append(tuple(checks))
+
+    fake_tx = SimpleNamespace(work=FakeWork())
+    fake_task = SimpleNamespace(
+        id="task-1",
+        book_id=doc.id,
+        scope_id=section.id,
+        attempts=1,
+        operation_id="op-1",
+    )
+
+    class FakeReviewClient:
+        def __init__(self):
+            self.calls = []
+
+        async def generate(self, request):
+            self.calls.append(request)
+            ctx = request.call_context
+            attempts_store[ctx.attempt_id].context = {
+                **ctx.to_dict(),
+                "task_attempt": fake_task.attempts,
+                "operation_id": fake_task.operation_id,
+            }
+            verdicts = tuple(
+                CorrectionVerdict(
+                    candidate_id=cid,
+                    proposal_sha256=sha,
+                    verdict="needs_human",
+                    error_supported=False,
+                    evidence_valid=True,
+                    minimal=False,
+                    no_semantic_loss=True,
+                    reason="Оставляем на решение человека.",
+                )
+                for cid, sha in request.correction_candidate_refs
+            )
+            return SimpleNamespace(
+                truncated=False,
+                payload=ChapterCorrectionReviewResponse(candidates=verdicts),
+                call_context=ctx,
+                raw_content="{}",
+                usage=None,
+                cost=0.0,
+                provider="fake",
+                model="gpt-test",
+                log_id=None,
+            )
+
+    review_client = FakeReviewClient()
+    v2_split = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(fake_tx)),
+        llm_client=review_client,
+        snapshot=real_snapshot,
+        validator=None,
+    )
+    v2_split._load = lambda tx, command, expected_task_attempt=None: (
+        full_inputs,
+        fake_task,
+        {"input_generation": 1},
+    )
+    monkeypatch.setattr(module, "finalize_response", lambda *a, **kw: None)
+
+    reviewed_count = await v2_split._review_group(
+        SimpleNamespace(book_id=doc.id, section_id=section.id, task_id="task-1"),
+        ("cand-a", "cand-b"),
+    )
+    assert reviewed_count == 2
+    assert len(review_client.calls) == 2
+    # Chunk 1 must NOT record unchanged check for b3 (cand-b is still awaiting_review).
+    assert recorded_checks[0] == ()
+    # Chunk 2 completes grp-split -> unchanged check for b3 IS recorded.
+    assert len(recorded_checks[1]) == 1
+    assert recorded_checks[1][0].block_id == b3.id
+    assert recorded_checks[1][0].basis == "unchanged"
+
+
+
 
 

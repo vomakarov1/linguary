@@ -674,3 +674,37 @@ def test_is_trivial_a1_hint_strips_leading_articles() -> None:
     ):
         assert is_trivial_a1_hint(homograph) is False, f"false A1 homograph: {homograph}"
 
+
+def test_wp5_a1_trivial_hint_expansion_and_two_word_noun_compounds() -> None:
+    """WP5.3: expanded A1 vocab and 2-word A1 noun phrases like `school uniform` are trivial without catching phrasal verbs."""
+    from linguary.application.a2_core_vocab import is_trivial_a1_hint
+
+    for trivial in (
+        "bacon",
+        "perfect",
+        "mistake",
+        "wrong",
+        "to enter",
+        "to celebrate",
+        "a mistake",
+        "violet",
+        "unusual",
+        "darkness",
+        "angrily",
+        "school uniform",
+        "a school uniform",
+        "school uniforms",
+    ):
+        assert is_trivial_a1_hint(trivial) is True, f"expected trivial A1 hint: {trivial}"
+
+    for non_trivial in (
+        "violet cloak",
+        "look back",
+        "sit down",
+        "run away",
+        "give up",
+        "to school uniform",
+        "very wrong",
+    ):
+        assert is_trivial_a1_hint(non_trivial) is False, f"unexpected trivial A1 hint: {non_trivial}"
+

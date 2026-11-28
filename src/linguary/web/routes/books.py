@@ -19,6 +19,7 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse
 
+from linguary.adapters.epub.inline import read_source_language_tag
 from linguary.application.book_overview import (
     ProcessingPlanUnavailableError,
     book_overview,
@@ -27,7 +28,7 @@ from linguary.application.book_overview import (
     processing_plan,
 )
 from linguary.application.use_cases.register_book import RegisterBookCommand
-from linguary.domain import BookStatus
+from linguary.domain import BookStatus, detect_english_variant
 from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import (
     BookDetailResponse,
@@ -124,6 +125,16 @@ def get_book(
     )
     response = BookDetailResponse.of_overview(overview)
     if wants_html(request):
+        recommended_pronunciation_variant = "us"
+        if (
+            response.book.status == "IMPORTED"
+            and not response.conditions.get("conditions_id")
+            and response.book.source_language == "en"
+        ):
+            raw_lang = read_source_language_tag(overview.book.source_epub_path)
+            recommended_pronunciation_variant = (
+                detect_english_variant(raw_lang) or "us"
+            )
         return render(
             request,
             "books/detail.html",
@@ -138,6 +149,7 @@ def get_book(
             llm_hint=labels.LLM_NOT_CONFIGURED_HINT,
             default_reader_level=application.settings.reading.normalized_level,
             default_seed_first_chapter=application.settings.checks.seed_first_chapter,
+            recommended_pronunciation_variant=recommended_pronunciation_variant,
         )
     return response
 

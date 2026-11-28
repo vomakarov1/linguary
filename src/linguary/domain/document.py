@@ -14,6 +14,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Literal
 
 from linguary.domain.errors import (
     DocumentStructureError,
@@ -757,3 +758,29 @@ class BookImportWarning:
     def __post_init__(self) -> None:
         if not self.message.strip():
             raise DocumentStructureError("текст предупреждения импорта пуст")
+
+
+_UK_ENGLISH_REGIONS = frozenset({"gb", "uk", "au", "nz", "ie"})
+_US_ENGLISH_REGIONS = frozenset({"us", "ca"})
+
+
+def detect_english_variant(raw_language: str | None) -> Literal["uk", "us"] | None:
+    """Detect UK or US English pronunciation variant from a BCP 47 language tag."""
+    if not raw_language:
+        return None
+    normalized = raw_language.strip().replace("_", "-").casefold()
+    if not normalized:
+        return None
+    parts = [part for part in normalized.split("-") if part]
+    if not parts or parts[0] != "en":
+        return None
+    region: str | None = None
+    for subtag in parts[1:]:
+        if len(subtag) == 2 and subtag.isalpha():
+            region = subtag
+            break
+    if region in _UK_ENGLISH_REGIONS:
+        return "uk"
+    if region in _US_ENGLISH_REGIONS:
+        return "us"
+    return None

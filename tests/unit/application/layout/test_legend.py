@@ -20,7 +20,9 @@ _TRANSLATION = (
 )
 _NOTES = (
     "Маленькая цифра после слова — номер примечания. "
-    "Примечания стоят сразу под абзацем, и в каждом абзаце нумерация начинается с единицы."
+    "Примечания стоят сразу под абзацем, и в каждом абзаце нумерация начинается с единицы. "
+    "Слово жирным через тире — быстрый перевод; текст без тире — пояснение выражения или грамматики. "
+    "Не пытайтесь заучивать все подсказки подряд: достаточно понять смысл и читать дальше."
 )
 _IPA = (
     "Транскрипция дана в косых чертах. "
@@ -35,7 +37,7 @@ _LABELS = (
     "Пародия.",
 )
 _SECTIONS = (
-    ("previously", "«Previously in…» — что было раньше"),
+    ("previously", "«Previously in…» — короткое напоминание на языке оригинала перед главой"),
     ("who_is_who", "«Кто есть кто» — новые персонажи"),
     ("review", "«Повторим» — знакомые слова, которые снова встретятся"),
     ("before_you_read", "«Before You Read» — трудные места главы"),
@@ -88,7 +90,7 @@ def _symbols(ipas: list[str]) -> tuple[str, ...]:
 def _label_line(*labels: str) -> str:
     listed = ", ".join(label.rstrip(".") for label in labels) + "."
     return (
-        "Слово в начале примечания называет его вид: "
+        "Пометка в начале примечания называет его вид: "
         f"{listed} Примечание без такой пометки объясняет слово, выражение или устройство фразы."
     )
 
@@ -265,7 +267,7 @@ def test_legend_lines_include_progression_guidance_and_previously() -> None:
     )
     translation_line = lines[1]
     assert "По мере чтения переводов становится меньше" in translation_line
-    assert "«Previously in…» — что было раньше" in lines[-1]
+    assert "«Previously in…» — короткое напоминание на языке оригинала перед главой" in lines[-1]
     text = "\n".join(lines)
     for phrase in (
         "словарь",
@@ -290,7 +292,7 @@ def test_legend_label_punctuation_section_period_and_fades_translation() -> None
     ))
     assert "Игра слов, Речь персонажа." in lines[2]
     assert "Игра слов., Речь персонажа." not in lines[2]
-    assert lines[3] == "Перед главой: «Previously in…» — что было раньше."
+    assert lines[3] == "Перед главой: «Previously in…» — короткое напоминание на языке оригинала перед главой."
     assert "По мере чтения переводов становится меньше" not in lines[1]
     assert "Старайтесь сначала прочитать абзац оригинала целиком" in lines[1]
     assert legend_lines(_features(fades_translation=True)) == ()

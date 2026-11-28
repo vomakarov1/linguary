@@ -12,6 +12,7 @@ from dataclasses import replace
 from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.adapters.epub.inline import local_name
+from linguary.adapters.epub.splitting import segment_text
 from linguary.adapters.epub.writer import (
     _EPUB_NAMESPACE,
     _SectionState,
@@ -39,6 +40,47 @@ _REFERENCE = "Языковая справка"
 _UNPREPARED = "Помощь пока не подготовлена."
 _UNPREPARED_BARE = "Помощь пока не подготовлена"
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_LONG_UNIT_CHAR_LIMIT = 450
+_LONG_UNIT_MIN_SENTENCES = 4
+
+
+def render_cover_image(
+    host: etree._Element,
+    block: DocumentBlock,
+    *,
+    state: _SectionState,
+) -> None:
+    """Render a standalone cover image inside ``div.lg-cover`` without reading-unit chrome."""
+    cover = _sub(host, "div", {"class": "lg-cover"})
+    _place_anchors(cover, block, state)
+    _sub(
+        cover,
+        "img",
+        {
+            "src": block.attributes.get("src", ""),
+            "alt": block.attributes.get("alt", ""),
+        },
+    )
+
+
+def _is_long_unit(block: DocumentBlock, unit: LayoutUnit) -> bool:
+    """Whether a translated reading unit is tall enough to allow internal page breaks."""
+    if unit.translation is None or not unit.translation.strip():
+        return False
+    notes_chars = sum(
+        len(part) for numbered in unit.notes for part in numbered.note.body
+    )
+    total_chars = (unit.end - unit.start) + len(unit.translation) + notes_chars
+    if total_chars > _LONG_UNIT_CHAR_LIMIT:
+        return True
+    slice_text = block.text[unit.start : unit.end].strip()
+    if not slice_text:
+        return False
+    sentences = {
+        segment.sentence_index
+        for segment in segment_text(slice_text, min_block_chars=0)
+    }
+    return len(sentences) >= _LONG_UNIT_MIN_SENTENCES
 
 
 def source_only_unit(block: DocumentBlock) -> LayoutUnit:
@@ -73,6 +115,8 @@ def render_unit(
         classes.append("lg-end")
     if unit.lines:
         classes.append("lg-poem")
+    if _is_long_unit(block, unit):
+        classes.append("lg-unit-long")
     reading = _sub(host, "div", {"class": " ".join(classes)})
     heading = block.type is BlockType.HEADING
     if not heading and not unit.continues:

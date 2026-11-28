@@ -582,13 +582,30 @@ def block_notes(
             omitted_hints.append(hint)
             continue
         visible_hints.append((hint, only_dropped or index in stripped_hint_indices))
+    visible_notes: list[LanguageNote] = []
+    for index, note in enumerate(result.language_notes):
+        if index in suppressed_note_indices:
+            continue
+        if _note_only_dropped(note, evidences, dropped_difficulty_ids):
+            continue
+        visible_notes.append(note)
+    preferred_spans = _preferred_hint_spans(block, result)
+    visible_hints = _suppress_hints_covered_by_notes(
+        block,
+        result,
+        visible_hints,
+        visible_notes,
+        evidences,
+        known,
+        dropped_difficulty_ids=dropped_difficulty_ids,
+        preferred_spans=preferred_spans,
+    )
     assigned, unmatched = _assign_pronunciations(
         [hint for hint, _ in visible_hints],
         pronunciations,
         block.id,
         excluded_hints=omitted_hints,
     )
-    preferred_spans = _preferred_hint_spans(block, result)
     drafts: list[_Draft] = []
     for (hint, strip_note), pronunciation in zip(visible_hints, assigned, strict=True):
         drafts.append(
@@ -605,11 +622,7 @@ def block_notes(
                 preferred_spans=preferred_spans,
             )
         )
-    for index, note in enumerate(result.language_notes):
-        if index in suppressed_note_indices:
-            continue
-        if _note_only_dropped(note, evidences, dropped_difficulty_ids):
-            continue
+    for note in visible_notes:
         drafts.append(_note_draft(note, block.text, evidences, known))
     for assistance in result.fragment_assistances:
         if not assistance.resolved or assistance.difficulty_id in dropped_difficulty_ids:
@@ -831,6 +844,219 @@ def _hint_anchor_spans(
     return tuple(spans)
 
 
+_COMPACT_COVERING_NOTE_WORD_LIMIT = 6
+
+
+def _note_covers_hint_translation(note_text: str, hint: GlossaryHint) -> bool:
+    """Whether `note_text` already explains or quotes `hint.translation`."""
+    translation = _strip_leading_headword(hint.translation, hint.original).strip()
+    if not translation or not note_text.strip():
+        return False
+    if _note_quotes_translation(note_text, translation):
+        return True
+    folded_note = note_text.casefold().replace("ё", "е")
+    folded_tr = translation.casefold().replace("ё", "е")
+    for part in re.split(r"[,;/]", folded_tr):
+        words = _TAUTOLOGY_WORD_RE.findall(part)
+        significant = [word for word in words if len(word) >= 3]
+        if not significant:
+            continue
+        if all(
+            re.search(
+                rf"(?<!\w){re.escape(word[:4] if len(word) >= 5 else word)}",
+                folded_note,
+            )
+            is not None
+            for word in significant
+        ):
+            return True
+    return False
+
+
+def _note_span_in_block(
+    note: LanguageNote,
+    text: str,
+    block_id: str,
+    note_ids: Sequence[str],
+    known: Mapping[str, Difficulty],
+) -> tuple[int, int] | None:
+    span = _find_span(text, note.original_excerpt)
+    if span is not None:
+        return span
+    text_len = len(text)
+    for item_id in note_ids:
+        difficulty = known.get(item_id)
+        if difficulty is None:
+            continue
+        for anchor in difficulty.anchors:
+            if anchor.block_id == block_id and 0 <= anchor.start < anchor.end <= text_len:
+                return (anchor.start, anchor.end)
+    return None
+
+
+def _suppress_hints_covered_by_notes(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+    visible_hints: list[tuple[GlossaryHint, bool]],
+    visible_notes: Sequence[LanguageNote],
+    evidences: Sequence[HelpEvidence],
+    known: Mapping[str, Difficulty],
+    *,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
+    preferred_spans: Sequence[tuple[int, int]] = (),
+) -> list[tuple[GlossaryHint, bool]]:
+    """Suppress glossary hints already covered by an overlapping visible language note.
+
+    A hint is eligible for suppression only when an overlapping visible language note
+    (with non-empty cleaned body) either has a compact excerpt (`<= 6` words), shares a
+    `difficulty_id` with the hint, or directly covers the hint's translation.
+    Suppressed hints are NOT added to `excluded_hints`, so matching pronunciations remain
+    available as standalone IPA notes. Every `GLOSSARY_ONLY` segment (or whole block)
+    keeps at least one visible hint/note/assistance inside its bounds.
+    """
+    if not visible_hints or not visible_notes:
+        return visible_hints
+
+    active_notes: list[tuple[tuple[int, int], int, int, frozenset[str], str]] = []
+    for note in visible_notes:
+        if not _body(note.note):
+            continue
+        raw_note_ids = _ids_for(evidences, {_note_evidence_key(note)})
+        note_ids = frozenset(
+            item_id for item_id in raw_note_ids if item_id not in dropped_difficulty_ids
+        )
+        span = _note_span_in_block(note, block.text, result.block_id, tuple(note_ids), known)
+        if span is None:
+            continue
+        marker = _trim_terminal_punctuation(block.text, span[0], span[1])
+        word_count = len(expression_words(note.original_excerpt))
+        active_notes.append((span, marker, word_count, note_ids, note.note))
+
+    if not active_notes:
+        return visible_hints
+
+    hint_meta: list[tuple[tuple[int, int] | None, int | None, frozenset[str], bool]] = []
+    for hint, _ in visible_hints:
+        raw_ids = _ids_for(evidences, _hint_evidence_keys(hint, result.block_id))
+        hint_ids = frozenset(
+            item_id for item_id in raw_ids if item_id not in dropped_difficulty_ids
+        )
+        anchor_spans = _hint_anchor_spans(tuple(hint_ids), known, result.block_id)
+        h_span = find_hint_marker_span(
+            block.text,
+            hint.original,
+            anchor_spans=anchor_spans,
+            preferred_spans=preferred_spans,
+        )
+        h_marker = (
+            None
+            if h_span is None
+            else _trim_terminal_punctuation(block.text, h_span[0], h_span[1])
+        )
+        covered = False
+        if h_span is not None:
+            hs, he = h_span
+            for n_span, _, n_words, n_ids, n_text in active_notes:
+                ns, ne = n_span
+                if max(hs, ns) >= min(he, ne):
+                    continue
+                # Strict enclosure preserves standalone lexical hints whose exact span
+                # matches a stylistic/grammar note that does not repeat the translation.
+                strictly_enclosed = ns <= hs and he <= ne and (ne - ns) > (he - hs)
+                if (
+                    (strictly_enclosed and n_words <= _COMPACT_COVERING_NOTE_WORD_LIMIT)
+                    or bool(hint_ids & n_ids)
+                    or _note_covers_hint_translation(n_text, hint)
+                ):
+                    covered = True
+                    break
+        hint_meta.append((h_span, h_marker, hint_ids, covered))
+
+    if not any(covered for _, _, _, covered in hint_meta):
+        return visible_hints
+
+    spans = block.segment_spans
+    treatments = result.segment_treatments
+    if len(spans) > 1 and len(treatments) == len(spans):
+        glossary_spans = [
+            (span.start, span.end)
+            for span, mode in zip(spans, treatments, strict=True)
+            if mode.requires_glossary_hints
+        ]
+    elif result.treatment.requires_glossary_hints:
+        glossary_spans = [(0, len(block.text))]
+    else:
+        glossary_spans = []
+
+    assistance_markers = [
+        marker
+        for assistance in result.fragment_assistances
+        if assistance.resolved
+        and assistance.difficulty_id not in dropped_difficulty_ids
+        and _body(assistance.text or "")
+        and (marker := _last_anchor_end(block.id, assistance.anchors)) is not None
+    ]
+
+    kept_flags = [True] * len(visible_hints)
+    for index, (_, h_marker, _, covered) in enumerate(hint_meta):
+        if not covered:
+            continue
+        if glossary_spans and h_marker is not None:
+            blocks_invariant = False
+            for gs, ge in glossary_spans:
+                if not (gs < h_marker <= ge):
+                    continue
+                remaining = sum(
+                    1
+                    for other_idx, (_, other_marker, _, _) in enumerate(hint_meta)
+                    if other_idx != index
+                    and kept_flags[other_idx]
+                    and other_marker is not None
+                    and gs < other_marker <= ge
+                )
+                remaining += sum(
+                    1 for _, n_marker, _, _, _ in active_notes if gs < n_marker <= ge
+                )
+                remaining += sum(1 for a_marker in assistance_markers if gs < a_marker <= ge)
+                if remaining < 1:
+                    blocks_invariant = True
+                    break
+            if blocks_invariant:
+                continue
+        kept_flags[index] = False
+
+    return [item for item, keep in zip(visible_hints, kept_flags, strict=True) if keep]
+
+
+def find_hint_marker_span(
+    text: str,
+    original: str,
+    *,
+    anchor_spans: Sequence[tuple[int, int]] = (),
+    preferred_spans: Sequence[tuple[int, int]] = (),
+) -> tuple[int, int] | None:
+    """Find `(start, end)` span for a glossary hint with anchor and segment priorities."""
+    text_len = len(text)
+    valid_anchors = [
+        (a_start, a_end)
+        for a_start, a_end in anchor_spans
+        if 0 <= a_start < a_end <= text_len
+    ]
+    for a_start, a_end in valid_anchors:
+        local = _find_span(text[a_start:a_end], original)
+        if local is not None:
+            return (a_start + local[0], a_start + local[1])
+    if valid_anchors:
+        return valid_anchors[0]
+    for s_start, s_end in preferred_spans:
+        if not (0 <= s_start < s_end <= text_len):
+            continue
+        local = _find_span(text[s_start:s_end], original)
+        if local is not None:
+            return (s_start + local[0], s_start + local[1])
+    return _find_span(text, original)
+
+
 def find_hint_marker_end(
     text: str,
     original: str,
@@ -841,30 +1067,21 @@ def find_hint_marker_end(
     """Find marker offset for a glossary hint with anchor and segment priorities.
 
     Priority 1: explicit `Difficulty` anchor spans in this block (searching
-    `_find_end` inside each valid span first, then falling back to the first
+    `_find_span` inside each valid span first, then falling back to the first
     valid anchor end).
     Priority 2: preferred segment spans (`GLOSSARY_ONLY`, then `READ_AS_IS`).
     Fallback: first match anywhere in `text`.
+    Terminal sentence punctuation is trimmed when present.
     """
-    text_len = len(text)
-    valid_anchors = [
-        (a_start, a_end)
-        for a_start, a_end in anchor_spans
-        if 0 <= a_start < a_end <= text_len
-    ]
-    for a_start, a_end in valid_anchors:
-        local = _find_end(text[a_start:a_end], original)
-        if local is not None:
-            return a_start + local
-    if valid_anchors:
-        return valid_anchors[0][1]
-    for s_start, s_end in preferred_spans:
-        if not (0 <= s_start < s_end <= text_len):
-            continue
-        local = _find_end(text[s_start:s_end], original)
-        if local is not None:
-            return s_start + local
-    return _find_end(text, original)
+    span = find_hint_marker_span(
+        text,
+        original,
+        anchor_spans=anchor_spans,
+        preferred_spans=preferred_spans,
+    )
+    if span is None:
+        return None
+    return _trim_terminal_punctuation(text, span[0], span[1])
 
 
 def _words_match_tautology(left: str, right: str) -> bool:
@@ -1005,6 +1222,10 @@ def _note_draft(
 ) -> _Draft:
     """A language note. A missing excerpt is kept, with no marker."""
     ids = _ids_for(evidences, {_note_evidence_key(note)})
+    span = _find_span(text, note.original_excerpt)
+    marker_end = (
+        None if span is None else _trim_terminal_punctuation(text, span[0], span[1])
+    )
     return _Draft(
         label_ids=ids,
         kind_ids=ids,
@@ -1012,7 +1233,7 @@ def _note_draft(
         ipa=None,
         variant=None,
         body=_body(note.note),
-        marker_end=_find_end(text, note.original_excerpt),
+        marker_end=marker_end,
         origin="language_note",
         anchors=_shared_anchors(ids, known),
     )
@@ -1084,8 +1305,44 @@ def _shared_anchors(
     return None
 
 
-def _find_end(text: str, quote: str) -> int | None:
-    """End of the first match of `quote`, or None when nothing matches.
+_TERMINAL_PUNCT = frozenset({".", "!", "?", "…"})
+_CLOSING_DOUBLE_QUOTES = frozenset({'"', "”"})
+_TITLE_ABBREV_RE = re.compile(
+    r"(?:(?i:(?<!\w)(?:mr|mrs|ms|dr|st|prof)\.|(?<!\w)[ap]\.m\.)|(?<!\w)[A-Z]\.)$"
+)
+
+
+def _trim_terminal_punctuation(text: str, start: int, end: int) -> int:
+    """Move `end` left past sentence-ending punctuation and closing quotes.
+
+    Protects dialect/possessive apostrophes (`flyin’`, `Dursleys’`), abbreviations
+    (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, `St.`, `Prof.`, `a.m.`, `p.m.`, single initials),
+    and the lower bound `start`.
+    """
+    if end <= start or start < 0 or end > len(text):
+        return end
+    cur = end
+    while cur > start:
+        ch = text[cur - 1]
+        if ch in _CLOSING_DOUBLE_QUOTES:
+            cur -= 1
+            continue
+        if ch in {"’", "'"} and cur - 2 >= start and text[cur - 2] in _TERMINAL_PUNCT:
+            cur -= 1
+            continue
+        if ch in _TERMINAL_PUNCT:
+            if ch == "." and _TITLE_ABBREV_RE.search(text[start:cur]) is not None:
+                break
+            cur -= 1
+            continue
+        break
+    if cur <= start or not any(c.isalnum() for c in text[start:cur]):
+        return end
+    return cur
+
+
+def _find_span(text: str, quote: str) -> tuple[int, int] | None:
+    """Span `(start, end)` of the first match of `quote`, or None when nothing matches.
 
     Exact word-bounded match wins first, then apostrophe-normalized exact and
     casefolded word-bounded matches, a single-sentence gapped phrase with
@@ -1093,25 +1350,31 @@ def _find_end(text: str, quote: str) -> int | None:
     """
     if not quote:
         return None
-    exact = _word_bounded_end(text, quote, ignore_case=False)
+    exact = _word_bounded_span(text, quote, ignore_case=False)
     if exact is not None:
         return exact
     norm_text = text.translate(_APOSTROPHE_CHARS)
     norm_quote = quote.translate(_APOSTROPHE_CHARS)
-    normalized = _word_bounded_end(norm_text, norm_quote, ignore_case=False)
+    normalized = _word_bounded_span(norm_text, norm_quote, ignore_case=False)
     if normalized is not None:
         return normalized
-    folded = _word_bounded_end(norm_text, norm_quote, ignore_case=True)
+    folded = _word_bounded_span(norm_text, norm_quote, ignore_case=True)
     if folded is not None:
         return folded
-    gapped = _gapped_end(norm_text, norm_quote)
+    gapped = _gapped_span(norm_text, norm_quote)
     if gapped is not None:
         return gapped
-    return _infinitive_end(text, quote)
+    return _infinitive_span(text, quote)
 
 
-def _word_bounded_end(text: str, quote: str, *, ignore_case: bool) -> int | None:
-    """End of the first `quote` matching on word boundaries where edges are alphanumeric or apostrophe."""
+def _find_end(text: str, quote: str) -> int | None:
+    """End of the first match of `quote`, or None when nothing matches."""
+    span = _find_span(text, quote)
+    return None if span is None else span[1]
+
+
+def _word_bounded_span(text: str, quote: str, *, ignore_case: bool) -> tuple[int, int] | None:
+    """Span of the first `quote` matching on word boundaries where edges are alphanumeric or apostrophe."""
     stripped = quote.strip()
     if not stripped:
         return None
@@ -1122,15 +1385,15 @@ def _word_bounded_end(text: str, quote: str, *, ignore_case: bool) -> int | None
     match = pattern.search(text)
     if match is None:
         return None
-    return match.end()
+    return (match.start(), match.end())
 
 
 _ELLIPSIS_GAP = re.compile(r"\s*(?:…|\.{3})\s*")
 _GAP_BRIDGE = r"[,;:\"'‘’“”()]*\s+(?:[^\s.!?\r\n]+\s+){0,8}[\"'‘’“”(]*"
 
 
-def _gapped_end(text: str, quote: str) -> int | None:
-    """End of a gapped phrase like `what does … do` within one sentence."""
+def _gapped_span(text: str, quote: str) -> tuple[int, int] | None:
+    """Span of a gapped phrase like `what does … do` within one sentence."""
     if "…" not in quote and "..." not in quote:
         return None
     parts = [part.strip() for part in _ELLIPSIS_GAP.split(quote.strip()) if part.strip()]
@@ -1149,7 +1412,7 @@ def _gapped_end(text: str, quote: str) -> int | None:
     match = pattern.search(text)
     if match is None:
         return None
-    return match.end()
+    return (match.start(), match.end())
 
 
 def _verbal_infinitive_words(original: str) -> tuple[str, ...] | None:
@@ -1163,31 +1426,43 @@ def _verbal_infinitive_words(original: str) -> tuple[str, ...] | None:
     return words[1:]
 
 
-def _infinitive_end(text: str, quote: str) -> int | None:
-    """End of `to` + verb matched to an inflected phrase in `text`."""
+def _infinitive_span(text: str, quote: str) -> tuple[int, int] | None:
+    """Span of `to` + verb matched to an inflected phrase in `text`."""
     pattern = _verbal_infinitive_words(quote)
     if not pattern:
         return None
     verb, rest = pattern[0], pattern[1:]
-    tokens = _surface_tokens(text)
-    for index, (word, end) in enumerate(tokens):
+    token_spans = _surface_token_spans(text)
+    tokens = [(word, end) for word, _, end in token_spans]
+    for index, (word, start, end) in enumerate(token_spans):
         if not _same_verb(word, verb):
             continue
         if not rest:
-            return end
+            return (start, end)
         found = _match_phrase(tokens, index + 1, rest)
         if found is not None:
-            return found
+            return (start, found)
     return None
+
+
+def _infinitive_end(text: str, quote: str) -> int | None:
+    """End of `to` + verb matched to an inflected phrase in `text`."""
+    span = _infinitive_span(text, quote)
+    return None if span is None else span[1]
+
+
+def _surface_token_spans(text: str) -> list[tuple[str, int, int]]:
+    """Casefolded words and `(start, end)` offsets of each word in `text`."""
+    normalized = text.translate(_APOSTROPHE_CHARS)
+    return [
+        (match.group(0).casefold(), match.start(), match.end())
+        for match in _SURFACE_WORD.finditer(normalized)
+    ]
 
 
 def _surface_tokens(text: str) -> list[tuple[str, int]]:
     """Casefolded words and the exclusive end of each word in `text`."""
-    normalized = text.translate(_APOSTROPHE_CHARS)
-    return [
-        (match.group(0).casefold(), match.end())
-        for match in _SURFACE_WORD.finditer(normalized)
-    ]
+    return [(word, end) for word, _, end in _surface_token_spans(text)]
 
 
 _SINGLE_CONSONANT_CVC_EXCEPTIONS = frozenset({"bus", "gas"})

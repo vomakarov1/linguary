@@ -232,3 +232,44 @@ def test_analysis_pass_cache_preserves_segments() -> None:
     encoded = encode_pass(whole_block)
     assert "segments" not in encoded["response"]["treatment_plan"][0]
     assert decode_pass(encoded, pass_kind=AnalysisPassKind.PEDAGOGICAL).treatment_plan[0].segments == ()
+
+
+def test_narrative_joint_speaker_contract_and_pass_cache() -> None:
+    """QuotedContextFactSchema exposes strict joint flag and NarrativeAnalysisResponse pass cache preserves it."""
+    from linguary.domain import AnalysisPassKind
+
+    wire = strict_json_schema(NarrativeAnalysisSchema)
+    fact_def = wire["$defs"]["QuotedContextFactSchema"]
+    assert "joint" in fact_def["properties"]
+    assert "joint" in fact_def["required"]
+
+    body = {
+        "translation_instructions": "Keep tone.",
+        "chapter_summary": "Harry and Ron call Hermione together.",
+        "glossary_candidates": [],
+        "context_facts": [
+            {
+                "kind": "speaker",
+                "anchors": [{"block_id": "b1", "quote": "they said together."}],
+                "subject_anchor": {"block_id": "b1", "quote": "‘Hermione!’"},
+                "value": "Harry Potter",
+                "certainty": "inferred",
+                "joint": True,
+            },
+            {
+                "kind": "speaker",
+                "anchors": [{"block_id": "b1", "quote": "they said together."}],
+                "subject_anchor": {"block_id": "b1", "quote": "‘Hermione!’"},
+                "value": "Ron Weasley",
+                "certainty": "inferred",
+                "joint": True,
+            },
+        ],
+        "scenes": [],
+    }
+    dto = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, json.dumps(body, ensure_ascii=False))
+    assert [f.joint for f in dto.context_facts] == [True, True]
+
+    restored = decode_pass(json.loads(json.dumps(encode_pass(dto))), pass_kind=AnalysisPassKind.NARRATIVE)
+    assert [f.joint for f in restored.context_facts] == [True, True]
+

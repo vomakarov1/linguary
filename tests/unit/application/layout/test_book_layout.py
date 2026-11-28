@@ -502,12 +502,13 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
     The stored plans are the same objects and still contain both difficulties.
     """
     spoken = "“Softly,” Alice drawled softly."
+    spoken_inferred = "“Softly,” she drawled softly."
     first = _block("one", 0, spoken)
-    second = _block("two", 0, spoken)
+    second = _block("two", 0, spoken_inferred)
     early = _difficulty(first, "drawled", "speech_style", "z-drawl")
     late = _difficulty(second, "drawled", "speech_style", "a-drawl")
     early_fact = _fact("f-explicit", first, spoken, "Alice", "explicit")
-    late_fact = _fact("f-inferred", second, spoken, "Alice", "inferred")
+    late_fact = _fact("f-inferred", second, spoken_inferred, "Alice", "inferred")
     first_plan = _plan(early, facts=(early_fact,))
     second_plan = _plan(late, facts=(late_fact,))
     first_section = _section("one", 0, "Chapter 1", (first,))
@@ -631,7 +632,7 @@ def test_speech_style_without_speaker_not_dropped() -> None:
     """Speech styles that overlap no speaker fact both stay, in either order."""
     rough = _block("one", 0, "The sailor spoke roughly today.")
     again = _block("one", 1, "The sailor spoke roughly again.")
-    named = _block("one", 2, "“Yes,” Alice nodded once.")
+    named = _block("one", 2, "“Yes,” she nodded once.")
     first = _difficulty(rough, "roughly", "speech_style", "z-rough")
     second = _difficulty(again, "roughly", "speech_style", "a-rough")
     fact = _fact("f-alice", named, "“Yes,”", "Alice", "inferred")
@@ -699,11 +700,11 @@ def test_unmatched_speaker_not_shown() -> None:
     An approved decision replaces the source name. A suggested variant does not,
     and the English source is not shown in its place.
     """
-    alice = _block("one", 0, "“Wait,” said Alice.")
-    hatter = _block("one", 1, "“Wait,” said Hatter.")
+    alice = _block("one", 0, "“Wait,” she said.")
+    hatter = _block("one", 1, "“Wait,” he said.")
     unknown = _block("one", 2, "“Wait,” said someone.")
-    alice_fact = _fact("f-alice", alice, "“Wait,” said Alice.", "Alice", "inferred")
-    hatter_fact = _fact("f-hatter", hatter, "“Wait,” said Hatter.", "Hatter", "inferred")
+    alice_fact = _fact("f-alice", alice, "“Wait,” she said.", "Alice", "inferred")
+    hatter_fact = _fact("f-hatter", hatter, "“Wait,” he said.", "Hatter", "inferred")
     unknown_anchor = _anchor(unknown, "“Wait,” said someone.")
     unknown_fact = ContextFact(
         "f-unknown",
@@ -1074,17 +1075,37 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
     ))
     units = layout.chapters[section.id].units
 
-    assert units[said_first.id][0].speaker == "Гарри"
-    assert units[name_first.id][0].speaker == "Гарри"
+    from linguary.application.layout.book import _part_shows_speaker, _shown_parts
+
+    def _in_opening_remark(block: DocumentBlock, fact: ContextFact) -> bool:
+        return any(
+            _part_shows_speaker(block.text, part, fact.subject_anchor.start)
+            for part in _shown_parts(block, (BlockTreatment.READ_AS_IS,), None)
+        )
+
+    assert _in_opening_remark(said_first, facts[0]) is True
+    assert _in_opening_remark(name_first, facts[1]) is True
+    assert _in_opening_remark(asked, facts[3]) is True
+    assert _in_opening_remark(titled, facts[4]) is True
+    assert _in_opening_remark(left, facts[5]) is False
+    assert _in_opening_remark(later, facts[6]) is False
+    assert _in_opening_remark(mumbled, facts[7]) is True
+    assert _in_opening_remark(yelled, facts[8]) is True
+    assert _in_opening_remark(roared, facts[10]) is True
+    assert _in_opening_remark(period_next, facts[11]) is False
+
+    # Blocks whose narrative already explicitly names the speaker suppress redundant «Говорит X».
+    assert units[said_first.id][0].speaker is None
+    assert units[name_first.id][0].speaker is None
     assert units[pronoun.id][0].speaker == "Алиса"
-    assert units[asked.id][0].speaker == "Гарри"
+    assert units[asked.id][0].speaker is None
     assert units[titled.id][0].speaker == "Дёрсли"
     assert units[left.id][0].speaker is None
     assert units[later.id][0].speaker is None
-    assert units[mumbled.id][0].speaker == "мистер Дёрсли"
-    assert units[yelled.id][0].speaker == "Дадли"
+    assert units[mumbled.id][0].speaker is None
+    assert units[yelled.id][0].speaker is None
     assert units[gasped.id][0].speaker == "Алиса"
-    assert units[roared.id][0].speaker == "дядя Вернон"
+    assert units[roared.id][0].speaker is None
     assert units[period_next.id][0].speaker is None
     assert units[dumbledore.id][0].speaker == "Дамблдор"
     assert units[possessive.id][0].speaker == "Гарри"
@@ -1148,14 +1169,14 @@ def test_features_collected_for_legend() -> None:
     grammar_block = _block("one", 1, "She had a curious dream.")
     wordplay_block = _block("one", 2, "The mouse's tale was long.")
     pronounced = _block("one", 3, "The cat sat.")
-    speaker_block = _block("one", 4, "“Hello,” said Alice.")
+    speaker_block = _block("one", 4, "“Hello,” she said.")
     hinted = _block("one", 5, "Past prose.")
     current = _block("two", 0, "She saw a lantern.")
     grammar = _difficulty(grammar_block, "curious", "grammar", "d-grammar")
     wordplay = _difficulty(
         wordplay_block, "tale", "wordplay", "d-wordplay", help_kind="lexical_hint"
     )
-    speaker = _fact("f-alice", speaker_block, "“Hello,” said Alice.", "Alice", "inferred")
+    speaker = _fact("f-alice", speaker_block, "“Hello,” she said.", "Alice", "inferred")
     plan = _plan(grammar, wordplay, facts=(speaker,))
     first = _section(
         "one",
@@ -1266,7 +1287,7 @@ def test_features_collected_for_legend() -> None:
     assert "previously" in layout.features.sections
     assert "review" not in layout.features.sections
     assert layout.legend[0] == "Абзац оригинала всегда идёт первым."
-    assert "что было раньше" in "\n".join(layout.legend)
+    assert "короткое напоминание на языке оригинала перед главой" in "\n".join(layout.legend)
     assert "Говорит" not in "\n".join(layout.legend)
     assert layout.ipa_key == ipa_key(("kæt",))
     assert layout.legend == legend_lines(layout.features)
@@ -1377,7 +1398,7 @@ def test_book_layout_omits_who_is_who_and_review() -> None:
     assert sections("b1", english_help=False) == frozenset({"before_you_read"})
     assert sections(None, english_help=False) == frozenset({"before_you_read"})
 
-    spoken = "“Hello,” said Alice."
+    spoken = "“Hello,” she said."
     translated = _block("talk", 0, spoken)
     plain = _block("talk", 1, spoken)
     fact_translated = _fact("f-tr", translated, spoken, "Alice", "inferred")
@@ -1815,7 +1836,9 @@ def test_book_layout_includes_previously_only_with_multiple_content_chapters() -
     assert "previously" in multi.features.sections
     assert "who_is_who" not in multi.features.sections
     assert "review" not in multi.features.sections
-    assert "«Previously in…» — что было раньше" in "\n".join(multi.legend)
+    assert "«Previously in…» — короткое напоминание на языке оригинала перед главой" in "\n".join(
+        multi.legend
+    )
 
 
 def test_book_layout_three_stage_vocabulary_deduplication_and_11_grammar_caps() -> None:
@@ -3656,6 +3679,153 @@ def test_same_chapter_hint_and_unlinked_note_dedup_beyond_20_blocks() -> None:
         "glossary_hint",
         "language_note",
     ]
+
+
+def test_joint_speaker_renders_plural_note_in_deterministic_order_without_merging_single_lines() -> None:
+    """Joint speakers render 'Говорят A и B' deterministically, keep str speaker, and never merge joint=False lines."""
+    from linguary.web.schemas import ResultUnitResponse
+
+    intro = _block("one", 0, "Harry Potter looked at Ron Weasley and Hermione Granger.")
+    chorus = _block("one", 1, "‘Hermione!’ they said together.")
+    trio = _block("one", 2, "‘Wait!’ they all cried.")
+    two_singles = _block("one", 3, "‘Stop!’ he said. ‘No!’ she replied.")
+
+    chorus_anchor = _anchor(chorus, "‘Hermione!’")
+    # Deliberately give Ron an ID that sorts before Harry in ContentPlan.context_facts.
+    joint_ron = ContextFact(
+        "00-ron", "speaker", (chorus_anchor,), chorus_anchor, "Ron Weasley", "inferred", joint=True
+    )
+    joint_harry = ContextFact(
+        "zz-harry", "speaker", (chorus_anchor,), chorus_anchor, "Harry Potter", "inferred", joint=True
+    )
+
+    trio_anchor = _anchor(trio, "‘Wait!’")
+    trio_facts = (
+        ContextFact("01-hermione", "speaker", (trio_anchor,), trio_anchor, "Hermione Granger", "inferred", joint=True),
+        ContextFact("02-ron", "speaker", (trio_anchor,), trio_anchor, "Ron Weasley", "inferred", joint=True),
+        ContextFact("03-harry", "speaker", (trio_anchor,), trio_anchor, "Harry Potter", "inferred", joint=True),
+    )
+
+    # Two distinct non-joint speaker lines inside the same single-unit block.
+    single_1_anchor = _anchor(two_singles, "‘Stop!’")
+    single_2_anchor = _anchor(two_singles, "‘No!’")
+    single_1 = ContextFact("s1", "speaker", (single_1_anchor,), single_1_anchor, "Harry Potter", "inferred")
+    single_2 = ContextFact("s2", "speaker", (single_2_anchor,), single_2_anchor, "Hermione Granger", "inferred")
+
+    plan = _plan(facts=(joint_ron, joint_harry, *trio_facts, single_1, single_2))
+    section = _section("one", 0, "Chapter 1", (intro, chorus, trio, two_singles))
+    concepts = (
+        _concept("c-harry", "Harry Potter", "Гарри Поттер", TermStatus.APPROVED),
+        _concept("c-ron", "Ron Weasley", "Рон", TermStatus.APPROVED),
+        _concept("c-hermione", "Hermione Granger", "Гермиона", TermStatus.APPROVED),
+    )
+    layout = build_book_layout(
+        _inputs(
+            _document((section,)),
+            analyses=(_analysis("a-one", section.id, plan=plan),),
+            concepts=concepts,
+        )
+    )
+    units = layout.chapters[section.id].units
+
+    # Pair joint speech: ordered by first mention in chapter (Harry Potter before Ron Weasley).
+    chorus_unit = units[chorus.id][0]
+    assert isinstance(chorus_unit.speaker, str)
+    assert chorus_unit.speaker == "Гарри Поттер и Рон"
+    assert chorus_unit.notes[0].number is None
+    assert chorus_unit.notes[0].note.body == ("Говорят Гарри Поттер и Рон",)
+    dto = ResultUnitResponse.of_unit(chorus_unit, chorus.text)
+    assert dto.speaker == "Гарри Поттер и Рон"
+
+    # Trio joint speech: 3+ names formatted with comma + 'и'.
+    trio_unit = units[trio.id][0]
+    assert trio_unit.speaker == "Гарри Поттер, Рон и Гермиона"
+    assert trio_unit.notes[0].note.body == ("Говорят Гарри Поттер, Рон и Гермиона",)
+
+    # Two separate joint=False lines in one unit NEVER merge into "Говорят ...".
+    single_unit = units[two_singles.id][0]
+    assert single_unit.speaker == "Гарри Поттер"
+    assert single_unit.notes[0].note.body == ("Говорит Гарри Поттер",)
+
+    # Fallback deterministic order by casefold when neither speaker appears in chapter text.
+    unmentioned = _block("two", 0, "‘Harry Potter,’ chorused the twins.")
+    unm_anchor = _anchor(unmentioned, "‘Harry Potter,’")
+    unm_plan = _plan(
+        facts=(
+            ContextFact("zz-fred", "speaker", (unm_anchor,), unm_anchor, "Fred", "inferred", joint=True),
+            ContextFact("00-george", "speaker", (unm_anchor,), unm_anchor, "George", "inferred", joint=True),
+        )
+    )
+    unm_section = _section("two", 0, "Chapter 2", (unmentioned,))
+    unm_layout = build_book_layout(
+        _inputs(
+            _document((unm_section,)),
+            analyses=(_analysis("a-two", unm_section.id, plan=unm_plan),),
+            concepts=(
+                _concept("c-fred", "Fred", "Фред", TermStatus.APPROVED),
+                _concept("c-george", "George", "Джордж", TermStatus.APPROVED),
+            ),
+        )
+    )
+    unm_unit = unm_layout.chapters[unm_section.id].units[unmentioned.id][0]
+    assert unm_unit.speaker == "Джордж и Фред"
+    assert unm_unit.notes[0].note.body == ("Говорят Джордж и Фред",)
+
+
+def test_wp5_explicitly_named_speaker_suppresses_redundant_note_with_counterexample_guards() -> None:
+    """WP5.4: subject naming in narrative suppresses «Говорит X», while surnamesake/possessive/preposition/quoted apostrophe keep it."""
+    from linguary.application.layout.book import _part_explicitly_names_speaker, _strip_quoted_speech
+
+    # Direct helper checks.
+    assert _strip_quoted_speech("‘The Dursleys’ car is outside,’ he said.").strip() == "he said."
+    assert _part_explicitly_names_speaker("‘Oh.’ Dudley sat down heavily.", ("Dudley", "Dudley Dursley"), "Dudley Dursley") is True
+    assert _part_explicitly_names_speaker("‘Don’t be silly,’ she said, looking at Mr Dursley.", ("Petunia Dursley", "Mrs Dursley"), "Petunia Dursley") is False
+    assert _part_explicitly_names_speaker("‘Don’t be silly,’ she said. Mr Dursley frowned.", ("Petunia Dursley", "Mrs Dursley"), "Petunia Dursley") is False
+    assert _part_explicitly_names_speaker("‘Where is it?’ he asked. Harry’s aunt didn’t answer.", ("Harry Potter", "Harry"), "Harry Potter") is False
+    assert _part_explicitly_names_speaker("‘Oh,’ he muttered, looking at Dudley.", ("Dudley", "Dudley Dursley"), "Dudley") is False
+    assert _part_explicitly_names_speaker("‘The Dursleys’ car is outside,’ he said.", ("Vernon Dursley", "Dursley"), "Vernon Dursley") is False
+
+    # End-to-end build_book_layout verification.
+    b_suppressed = _block("one", 0, "‘Oh.’ Dudley sat down heavily.")
+    b_surnamesake = _block("one", 1, "‘Don’t be silly,’ she said, looking at Mr Dursley.")
+    b_possessive = _block("one", 2, "‘Where is it?’ he asked. Harry’s aunt didn’t answer.")
+    b_preposition = _block("one", 3, "‘Oh,’ he muttered, looking at Dudley.")
+    b_quoted_apos = _block("one", 4, "‘The Dursleys’ car is outside,’ he said.")
+
+    facts = (
+        _fact("f-dudley-sat", b_suppressed, "‘Oh.’", "Dudley Dursley", "inferred"),
+        _fact("f-petunia", b_surnamesake, "‘Don’t be silly,’", "Petunia Dursley", "inferred"),
+        _fact("f-harry-poss", b_possessive, "‘Where is it?’", "Harry Potter", "inferred"),
+        _fact("f-dudley-prep", b_preposition, "‘Oh,’", "Dudley Dursley", "inferred"),
+        _fact("f-vernon-apos", b_quoted_apos, "‘The Dursleys’ car is outside,’", "Vernon Dursley", "inferred"),
+    )
+    section = _section("one", 0, "Chapter 1", (b_suppressed, b_surnamesake, b_possessive, b_preposition, b_quoted_apos))
+    concepts = (
+        _concept("c-dudley", "Dudley Dursley", "Дадли", TermStatus.APPROVED),
+        _concept("c-petunia", "Petunia Dursley", "Петуния Дёрсли", TermStatus.APPROVED),
+        _concept("c-harry", "Harry Potter", "Гарри Поттер", TermStatus.APPROVED),
+        _concept("c-vernon", "Vernon Dursley", "Вернон Дёрсли", TermStatus.APPROVED),
+    )
+    layout = build_book_layout(
+        _inputs(
+            _document((section,)),
+            analyses=(_analysis("a-one", section.id, plan=_plan(facts=facts)),),
+            concepts=concepts,
+        )
+    )
+    units = layout.chapters[section.id].units
+
+    assert units[b_suppressed.id][0].speaker is None
+    assert units[b_suppressed.id][0].notes == ()
+    assert units[b_surnamesake.id][0].speaker == "Петуния Дёрсли"
+    assert units[b_surnamesake.id][0].notes[0].note.body == ("Говорит Петуния Дёрсли",)
+    assert units[b_possessive.id][0].speaker == "Гарри Поттер"
+    assert units[b_possessive.id][0].notes[0].note.body == ("Говорит Гарри Поттер",)
+    assert units[b_preposition.id][0].speaker == "Дадли"
+    assert units[b_preposition.id][0].notes[0].note.body == ("Говорит Дадли",)
+    assert units[b_quoted_apos.id][0].speaker == "Вернон Дёрсли"
+    assert units[b_quoted_apos.id][0].notes[0].note.body == ("Говорит Вернон Дёрсли",)
+
 
 
 

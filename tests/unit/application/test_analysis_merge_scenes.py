@@ -849,13 +849,28 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     )
     assert len(resolved_scenes) == 2
 
-    # 3. context_facts anti-spoiler: original certainty=='explicit' before first mention fails,
-    #    while original certainty=='inferred' passes and is NOT promoted to explicit before first mention
+    # 3. context_facts anti-spoiler: known_names are allowed as explicit before first mention in chapter,
+    #    whereas an unintroduced name with certainty=='explicit' before first mention fails,
+    #    and original certainty=='inferred' passes without being promoted to explicit before first mention
     #    (keeping validate_narrative_response idempotent across merge/cache revalidation).
     b1_quote_anchor = QuotedSourceAnchorResponse('b1', '‘Stay back!’')
     b1_remark_anchor = QuotedSourceAnchorResponse('b1', 'he shouted')
+    known_explicit_fact = QuotedContextFactResponse(
+        'f-sp-known', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'explicit',
+    )
+    _, known_kept_facts = validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            context_facts=(known_explicit_fact,),
+            scenes=spoiler_scenes,
+        ),
+        sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        known_names=('Harry',),
+    )
+    assert known_kept_facts[0].certainty == 'explicit'
+
     explicit_spoiler_fact = QuotedContextFactResponse(
-        'f-sp-explicit', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'explicit',
+        'f-sp-explicit', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Lestrade', 'explicit',
     )
     with pytest.raises(AnalysisMergeError) as fact_spoiler_exc:
         validate_narrative_response(
@@ -871,7 +886,7 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
     assert fact_spoiler_exc.value.violation.block_ids == ('id-1',)
 
     inferred_pronoun_fact = QuotedContextFactResponse(
-        'f-sp-inferred', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Harry Potter', 'inferred',
+        'f-sp-inferred', 'speaker', (b1_remark_anchor,), b1_quote_anchor, 'Lestrade', 'inferred',
     )
     _, kept_facts = validate_narrative_response(
         NarrativeAnalysisResponse(
@@ -880,9 +895,9 @@ def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflict
             scenes=spoiler_scenes,
             glossary_candidates=(
                 GlossaryCandidateResponse(
-                    source_text='Harry Potter',
+                    source_text='Lestrade',
                     type=ConceptType.PERSON,
-                    suggested_translation='Гарри Поттер',
+                    suggested_translation='Лестрейд',
                     confidence=0.95,
                     model_flagged_review=False,
                     note='мужской род',

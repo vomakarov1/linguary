@@ -65,7 +65,7 @@ def block_units(
     result: BlockProcessingResult | None,
     treatments: Sequence[BlockTreatment | None],
     notes: Sequence[LayoutNote],
-    speakers: Mapping[tuple[int, int], str],
+    speakers: Mapping[tuple[int, int], str | tuple[str, ...]],
     *,
     target_language: str | None = None,
     is_poem: bool = False,
@@ -128,10 +128,11 @@ def block_units(
         translation = whole if whole is not None else _part_translation(part, result, chosen)
         if translation is not None:
             translation = _normalize_display_translation(translation, target_language)
-        speaker = speaker_names[index]
+        speaker_entry = speaker_names[index]
+        speaker = None if speaker_entry is None else _format_speaker_names(speaker_entry)
         part_notes = list(note_buckets[index])
-        if speaker is not None and translation is None:
-            part_notes.append(_speaker_note(speaker))
+        if speaker_entry is not None and translation is None:
+            part_notes.append(_speaker_note(speaker_entry))
         units.append(
             LayoutUnit(
                 block_id=block.id,
@@ -251,14 +252,14 @@ def _note_order(item: NumberedNote) -> tuple[bool, int]:
 
 def _speakers_by_part(
     parts: Sequence[LayoutPart],
-    speakers: Mapping[tuple[int, int], str],
-) -> list[str | None]:
-    """Name of the earliest line that starts inside each part.
+    speakers: Mapping[tuple[int, int], str | tuple[str, ...]],
+) -> list[str | tuple[str, ...] | None]:
+    """Name (or joint names tuple) of the earliest line that starts inside each part.
 
     `line_end` does not choose the part. It only orders two lines that start
     at the same offset. A later line in the same part does not replace it.
     """
-    chosen: list[str | None] = [None] * len(parts)
+    chosen: list[str | tuple[str, ...] | None] = [None] * len(parts)
     ranked = sorted(speakers.items(), key=lambda item: (item[0][0], item[0][1]))
     for (line_start, _line_end), name in ranked:
         for index, part in enumerate(parts):
@@ -267,6 +268,19 @@ def _speakers_by_part(
                     chosen[index] = name
                 break
     return chosen
+
+
+def _format_speaker_names(entry: str | tuple[str, ...]) -> str:
+    """Format a single speaker or joint speaker tuple into a display string."""
+    if isinstance(entry, str):
+        return entry
+    if not entry:
+        return ""
+    if len(entry) == 1:
+        return entry[0]
+    if len(entry) == 2:
+        return f"{entry[0]} и {entry[1]}"
+    return f"{', '.join(entry[:-1])} и {entry[-1]}"
 
 
 def _is_russian(target_language: str | None) -> bool:
@@ -426,8 +440,14 @@ def _normalize_outer_german_quotes(text: str) -> str:
     return "".join(out)
 
 
-def _speaker_note(name: str) -> NumberedNote:
+def _speaker_note(entry: str | tuple[str, ...]) -> NumberedNote:
     """Unnumbered note used when a speaker's unit has no translation."""
+    if isinstance(entry, str):
+        label = f"Говорит {entry}"
+    elif len(entry) == 1:
+        label = f"Говорит {entry[0]}"
+    else:
+        label = f"Говорят {_format_speaker_names(entry)}"
     return NumberedNote(
         None,
         LayoutNote(
@@ -435,7 +455,7 @@ def _speaker_note(name: str) -> NumberedNote:
             term=None,
             ipa=None,
             variant=None,
-            body=(f"Говорит {name}",),
+            body=(label,),
             marker_end=None,
             origin="speaker",
             difficulty_kinds=(),

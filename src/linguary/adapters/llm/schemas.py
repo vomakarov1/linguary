@@ -456,6 +456,7 @@ class QuotedContextFactSchema(ContextFactSchema):
     id: str = Field(default="")
     anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)  # ty: ignore[incompatible-attribute-override]
     subject_anchor: QuotedSourceAnchorSchema  # ty: ignore[incompatible-attribute-override]
+    joint: bool = Field(default=False, strict=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -470,6 +471,16 @@ class QuotedContextFactSchema(ContextFactSchema):
         ):
             return {**data, "anchors": [dict(data["subject_anchor"])]}
         return data
+
+    @model_validator(mode="after")
+    def _check_joint(self):
+        if self.joint and (
+            self.kind != "speaker"
+            or self.certainty == "unknown"
+            or not (self.value and self.value.strip())
+        ):
+            raise ValueError("joint=true допустимо только для speaker с непустым значением")
+        return self
 
 
 class QuotedContentPlanSchema(ContentPlanV3Schema):

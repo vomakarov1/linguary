@@ -28,6 +28,7 @@ from linguary.adapters.config import (
     SettingsError,
     load_settings,
 )
+from linguary.adapters.epub.inline import read_source_language_tag
 from linguary.application.book_conditions import ConditionsError
 from linguary.application.book_overview import book_overview
 from linguary.application.errors import ApplicationError
@@ -42,7 +43,7 @@ from linguary.application.use_cases.resolve_correction_candidate import (
 from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.composition import build_application, drain_tasks, run_worker
-from linguary.domain import BookStatus, DomainError, TaskStatus, TaskType
+from linguary.domain import BookStatus, DomainError, TaskStatus, TaskType, detect_english_variant
 from linguary.domain.book_conditions import WorkStateError
 from linguary.domain.illustrations import (
     IllustrationError,
@@ -143,9 +144,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument(
         "--pronunciation-variant",
-        choices=["uk", "us"],
+        choices=["uk", "us", "auto"],
         default=None,
-        help="pronunciation variant when pronunciation help is enabled (uk or us)",
+        help=(
+            "pronunciation variant when pronunciation help is enabled "
+            "(uk, us, or auto: detect from EPUB dc:language, fallback to us)"
+        ),
     )
     analyze.add_argument(
         "--seed-first-chapter",
@@ -207,6 +211,11 @@ def _parser() -> argparse.ArgumentParser:
         "--acknowledge-unknown-outcome",
         action="store_true",
         help="confirm another chapter-correction send after an unknown provider outcome",
+    )
+    retry.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="clear cached intermediate fragment passes before retrying an analysis task",
     )
     retry.set_defaults(handler=_retry)
 
@@ -482,6 +491,15 @@ def _analyze(args: argparse.Namespace) -> int:
         pronunciation_help = getattr(args, "pronunciation_help", None)
         pronunciation_variant = getattr(args, "pronunciation_variant", None)
         seed_first_chapter = getattr(args, "seed_first_chapter", None)
+        if pronunciation_variant == "auto":
+            with application.unit_of_work.read_transaction() as tx:
+                book = tx.books.get(args.book_id)
+            raw_lang = (
+                read_source_language_tag(book.source_epub_path)
+                if book is not None
+                else None
+            )
+            pronunciation_variant = detect_english_variant(raw_lang) or "us"
         if any(
             value is not None
             for value in (
@@ -675,6 +693,7 @@ def _retry(args: argparse.Namespace) -> int:
         task = application.retry_task(RetryTaskCommand(
             task_id=args.task_id,
             acknowledge_unknown_outcome=args.acknowledge_unknown_outcome,
+            clear_cache=args.clear_cache,
         ))
         _warn_if_book_paused(application.unit_of_work, task.book_id)
         print(f"Task: {task.id}")
@@ -744,11 +763,27 @@ def _glossary_list(args: argparse.Namespace) -> int:
         pending_count = sum(
             1 for item in review.items if item.requires_review and not item.is_decided
         )
+        decided_count = sum(1 for item in review.items if item.is_decided)
+        auto_mandatory_count = sum(1 for item in review.items if item.is_auto_mandatory)
+        awaiting_review_count = sum(1 for item in review.items if item.awaits_decision)
+        suggested_count = sum(
+            1
+            for item in review.items
+            if not item.is_decided
+            and not item.is_auto_mandatory
+            and not item.awaits_decision
+        )
         if args.json_output:
             payload = {
                 "book_id": args.book_id,
                 "total": len(review.items),
                 "pending": pending_count,
+                "summary": {
+                    "decided": decided_count,
+                    "auto_mandatory": auto_mandatory_count,
+                    "awaiting_review": awaiting_review_count,
+                    "suggested": suggested_count,
+                },
                 "items": [
                     {
                         "concept_id": item.concept_id,
@@ -757,6 +792,7 @@ def _glossary_list(args: argparse.Namespace) -> int:
                         "suggested_translation": item.suggested_translation,
                         "requires_review": item.requires_review,
                         "is_decided": item.is_decided,
+                        "auto_mandatory": item.is_auto_mandatory,
                         "decision": (
                             item.decision.status.value if item.decision is not None else None
                         ),
@@ -767,9 +803,19 @@ def _glossary_list(args: argparse.Namespace) -> int:
             print(json.dumps(payload, ensure_ascii=False))
             return 0
         print(f"Book: {args.book_id}")
-        print(f"Items: {len(items)}/{len(review.items)} (pending: {pending_count})")
+        print(
+            f"Items: {len(items)}/{len(review.items)} "
+            f"(pending: {pending_count}, decided: {decided_count}, "
+            f"auto_mandatory: {auto_mandatory_count}, awaiting_review: {awaiting_review_count}, "
+            f"suggested: {suggested_count})"
+        )
         for item in items:
-            state = item.decision.status.value if item.decision is not None else "pending"
+            if item.decision is not None:
+                state = item.decision.status.value
+            elif item.is_auto_mandatory:
+                state = "auto_mandatory"
+            else:
+                state = "pending"
             flag = " [review]" if item.requires_review and not item.is_decided else ""
             print(
                 f"- {item.concept_id}: {item.source_text} -> {item.suggested_translation} "
