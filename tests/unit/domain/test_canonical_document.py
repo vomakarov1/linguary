@@ -245,3 +245,31 @@ def test_nested_paragraph_of_a_footnote_does_not_make_it_a_chapter() -> None:
     )
 
     assert make_section([note, inner]).is_notes_only
+
+
+def test_is_cover_section_rejects_title_page_with_heading_and_image() -> None:
+    """WP2: a non-cover title page with headings + decorative image is not a cover."""
+    from linguary.domain.document import DocumentSection, is_cover_section
+
+    title_section = DocumentSection(
+        id=SECTION_ID,
+        document_id=DOCUMENT_ID,
+        title="Book Title",
+        order=1,
+        source_resource_path="title.xhtml",
+        blocks=(
+            make_block(order=0, type=BlockType.HEADING, text="Book Title"),
+            make_block(order=1, type=BlockType.IMAGE, text=""),
+        ),
+    )
+    image_only_section = DocumentSection(
+        id=SECTION_ID,
+        document_id=DOCUMENT_ID,
+        title="Front",
+        order=0,
+        source_resource_path="front.xhtml",
+        blocks=(make_block(order=0, type=BlockType.IMAGE, text=""),),
+    )
+
+    assert is_cover_section(title_section) is False
+    assert is_cover_section(image_only_section) is True

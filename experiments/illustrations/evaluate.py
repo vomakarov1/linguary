@@ -103,7 +103,11 @@ class SyntheticEvalLLMClient:
         wire_len = len(request.instructions.encode("utf-8")) + len(
             request.input_text.encode("utf-8")
         )
-        self.max_input_bytes = max(self.max_input_bytes, wire_len)
+        if request.kind not in {
+            LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
+            LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+        }:
+            self.max_input_bytes = max(self.max_input_bytes, wire_len)
         usage = TokenUsage(prompt_tokens=60, completion_tokens=40)
 
         if request.kind is LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE:

@@ -363,6 +363,8 @@ class BookMetadata:
     authors: tuple[str, ...] = ()
     identifier: str | None = None
     publisher: str | None = None
+    rights: str | None = None
+    description: str | None = None
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -726,7 +728,7 @@ def is_cover_section(section: DocumentSection) -> bool:
 
     has_image = False
     for block in section.blocks:
-        if block.type in _TEXT_BLOCK_TYPES and block.text.strip():
+        if (block.type in _TEXT_BLOCK_TYPES or block.type is BlockType.HEADING) and block.text.strip():
             return False
         if block.type is BlockType.IMAGE:
             has_image = True

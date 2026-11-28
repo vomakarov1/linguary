@@ -14,7 +14,7 @@ import asyncio
 import os
 import shutil
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,10 @@ from linguary.application.use_cases.approve_glossary import StartProcessingComma
 from linguary.application.use_cases.export_book import ExportBookCommand, ExportMode
 from linguary.application.use_cases.pause_book import PauseBookCommand, ResumeBookCommand
 from linguary.application.use_cases.register_book import RegisterBookCommand
+from linguary.application.use_cases.resolve_correction_candidate import (
+    CorrectionCandidateNotFound,
+    ResolveCorrectionCommand,
+)
 from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.composition import build_application, drain_tasks, run_worker
@@ -217,7 +221,72 @@ def _parser() -> argparse.ArgumentParser:
         default=ExportMode.FULL.value,
         help="EPUB assembly mode: full (default) or structure_only",
     )
+    export.add_argument(
+        "--strict-corrections",
+        action="store_true",
+        help="fail with exit code 1 if awaiting_human correction candidates exist",
+    )
     export.set_defaults(handler=_export)
+
+    glossary = subparsers.add_parser(
+        "glossary", parents=[reader_parent], help="inspect and approve book glossary items"
+    )
+    glossary_actions = glossary.add_subparsers(dest="glossary_action", required=True)
+    glossary_list = glossary_actions.add_parser(
+        "list", parents=[reader_parent], help="list glossary review items"
+    )
+    glossary_list.add_argument("book_id")
+    glossary_list.add_argument(
+        "--pending-only",
+        action="store_true",
+        help="show only unresolved items requiring review",
+    )
+    glossary_list.add_argument("--json", dest="json_output", action="store_true")
+    glossary_list.set_defaults(handler=_glossary_list)
+
+    glossary_accept_all = glossary_actions.add_parser(
+        "accept-all",
+        parents=[reader_parent],
+        help="accept all unresolved glossary items requiring review",
+    )
+    glossary_accept_all.add_argument("book_id")
+    glossary_accept_all.add_argument("--json", dest="json_output", action="store_true")
+    glossary_accept_all.set_defaults(handler=_glossary_accept_all)
+
+    corrections = subparsers.add_parser(
+        "corrections", parents=[reader_parent], help="inspect and resolve chapter correction candidates"
+    )
+    corrections_actions = corrections.add_subparsers(dest="corrections_action", required=True)
+    corrections_list = corrections_actions.add_parser(
+        "list", parents=[reader_parent], help="list correction candidates for active run"
+    )
+    corrections_list.add_argument("book_id")
+    corrections_list.add_argument(
+        "--awaiting-only",
+        action="store_true",
+        help="show only candidates in awaiting_human state",
+    )
+    corrections_list.add_argument("--json", dest="json_output", action="store_true")
+    corrections_list.set_defaults(handler=_corrections_list)
+
+    corrections_resolve = corrections_actions.add_parser(
+        "resolve",
+        parents=[reader_parent],
+        help="accept or keep a correction candidate awaiting human review",
+    )
+    corrections_resolve.add_argument("book_id")
+    corrections_resolve.add_argument("candidate_id")
+    corrections_resolve.add_argument(
+        "--action",
+        choices=["accept", "keep"],
+        required=True,
+        help="human decision: accept proposal or keep current translation",
+    )
+    corrections_resolve.add_argument("--reason", default=None, help="decision rationale")
+    corrections_resolve.add_argument("--proposal-sha256", default=None)
+    corrections_resolve.add_argument("--input-sha256", default=None)
+    corrections_resolve.add_argument("--json", dest="json_output", action="store_true")
+    corrections_resolve.set_defaults(handler=_corrections_resolve)
     diagnostics = subparsers.add_parser('diagnostics', help='local diagnostic metadata and bodies')
     actions = diagnostics.add_subparsers(dest='diagnostics_action', required=True)
     for action in ('list', 'show', 'purge'):
@@ -619,6 +688,19 @@ def _export(args: argparse.Namespace) -> int:
     """Assemble EPUB in selected mode (full by default)."""
     application = _application(args)
     try:
+        if getattr(args, "strict_corrections", False):
+            with application.unit_of_work.read_transaction() as tx:
+                run = tx.runs.active_for_book(args.book_id)
+                pending = (
+                    len(tx.work.list_correction_candidates(run.id, states=("awaiting_human",)))
+                    if run is not None
+                    else 0
+                )
+            if pending > 0:
+                raise ApplicationError(
+                    f"экспорт отклонён (--strict-corrections): книга {args.book_id} содержит "
+                    f"непросмотренные предложения исправлений ({pending})"
+                )
         result = application.export_book(
             ExportBookCommand(
                 book_id=args.book_id,
@@ -644,6 +726,218 @@ def _export(args: argparse.Namespace) -> int:
             "EPUBCheck: "
             f"{result.validation_status.value if result.validation_status else 'none'}"
         )
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _glossary_list(args: argparse.Namespace) -> int:
+    """List glossary review items for a book."""
+    application = _application(args)
+    try:
+        review = application.approve_glossary.review(args.book_id)
+        items = [
+            item
+            for item in review.items
+            if not args.pending_only or (item.requires_review and not item.is_decided)
+        ]
+        pending_count = sum(
+            1 for item in review.items if item.requires_review and not item.is_decided
+        )
+        if args.json_output:
+            payload = {
+                "book_id": args.book_id,
+                "total": len(review.items),
+                "pending": pending_count,
+                "items": [
+                    {
+                        "concept_id": item.concept_id,
+                        "source_text": item.source_text,
+                        "type": item.concept_type.value,
+                        "suggested_translation": item.suggested_translation,
+                        "requires_review": item.requires_review,
+                        "is_decided": item.is_decided,
+                        "decision": (
+                            item.decision.status.value if item.decision is not None else None
+                        ),
+                    }
+                    for item in items
+                ],
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+        print(f"Book: {args.book_id}")
+        print(f"Items: {len(items)}/{len(review.items)} (pending: {pending_count})")
+        for item in items:
+            state = item.decision.status.value if item.decision is not None else "pending"
+            flag = " [review]" if item.requires_review and not item.is_decided else ""
+            print(
+                f"- {item.concept_id}: {item.source_text} -> {item.suggested_translation} "
+                f"({state}){flag}"
+            )
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _glossary_accept_all(args: argparse.Namespace) -> int:
+    """Accept all unresolved glossary items requiring review."""
+    application = _application(args)
+    try:
+        accepted = application.approve_glossary.accept_all_awaiting(args.book_id)
+        review = application.approve_glossary.review(args.book_id)
+        remaining_pending = sum(
+            1 for item in review.items if item.requires_review and not item.is_decided
+        )
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "book_id": args.book_id,
+                        "accepted_count": len(accepted),
+                        "remaining_pending": remaining_pending,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        print(f"Book: {args.book_id}")
+        print(f"Accepted: {len(accepted)}")
+        print(f"Remaining pending: {remaining_pending}")
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _candidate_snippet(candidate: Any) -> tuple[str | None, str | None]:
+    proposed = (
+        candidate.payload.get("proposed_result")
+        if isinstance(candidate.payload, Mapping)
+        else None
+    )
+    prop_text: str | None = None
+    if isinstance(proposed, Mapping):
+        raw_text = proposed.get("translated_text")
+        if isinstance(raw_text, str):
+            prop_text = raw_text
+        elif isinstance(proposed.get("segments"), Sequence) and not isinstance(
+            proposed.get("segments"), (str, bytes)
+        ):
+            parts = [
+                seg.get("translated_text")
+                for seg in proposed["segments"]
+                if isinstance(seg, Mapping) and isinstance(seg.get("translated_text"), str)
+            ]
+            if parts:
+                prop_text = " ".join(parts)
+    review = candidate.review if isinstance(candidate.review, Mapping) else None
+    reason = review.get("reason") if isinstance(review, Mapping) else None
+    return reason, prop_text
+
+
+def _corrections_list(args: argparse.Namespace) -> int:
+    """List chapter correction candidates for the active processing run."""
+    application = _application(args)
+    try:
+        with application.unit_of_work.read_transaction() as tx:
+            if tx.books.get(args.book_id) is None:
+                raise ApplicationError(f"книга {args.book_id} не найдена")
+            run = tx.runs.active_for_book(args.book_id)
+            states = ("awaiting_human",) if args.awaiting_only else None
+            candidates = (
+                tx.work.list_correction_candidates(run.id, states=states)
+                if run is not None
+                else ()
+            )
+        serialized = []
+        for cand in candidates:
+            review_reason, proposed_text = _candidate_snippet(cand)
+            serialized.append(
+                {
+                    "candidate_id": cand.candidate_id,
+                    "section_id": cand.section_id,
+                    "block_id": cand.block_id,
+                    "state": cand.state,
+                    "proposal_sha256": cand.proposal_sha256,
+                    "input_sha256": cand.input_sha256,
+                    "review_reason": review_reason,
+                    "proposed_text": proposed_text,
+                }
+            )
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "book_id": args.book_id,
+                        "run_id": run.id if run is not None else None,
+                        "items": serialized,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        print(f"Book: {args.book_id}")
+        print(f"Candidates: {len(serialized)}")
+        for item in serialized:
+            reason_suffix = f" — {item['review_reason']}" if item["review_reason"] else ""
+            print(
+                f"- {item['candidate_id']} [{item['state']}] "
+                f"{item['section_id']}/{item['block_id']}{reason_suffix}"
+            )
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _corrections_resolve(args: argparse.Namespace) -> int:
+    """Resolve an awaiting_human correction candidate using ResolveCorrectionCandidate."""
+    application = _application(args)
+    try:
+        resolver = application.resolve_correction_candidate
+        if resolver is None:
+            raise ApplicationError("разрешение предложений исправлений недоступно")
+        reason = (args.reason if args.reason is not None else "Решено через CLI").strip()
+        if not reason:
+            raise ApplicationError("причина решения не должна быть пустой")
+        proposal_sha256 = args.proposal_sha256
+        input_sha256 = args.input_sha256
+        if proposal_sha256 is None or input_sha256 is None:
+            with application.unit_of_work.read_transaction() as tx:
+                candidate = tx.work.get_correction_candidate(args.candidate_id)
+                if candidate is None or candidate.book_id != args.book_id:
+                    raise CorrectionCandidateNotFound("предложение исправления не найдено")
+                if proposal_sha256 is None:
+                    proposal_sha256 = candidate.proposal_sha256
+                if input_sha256 is None:
+                    input_sha256 = candidate.input_sha256
+        block_id = resolver(
+            ResolveCorrectionCommand(
+                book_id=args.book_id,
+                candidate_id=args.candidate_id,
+                proposal_sha256=proposal_sha256,
+                input_sha256=input_sha256,
+                action=args.action,
+                reason=reason,
+            )
+        )
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "book_id": args.book_id,
+                        "candidate_id": args.candidate_id,
+                        "block_id": block_id,
+                        "action": args.action,
+                        "reason": reason,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        print(f"Book: {args.book_id}")
+        print(f"Candidate: {args.candidate_id}")
+        print(f"Block: {block_id}")
+        print(f"Action: {args.action}")
         return 0
     finally:
         asyncio.run(application.aclose())

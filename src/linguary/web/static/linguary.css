@@ -552,6 +552,26 @@ pre code {
   text-indent: -1em;
 }
 
+.lg-notes > li.lg-note-plain {
+  text-indent: 0;
+}
+
+.center {
+  text-align: center;
+  text-indent: 0;
+}
+
+.pagebreak {
+  page-break-before: always;
+  break-before: page;
+}
+
+p.pagebreak {
+  margin: 0;
+  padding: 0;
+  line-height: 0;
+}
+
 a.lg-ref {
   text-decoration: none;
   color: inherit;

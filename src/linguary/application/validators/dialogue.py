@@ -93,6 +93,7 @@ _INNER_AUTHOR_SPEECH = re.compile(
 
 #: (d) Stray dialogue dash between sentences of a single speaker.
 _STRAY_INLINE_DASH = re.compile(r"[.!?…]\s+[—–]\s+[А-ЯЁ]")
+_INLINE_SPEECH_TRANSITION = re.compile(r"([,!?.…])\s+[—–]\s+([А-ЯЁа-яё])")
 _LOWERCASE_AUTHOR_DASH = re.compile(r"(?:[,!?…]|\.\.\.)\s*[—–]\s*[а-яё]")
 _ABBREVIATION_BEFORE_DASH = re.compile(
     r"(?:"
@@ -189,6 +190,14 @@ def _text_dialogue_violation(
             f"в переводе блока {block_id} лишнее тире «— » в строке после точки без переноса строки: "
             "прямую речь после слов автора начинай с новой строки и «— » либо оформляй через двоеточие"
         )
+    if strict_v3 and _has_block_post_quote_narrative_dash(
+        text, block=block, item=item, source_text=source_text
+    ):
+        return (
+            f"в переводе блока {block_id} самостоятельное авторское предложение после закрытой "
+            "реплики отделено тире «— » на той же строке (читается как новая реплика): перенеси "
+            "его на новую строку без тире либо встрой как слова автора со строчной буквы"
+        )
     if _has_guillemet_spoken_dialogue(text):
         return (
             f"в переводе блока {block_id} прямая речь вслух с начала абзаца оформлена в «…» вместо тире: "
@@ -271,8 +280,8 @@ def _source_leaves_opening_quote_unclosed(source: str) -> bool:
 _QUOTE_CHARS = frozenset({"“", "”", "‘", "’", "«", "»", '"', "'"})
 
 
-def _source_has_multiple_separated_quotes(source_text: str) -> bool:
-    """Whether `source_text` has at least two top-level quotes separated by author narration."""
+def _top_level_quote_spans(source_text: str) -> list[tuple[int, int]]:
+    """Return top-level `(start, end)` spans of direct speech quotes in `source_text`."""
     spans: list[tuple[int, int]] = []
     current_open: tuple[str, int] | None = None
     for idx, ch in enumerate(source_text):
@@ -286,6 +295,12 @@ def _source_has_multiple_separated_quotes(source_text: str) -> bool:
             current_open = None
     if current_open is not None and source_text[current_open[1] + 1 :].strip():
         spans.append((current_open[1], len(source_text)))
+    return spans
+
+
+def _source_has_multiple_separated_quotes(source_text: str) -> bool:
+    """Whether `source_text` has at least two top-level quotes separated by author narration."""
+    spans = _top_level_quote_spans(source_text)
     if len(spans) < 2:
         return False
     return any(
@@ -385,6 +400,100 @@ def _has_inline_dialogue_dash(text: str, *, source_text: str | None) -> bool:
                 continue
             if any(start < match.start() and match.end() < end for start, end in allowed_spans):
                 continue
+            return True
+    return False
+
+
+def _has_block_post_quote_narrative_dash(
+    text: str,
+    *,
+    block: BlockResultResponse | None,
+    item: TranslationUnitItem | None,
+    source_text: str | None,
+) -> bool:
+    """Under strict v3: checks per segment when `block.segments` is non-empty."""
+    if block is not None and block.segments and item is not None:
+        spans = item.block.segment_spans
+        ordered = sorted(block.segments, key=lambda seg: seg.index)
+        for segment in ordered:
+            if not (1 <= segment.index <= len(spans)):
+                continue
+            span = spans[segment.index - 1]
+            seg_source = item.block.text[span.start : span.end]
+            if _has_dash_before_post_quote_narration(
+                segment.translated_text,
+                source_text=seg_source,
+            ):
+                return True
+            if (
+                segment.index > 1
+                and not has_direct_speech_quotes(seg_source)
+                and seg_source.lstrip()[:1].isupper()
+                and segment.translated_text.lstrip().startswith(("—", "–"))
+            ):
+                prev_span = spans[segment.index - 2]
+                prev_source = item.block.text[prev_span.start : prev_span.end]
+                if (
+                    has_direct_speech_quotes(prev_source)
+                    and _outer_unclosed_open(item.block.text, span.start) is None
+                ):
+                    return True
+        return False
+    return _has_dash_before_post_quote_narration(text, source_text=source_text)
+
+
+def _has_dash_before_post_quote_narration(
+    text: str, *, source_text: str | None
+) -> bool:
+    """Under strict v3: rejects `— ` + capitalized authorial sentence on a dash-led speech line."""
+    if source_text is None or not has_direct_speech_quotes(source_text):
+        return False
+    quote_spans = _top_level_quote_spans(source_text)
+    if not quote_spans:
+        return False
+    speech_segments = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or not line.startswith(("—", "–")):
+            continue
+        speech_segments += 1
+        state = "speech"
+        allowed_spans = [
+            (span.start(), span.end())
+            for span in _GUILLEMET_SPAN.finditer(line)
+            if _is_allowed_embedded_quote_span(
+                line, span.start(), span.end(), source_text=source_text
+            )
+        ]
+        for match in _INLINE_SPEECH_TRANSITION.finditer(line):
+            if any(start < match.start() and match.end() < end for start, end in allowed_spans):
+                continue
+            punct, next_char = match.group(1), match.group(2)
+            if (
+                punct == "."
+                and _ABBREVIATION_BEFORE_DASH.search(line[: match.start() + 1]) is not None
+            ):
+                continue
+            if state == "speech":
+                if next_char.islower():
+                    state = "attribution"
+                elif punct in ".!?…" and next_char.isupper():
+                    return True
+            elif state == "attribution":
+                if punct in ".!?…" and next_char.isupper():
+                    state = "speech"
+                    speech_segments += 1
+                elif punct == "," and next_char.islower():
+                    state = "speech"
+    tail = source_text[quote_spans[-1][1] :]
+    if tail.strip() and speech_segments > len(quote_spans):
+        from linguary.application.validators.paragraphs import (
+            _count_post_speech_narrative_sentences,
+        )
+
+        if _count_post_speech_narrative_sentences(source_text) > 0 and not _top_level_quote_spans(
+            tail
+        ):
             return True
     return False
 

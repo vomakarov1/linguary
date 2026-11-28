@@ -217,3 +217,41 @@ async def test_snapshot_without_english_help_retains_original_level(tmp_path):
         assert 'english_help' not in historical.payload['prompt_templates']
     finally:
         await app.aclose()
+
+
+async def test_start_processing_port_change_rolls_back_and_keeps_correction_route_aligned(tmp_path):
+    """WP1: changing local port before process rejects atomically; restoring port allows processing + correction."""
+    from linguary.application.use_cases.approve_glossary import StartProcessingCommand
+    from linguary.domain import BookStatus
+
+    fake = FakeLLMClient([reply()])
+    app = make_app(tmp_path, fake)
+    try:
+        port_a = replace(app.settings, llm=replace(app.settings.llm, base_url='http://127.0.0.1:51247/v1'))
+        app.runtime_settings.publish(app.runtime_settings.prepare(port_a), 1)
+        store_imported(app)
+        await app.analysis.start('book-1')
+        completed = await drain_tasks(app)
+        assert len(completed) == 1 and completed[0].status == TaskStatus.SUCCEEDED
+
+        # Simulate ephemeral port shift before launching processing.
+        port_b = replace(app.settings, llm=replace(app.settings.llm, base_url='http://127.0.0.1:51594/v1'))
+        app.runtime_settings.publish(app.runtime_settings.prepare(port_b), 2)
+        with pytest.raises(ConditionsError, match='route_unavailable'):
+            app.start_processing()(StartProcessingCommand(book_id='book-1'))
+
+        with app.unit_of_work.transaction() as tx:
+            assert tx.runs.active_for_book('book-1') is None
+            assert tx.books.get('book-1').status in {BookStatus.GLOSSARY_REVIEW, BookStatus.READY_TO_PROCESS}
+
+        # Restore original port and start processing cleanly.
+        app.runtime_settings.publish(app.runtime_settings.prepare(port_a), 3)
+        run = app.start_processing()(StartProcessingCommand(book_id='book-1'))
+        conditions = app.book_conditions.require('book-1')
+        with app.unit_of_work.transaction() as tx:
+            binding = tx.work.get_binding('run', run.id)
+        assert binding is not None
+        assert binding['payload_json']['correction']['route'] == dict(conditions.payload['route'])
+    finally:
+        await app.aclose()
+

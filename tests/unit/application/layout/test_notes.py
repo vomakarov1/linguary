@@ -1707,3 +1707,16 @@ def test_resultative_particles_match_object_split_infinitive_phrases() -> None:
         assert block_notes(block, result, None, ())[0].marker_end == expected_end
 
 
+def test_vocabulary_dedup_key_strips_leading_articles() -> None:
+    """WP5: leading a/an/the are normalized so `the reptile house` deduplicates with `reptile house`."""
+    from linguary.application.layout.notes import vocabulary_dedup_key
+
+    assert vocabulary_dedup_key("the reptile house") == vocabulary_dedup_key("reptile house")
+    assert vocabulary_dedup_key("a wand") == vocabulary_dedup_key("wand")
+    assert vocabulary_dedup_key("an owl") == vocabulary_dedup_key("owl")
+    assert vocabulary_dedup_key("to the door") != vocabulary_dedup_key("door")
+    assert vocabulary_dedup_key("a bit") != vocabulary_dedup_key("to bite")
+    assert vocabulary_dedup_key("a few") != vocabulary_dedup_key("few")
+    assert vocabulary_dedup_key("the same") != vocabulary_dedup_key("same")
+
+

@@ -403,10 +403,55 @@ def test_processing_start_rejects_explicit_null_name_strategy(
     response = configured_client.post(f"/books/{scenario.book_id}/process")
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "conditions_unavailable"
+    assert response.json()["detail"] == {"reason_code": "conditions_unavailable"}
     with configured_application.unit_of_work.transaction() as uow:
         assert uow.runs.active_for_book(scenario.book_id) is None
         assert uow.books.get(scenario.book_id).status is BookStatus.GLOSSARY_REVIEW
+
+
+def test_processing_start_rejects_incompatible_route_atomically(
+    configured_client: TestClient, configured_application: Application
+) -> None:
+    """Route mismatch fails before creating a ProcessingRun or moving to PROCESSING."""
+    candidate = glossary_candidate()
+    scenario = store_book(
+        configured_application, glossary_candidates={0: (candidate,)}
+    )
+    accepted = configured_client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}",
+        data={"action": "accept"},
+    )
+    assert accepted.status_code == 200
+    conditions = continue_legacy(configured_application, scenario.book_id)
+    with configured_application.unit_of_work.transaction() as uow:
+        uow.work.add_conditions(
+            replace(
+                conditions,
+                id=str(uuid4()),
+                revision=conditions.revision + 1,
+                payload={
+                    **conditions.payload,
+                    "route": {
+                        **conditions.payload["route"],
+                        "base_url": "http://127.0.0.1:51247/v1",
+                    },
+                },
+            )
+        )
+
+    response = configured_client.post(f"/books/{scenario.book_id}/process")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"reason_code": "route_unavailable"}
+    html_response = configured_client.post(
+        f"/books/{scenario.book_id}/process",
+        headers={"Accept": "text/html"},
+    )
+    assert html_response.status_code == 409
+    assert "text/html" in html_response.headers["content-type"]
+    with configured_application.unit_of_work.transaction() as uow:
+        assert uow.runs.active_for_book(scenario.book_id) is None
+        assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS
 
 
 def test_processing_start_creates_run_and_chapter_tasks(

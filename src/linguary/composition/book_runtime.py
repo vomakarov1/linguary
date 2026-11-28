@@ -479,6 +479,13 @@ class BookRuntimeResolver:
             getattr(llm, 'output_price_per_mtok', None),
         )
 
+    def validate_route(self, pinned_route: Mapping[str, Any] | None) -> None:
+        current = self.runtime.current.settings
+        if not current.llm.api_key or not isinstance(pinned_route, Mapping):
+            raise ConditionsError('route_unavailable')
+        if not routes_compatible(route_snapshot(current.llm), thaw(pinned_route)):
+            raise ConditionsError('route_unavailable')
+
     def settings_for(self, conditions):
         payload = conditions.payload
         marker = payload['prompt_templates'].get('pronunciation_candidates_version')

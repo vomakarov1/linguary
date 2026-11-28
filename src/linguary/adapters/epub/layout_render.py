@@ -243,7 +243,10 @@ def _append_notes(
         reading, "ol", {"class": "lg-notes", "lang": target_language}
     )
     for numbered, body, note_id in prepared:
-        item = _sub(listing, "li", {"id": note_id})
+        attrs = {"id": note_id}
+        if numbered.number is None:
+            attrs["class"] = "lg-note-plain"
+        item = _sub(listing, "li", attrs)
         note = numbered.note
         if numbered.number is not None:
             number = _sub(item, "span", {"class": "lg-num"})

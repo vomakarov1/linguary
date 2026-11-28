@@ -676,7 +676,68 @@ def test_dialogue_validator_allows_ollivander_1_line_and_3_line_and_rejects_2_li
         "Он вынул из кармана длинную рулетку. — Какой рукой вы держите палочку?"
     )
 
-    assert _check(one_line, source_text=ollivander_source, strict_v3=True) is None
+    assert _check(one_line, source_text=ollivander_source, strict_v3=True) is not None
     assert _check(three_line, source_text=ollivander_source, strict_v3=True) is None
     assert _check(two_line_bad, source_text=ollivander_source, strict_v3=True) is not None
+
+
+def test_wp6_post_quote_narrative_dash_rejected_and_newline_allowed() -> None:
+    """WP6: rejects dash before capitalized post-quote authorial sentence; allows newline & legitimate 2-speech lines."""
+    bad_cases = (
+        (
+            "‘Good boy, Dudley!’ He ruffled Dudley’s hair.",
+            "— Молодчина, Дадли! — Он взъерошил Дадли волосы.",
+        ),
+        (
+            "‘Stop it,’ he said. ‘He might be sick.’ Then he ran out.",
+            "— Прекрати, — сказал он. — Его может стошнить. — Потом он выбежал.",
+        ),
+        (
+            "‘Letter-bombs?’ He chuckled at his own joke.",
+            "— Письма-бомбы? — Он хихикнул над собственной шуткой.",
+        ),
+        (
+            "‘Hello,’ he said. Then he ran.",
+            "— Привет, — сказал он. — Потом он убежал.",
+        ),
+        (
+            "‘Hello!’ he cried. Then he ran.",
+            "— Привет! — крикнул он. — Потом он убежал.",
+        ),
+        (
+            "‘Hello,’ he said. He didn’t move.",
+            "— Привет, — сказал он. — Он не двинулся.",
+        ),
+        (
+            "‘Hello,’ Harry said. He ruffled Dudley’s hair.",
+            "— Привет, — сказал Гарри. — Он взъерошил Дадли волосы.",
+        ),
+    )
+    for src, bad_tr in bad_cases:
+        assert _check(bad_tr, source_text=src, strict_v3=True) is not None, f"missed: {bad_tr}"
+
+    good_cases = (
+        (
+            "‘Good boy, Dudley!’ He ruffled Dudley’s hair.",
+            "— Молодчина, Дадли!\nОн взъерошил Дадли волосы.",
+        ),
+        (
+            "‘Hello,’ he said. Then he ran.",
+            "— Привет, — сказал он.\nПотом он убежал.",
+        ),
+        (
+            "‘Hello,’ Harry said. He didn’t move.",
+            "— Привет, — сказал Гарри.\nОн не двинулся.",
+        ),
+        (
+            "‘Look at that!’ he yelled. ‘Look!’ Aunt Petunia gasped.",
+            "— Посмотри на это! — крикнул он. — Посмотри! — ахнула тётя Петуния.",
+        ),
+        (
+            "‘First,’ he said. ‘Second.’",
+            "— Первая, — сказал он. — Вторая.",
+        ),
+    )
+    for src, good_tr in good_cases:
+        assert _check(good_tr, source_text=src, strict_v3=True) is None, f"false positive: {good_tr}"
 

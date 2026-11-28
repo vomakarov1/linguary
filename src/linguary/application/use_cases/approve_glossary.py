@@ -19,10 +19,13 @@ while `TranslationUnit` processes in P3.T6.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
+
+from linguary.domain.book_conditions import thaw
 
 from linguary.application.glossary_review import (
     GlossaryNotFoundError,
@@ -445,6 +448,9 @@ class ApproveGlossary:
         )
 
 
+_CORRECTION_ROUTE_KEYS = frozenset({"provider", "base_url", "proxy", "route_id"})
+
+
 class StartProcessing:
     """Freezes glossary decisions and initiates book processing run (PRD § 11-12)."""
 
@@ -459,9 +465,11 @@ class StartProcessing:
         glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
         book_conditions=None,
+        validate_route: Callable[[Mapping[str, Any] | None], None] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._book_conditions = book_conditions
+        self._validate_route = validate_route
         self._glossary_confidence_threshold = glossary_confidence_threshold
         self._glossary_review_min_mentions = glossary_review_min_mentions
         self._glossary_review_min_chapters = glossary_review_min_chapters
@@ -486,6 +494,8 @@ class StartProcessing:
             if self._book_conditions is not None and conditions is None:
                 from linguary.application.book_conditions import ConditionsError
                 raise ConditionsError('conditions_unavailable')
+            if conditions is not None and self._validate_route is not None:
+                self._validate_route(conditions.payload.get('route'))
             snapshot = self._llm_settings_snapshot
             if conditions is not None:
                 payload = conditions.payload
@@ -524,7 +534,14 @@ class StartProcessing:
                     'note_numbering': 'story-v1',
                 }
                 if self._correction_snapshot is not None:
-                    payload_dict['correction'] = self._correction_snapshot.to_payload()
+                    corr_payload = self._correction_snapshot.to_payload()
+                    pinned_route = conditions.payload.get('route')
+                    if (
+                        isinstance(pinned_route, Mapping)
+                        and frozenset(pinned_route) == _CORRECTION_ROUTE_KEYS
+                    ):
+                        corr_payload = {**corr_payload, 'route': thaw(pinned_route)}
+                    payload_dict['correction'] = corr_payload
                 transaction.work.bind('run', run.id, book_id=book.id, conditions_id=conditions.id,
                     payload=payload_dict)
             transaction.books.save(replace(book, status=started))
@@ -545,7 +562,6 @@ def _load_review(
     policy = None
     if conditions is not None:
         from linguary.application.book_conditions import ConditionsError
-        from linguary.domain.book_conditions import thaw
         payload = conditions.payload
         checks = payload.get("checks", {})
         confidence_threshold = checks.get("glossary_confidence_threshold", confidence_threshold)

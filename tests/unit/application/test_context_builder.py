@@ -75,8 +75,50 @@ def test_sound_does_not_translate_components():
         assert 'известных переводов книги' in templates[key]
         assert 'Дурсль' in templates[key]
         assert 'Волан-де-Морт' in templates[key]
-        assert 'Тисовая улица' in templates[key]
+        assert 'Дубовая аллея' in templates[key]
+        assert 'Прайвет-драйв' not in templates[key]
+        assert 'реальное произношение' in templates[key]
     assert 'applied_method=sound' in templates['analysis']
+
+
+def test_wp4_no_privet_drive_and_nested_fields_reminder() -> None:
+    """WP4: removes hardcoded Privet Drive typo, adds phonetic check & nested fields discipline."""
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("sound"),
+    )
+    for key, text in templates.items():
+        if isinstance(text, str):
+            assert "Прайвет-драйв" not in text, f"hardcode remained in {key}"
+    narrative = templates["narrative_analysis"]
+    assert "name_translation_assessment (включая rationale)" in narrative
+    assert "anchor, subject и detail" in narrative
+    assert "model_flagged_review=true" in narrative
+
+
+def test_wp5_a2_coreference_30_word_threshold_and_quote_formatting() -> None:
+    """WP5: A2 prompts enforce 30-word ceiling, 1–8 word dialogue window, Complex Object stop-list, coreference & quotes."""
+    from linguary.application.context_builder import _a2_progression_guidance
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    ped = templates["pedagogical_analysis"]
+    tr = templates["content_processing"]
+    assert "до 30 слов" in ped
+    assert "до 45 слов" not in ped
+    assert "1–8 слов" in ped
+    assert "Complex Object" in ped
+    assert "местоимением 3-го лица" in ped
+    assert "до 30 слов" in _a2_progression_guidance(0)
+    assert "висячее" in tr
+    assert "не вставляй русские слова внутрь английской цитаты" in tr
 
 
 def test_meaning_keeps_opaque_parts():
@@ -395,7 +437,7 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
     a2_instructions = build_context(reader_level="a2").request.instructions
     assert "A2" in a2_instructions
     assert "65–80%" in a2_instructions
-    assert "4–8 слов" in a2_instructions
+    assert "1–8 слов" in a2_instructions
     assert "might have been" in a2_instructions
     assert "what" in a2_instructions
     assert "отрыв предлога" in a2_instructions
@@ -1419,7 +1461,7 @@ def test_a2_pedagogical_instructions_include_grammar_support_and_strict_dialogue
     )
     grammar = _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
     window = (
-        "Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной "
+        "Окно 1–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной "
         "элементарной реплике уровня A1–A2 без придаточных оборотов "
         "(if, when, because, that), причастных оборотов, "
         "авторских предложений действия и небазовых глаголов речи "
@@ -1434,7 +1476,7 @@ def test_a2_pedagogical_instructions_include_grammar_support_and_strict_dialogue
         assert window in instructions
         assert removed_promote not in instructions
         assert "до 15 слов" in instructions
-        assert "до 45 слов" in instructions
+        assert "до 30 слов" in instructions
     assert grammar not in b1["pedagogical_analysis"]
     assert "элементарной реплике" not in b1["pedagogical_analysis"]
 
@@ -2390,7 +2432,8 @@ def test_a2_word_share_progression_in_input_text_and_sha() -> None:
     a2_guidance = _reader_level_treatment_guidance("a2")
     assert "GLOSSARY_ONLY" in a2_guidance
     assert "15 слов" in a2_guidance
-    assert "45 слов" in a2_guidance
+    assert "30 слов" in a2_guidance
+    assert "Complex Object" in a2_guidance
 
     for text in (_NARRATIVE_ANALYSIS_INSTRUCTIONS, _CONTENT_PLAN_PROCESSING_V3, _TRANSLATION_CONTEXT_V2):
         for word in ("robes", "drills", "witch", "hut", "term"):
@@ -3812,7 +3855,8 @@ def test_p5_t3_note_budget_split_a2_calibration_antispoiler_and_summary() -> Non
     assert "Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE)" not in a2_guidance
     assert "Реплики длиннее 8 слов либо сочетающие прямую речь" not in a2_guidance
     assert "15 слов" in a2_guidance
-    assert "45 слов" in a2_guidance
+    assert "30 слов" in a2_guidance
+    assert "Complex Object" in a2_guidance
 
     ped_raw = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
         source_language="en", target_language="ru", reader_level="A2",

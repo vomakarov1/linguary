@@ -1025,3 +1025,132 @@ def test_meaningful_part_divider_renders_layout_help_without_chapter_front_or_re
     assert plain_part1.xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
     assert plain_part1.xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
     assert "Afterlights" in "".join(plain_part1.itertext())
+
+
+def test_epub_writer_prunes_unreferenced_resources_and_preserves_dc_rights_description(tmp_path) -> None:
+    """WP2: layout export drops unreferenced CSS/xpgt/images, keeps referenced ones, and transfers dc:rights/description."""
+    import zipfile
+    from dataclasses import replace
+    from linguary.adapters.epub.writer import EpubExportWriter
+    from linguary.domain import DocumentResource, SupportStatus
+
+    img_used = tmp_path / "used.png"
+    img_used.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    img_unused = tmp_path / "unused.png"
+    img_unused.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    css_unused = tmp_path / "hp_style.css"
+    css_unused.write_text("body { color: black; }", encoding="utf-8")
+    xpgt_unused = tmp_path / "page-template.xpgt"
+    xpgt_unused.write_text("<ade:template/>", encoding="utf-8")
+
+    # Build a minimal source EPUB carrying dc:rights and dc:description for zero-migration fallback test.
+    source_epub = tmp_path / "source.epub"
+    with zipfile.ZipFile(source_epub, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+            '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        zf.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:title>Book</dc:title><dc:language>en</dc:language>'
+            '<dc:rights>Copyright 2026 Author</dc:rights>'
+            '<dc:description>A classic story.</dc:description>'
+            '</metadata><manifest/><spine/></package>',
+        )
+
+    img_block = DocumentBlock(
+        id="b-img",
+        section_id="sec-ch1",
+        type=BlockType.IMAGE,
+        order=0,
+        text="",
+        source_reference=SourceReference("Text/ch1.xhtml", "/body/img[1]"),
+        attributes={"src": "../Images/fig%201.png", "alt": "Figure"},
+    )
+    text_block = DocumentBlock(
+        id="b-txt",
+        section_id="sec-ch1",
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text="Hello world.",
+        source_reference=SourceReference("Text/ch1.xhtml", "/body/p[1]"),
+    )
+    section = DocumentSection(
+        id="sec-ch1",
+        document_id="book-wp2",
+        title="Chapter 1",
+        order=0,
+        source_resource_path="Text/ch1.xhtml",
+        blocks=(img_block, text_block),
+    )
+    doc = CanonicalDocument(
+        id="book-wp2",
+        metadata=BookMetadata(title="Book"),
+        source_language="en",
+        target_language="ru",
+        sections=(section,),
+        resources=(
+            DocumentResource("r-img-used", "Images/fig 1.png", "image/png", SupportStatus.SUPPORTED),
+            DocumentResource("r-img-unused", "Images/logo.png", "image/png", SupportStatus.SUPPORTED),
+            DocumentResource("r-css", "Styles/hp_style.css", "text/css", SupportStatus.SUPPORTED),
+            DocumentResource("r-xpgt", "page-template.xpgt", "application/vnd.adobe-page-template+xml", SupportStatus.SUPPORTED),
+            DocumentResource("r-missing-unused", "Images/gone.png", "image/png", SupportStatus.SUPPORTED),
+        ),
+    )
+    from linguary.application.layout.book import LayoutInputs, build_book_layout
+    layout = build_book_layout(
+        LayoutInputs(document=doc, results={}, analyses={}, concepts=(), reader_level="a2")
+    )
+    target = tmp_path / "out.epub"
+    exported = EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc,
+            target_path=str(target),
+            source_epub_path=str(source_epub),
+            stored_resource_paths={
+                "Images/fig 1.png": str(img_used),
+                "Images/logo.png": str(img_unused),
+                "Styles/hp_style.css": str(css_unused),
+                "page-template.xpgt": str(xpgt_unused),
+            },
+            layout=layout,
+        )
+    )
+
+    assert exported.warnings == ()
+    with zipfile.ZipFile(target) as zf:
+        names = set(zf.namelist())
+        opf = zf.read("OEBPS/content.opf").decode("utf-8")
+        ch1_xhtml = zf.read("OEBPS/Text/ch1.xhtml").decode("utf-8")
+    assert "OEBPS/Images/fig 1.png" in names
+    assert "../Images/fig%201.png" in ch1_xhtml
+    assert "<img" in ch1_xhtml
+    assert "OEBPS/Images/logo.png" not in names
+    assert "OEBPS/Styles/hp_style.css" not in names
+    assert "OEBPS/page-template.xpgt" not in names
+    assert "Copyright 2026 Author" in opf
+    assert "A classic story." in opf
+
+    # Partial BookMetadata (rights set, description None) keeps own rights and falls back to source description.
+    doc_partial = replace(
+        doc,
+        metadata=BookMetadata(title="Book", rights="Custom Rights", description=None),
+    )
+    target_partial = tmp_path / "out_partial.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc_partial,
+            target_path=str(target_partial),
+            source_epub_path=str(source_epub),
+            stored_resource_paths={"Images/fig 1.png": str(img_used)},
+            layout=layout,
+        )
+    )
+    with zipfile.ZipFile(target_partial) as zf:
+        opf_partial = zf.read("OEBPS/content.opf").decode("utf-8")
+    assert "Custom Rights" in opf_partial
+    assert "A classic story." in opf_partial

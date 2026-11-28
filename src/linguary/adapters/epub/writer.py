@@ -26,6 +26,7 @@ artifact remains on disk.
 from __future__ import annotations
 
 import posixpath
+import re
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
@@ -33,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import unquote
 
 from lxml import etree  # ty: ignore[missing-module-member]
 
@@ -178,6 +180,26 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   text-indent: -1em;
 }
 
+.lg-notes > li.lg-note-plain {
+  text-indent: 0;
+}
+
+.center {
+  text-align: center;
+  text-indent: 0;
+}
+
+.pagebreak {
+  page-break-before: always;
+  break-before: page;
+}
+
+p.pagebreak {
+  margin: 0;
+  padding: 0;
+  line-height: 0;
+}
+
 a.lg-ref {
   text-decoration: none;
   color: inherit;
@@ -297,12 +319,17 @@ class EpubExportWriter(EpubWriter):
         a previous successful export of the same book.
         """
         warnings = _ExportWarnings()
-        payloads = dict(_resource_payloads(request, warnings))
         try:
             notices = pronunciation_notice_bundle(request)
         except (OSError, ValueError):
             raise EpubExportFatalError('уведомления об источнике транскрипций недоступны') from None
-        used = set(payloads) | {
+        potential_resources = {
+            _contained_name(resource.source_path)
+            for resource in request.document.resources
+            if resource.support_status in _EXPORTED_STATUSES
+            and resource.media_type != _NCX_MEDIA_TYPE
+        }
+        used = set(potential_resources) | {
             _contained_name(section.source_resource_path)
             for section in _exported_sections(request)
         }
@@ -310,12 +337,9 @@ class EpubExportWriter(EpubWriter):
         pages = _book_page_hrefs(request.layout, used)
         notices_href = None
         provenance_href = None
-        media_types = dict(_resource_media_types(request))
         if notices is not None:
             notices_href = _unique_resource_name('linguary/pronunciation-sources.xhtml', used)
             provenance_href = _unique_resource_name('linguary/pronunciation-sources.json', used)
-            payloads[provenance_href] = notices.provenance_json()
-            media_types[provenance_href] = 'application/json'
         with _OpaqueSource(request.source_epub_path) as opaque:
             chapters = _render_chapters(request, opaque=opaque, warnings=warnings)
         chapters = _insert_book_pages(chapters, request, pages)
@@ -327,17 +351,39 @@ class EpubExportWriter(EpubWriter):
                 language=request.document.source_language,
                 ipa_key_href=_ipa_key_link(notices_href, pages.ipa),
             ),)
+        nav_root = _navigation(chapters, document=request.document)
+        referenced_paths = (
+            _collect_referenced_resource_paths(chapters, nav_root=nav_root, request=request)
+            if request.layout is not None
+            else None
+        )
+        payloads = dict(_resource_payloads(request, warnings, referenced_paths=referenced_paths))
+        media_types = {
+            href: media_type
+            for href, media_type in _resource_media_types(request).items()
+            if href in payloads
+        }
+        if notices is not None and provenance_href is not None:
+            payloads[provenance_href] = notices.provenance_json()
+            media_types[provenance_href] = 'application/json'
         known_files = (
             set(payloads)
             | {chapter.href for chapter in chapters}
             | {_NAVIGATION_FILE, _STYLESHEET_FILE}
         )
         _resolve_references(chapters, known_files=known_files, warnings=warnings)
+        source_dc = (
+            (None, None)
+            if request.document.metadata.rights and request.document.metadata.description
+            else _read_source_dc_metadata(request.source_epub_path)
+        )
         _append_book_payloads(
             payloads,
             document=request.document,
             chapters=chapters,
             media_types=media_types,
+            nav_root=nav_root,
+            source_dc=source_dc,
         )
         target = Path(request.target_path)
         draft = target.with_name(f"{target.name}.part")
@@ -583,8 +629,115 @@ class _ExportWarnings:
         )
 
 
+_XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
+_REF_ATTRIBUTES = ("src", "href", _XLINK_HREF, "data", "poster")
+_CSS_URL_RE = re.compile(r"""url\(\s*(['"]?)([^)'"]+)\1\s*\)""", re.IGNORECASE)
+_CSS_IMPORT_RE = re.compile(
+    r"""@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?""", re.IGNORECASE
+)
+
+
+def _add_resolved_ref(target_set: set[str], raw_ref: str, *, base: str) -> None:
+    stripped = raw_ref.strip()
+    if not stripped or stripped.startswith("#") or _is_external(stripped):
+        return
+    resolved, _ = _resolve_target(stripped, base=base)
+    for candidate in (resolved, unquote(resolved)):
+        normalized = posixpath.normpath(candidate.replace("\\", "/"))
+        if normalized and not normalized.startswith(("/", "..")):
+            target_set.add(normalized)
+
+
+def _collect_referenced_resource_paths(
+    chapters: Sequence[_Chapter],
+    *,
+    nav_root: etree._Element,
+    request: EpubWriteRequest,
+) -> set[str]:
+    """Collect local resource paths actually referenced by exported XHTML documents and CSS."""
+    referenced: set[str] = set()
+    docs: list[tuple[str, etree._Element]] = [(chapter.href, chapter.root) for chapter in chapters]
+    docs.append((_NAVIGATION_FILE, nav_root))
+    for doc_href, root in docs:
+        for element in root.iter():
+            for attr in _REF_ATTRIBUTES:
+                value = element.get(attr)
+                if value:
+                    _add_resolved_ref(referenced, value, base=doc_href)
+    css_resources = {
+        _contained_name(resource.source_path): resource
+        for resource in request.document.resources
+        if resource.support_status in _EXPORTED_STATUSES
+        and resource.media_type.split(";", 1)[0].strip().lower() == "text/css"
+    }
+    visited_css: set[str] = set()
+    pending_css = [
+        href for href in css_resources if href in referenced or unquote(href) in referenced
+    ]
+    while pending_css:
+        css_href = pending_css.pop()
+        if css_href in visited_css:
+            continue
+        visited_css.add(css_href)
+        resource = css_resources[css_href]
+        stored = request.stored_resource_paths.get(resource.source_path)
+        if stored is None:
+            continue
+        css_path = Path(stored)
+        if not css_path.is_file():
+            continue
+        css_text = css_path.read_text(encoding="utf-8", errors="ignore")
+        before = len(referenced)
+        for match in _CSS_URL_RE.finditer(css_text):
+            _add_resolved_ref(referenced, match.group(2), base=css_href)
+        for match in _CSS_IMPORT_RE.finditer(css_text):
+            _add_resolved_ref(referenced, match.group(1), base=css_href)
+        if len(referenced) > before:
+            for href in css_resources:
+                if (
+                    (href in referenced or unquote(href) in referenced)
+                    and href not in visited_css
+                ):
+                    pending_css.append(href)
+    return referenced
+
+
+def _read_source_dc_metadata(source_epub_path: str | None) -> tuple[str | None, str | None]:
+    """Read `dc:rights` and `dc:description` from the source EPUB OPF as a zero-migration fallback."""
+    if not source_epub_path:
+        return None, None
+    path = Path(source_epub_path)
+    if not path.is_file():
+        return None, None
+    try:
+        parser = etree.XMLParser(
+            resolve_entities=False, load_dtd=False, no_network=True, recover=False
+        )
+        with zipfile.ZipFile(path) as archive:
+            opf_path = package_path(archive)
+            opf_root = etree.fromstring(archive.read(opf_path), parser=parser)
+    except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError, EpubImportFatalError):
+        return None, None
+    rights = None
+    description = None
+    for elem in opf_root.findall(f".//{{{_DC_NAMESPACE}}}rights"):
+        text = " ".join((elem.text or "").split())
+        if text:
+            rights = text
+            break
+    for elem in opf_root.findall(f".//{{{_DC_NAMESPACE}}}description"):
+        text = " ".join((elem.text or "").split())
+        if text:
+            description = text
+            break
+    return rights, description
+
+
 def _resource_payloads(
-    request: EpubWriteRequest, warnings: _ExportWarnings
+    request: EpubWriteRequest,
+    warnings: _ExportWarnings,
+    *,
+    referenced_paths: set[str] | None = None,
 ) -> Iterable[tuple[str, bytes]]:
     """Book resource contents for the new archive.
 
@@ -604,7 +757,10 @@ def _resource_payloads(
             continue
         if resource.media_type == _NCX_MEDIA_TYPE:
             continue
-        if _contained_name(resource.source_path) in skipped_sections:
+        contained = _contained_name(resource.source_path)
+        if contained in skipped_sections:
+            continue
+        if referenced_paths is not None and contained not in referenced_paths and unquote(contained) not in referenced_paths:
             continue
         stored = request.stored_resource_paths.get(resource.source_path)
         if stored is None:
@@ -623,7 +779,7 @@ def _resource_payloads(
                 f"копия ресурса {resource.source_path} книги {request.document.id} "
                 f"отсутствует в хранилище: {stored}"
             )
-        yield _contained_name(resource.source_path), path.read_bytes()
+        yield contained, path.read_bytes()
 
 
 def _resource_media_types(request: EpubWriteRequest) -> Mapping[str, str]:
@@ -1189,6 +1345,15 @@ def _deduplicate_ids(chapter: _Chapter, warnings: _ExportWarnings) -> set[str]:
     return seen
 
 
+def _match_known_path(path: str, known: set[str] | frozenset[str]) -> str | None:
+    if path in known:
+        return path
+    unquoted = unquote(path)
+    if unquoted in known:
+        return unquoted
+    return None
+
+
 def _resolve_link(
     element: etree._Element,
     *,
@@ -1202,8 +1367,9 @@ def _resolve_link(
     if not href or _is_external(href):
         return
     path, fragment = _resolve_target(href, base=chapter.href)
-    resolved = path in known_files and (
-        not fragment or fragment in anchors.get(path, frozenset())
+    matched = _match_known_path(path, known_files)
+    resolved = matched is not None and (
+        not fragment or fragment in anchors.get(matched, frozenset())
     )
     if resolved:
         return
@@ -1231,7 +1397,7 @@ def _resolve_image(
         return
     if source:
         path, _ = _resolve_target(source, base=chapter.href)
-        if path in known_files:
+        if _match_known_path(path, known_files) is not None:
             return
     _unwrap(element)
     warnings.record(
@@ -1250,19 +1416,24 @@ def _append_book_payloads(
     document: CanonicalDocument,
     chapters: Sequence[_Chapter],
     media_types: Mapping[str, str],
+    nav_root: etree._Element | None = None,
+    source_dc: tuple[str | None, str | None] = (None, None),
 ) -> None:
     """Appends chapter documents, navigation, stylesheet, and package file to book resources."""
     payloads.update(
         {chapter.href: _serialize(chapter.root) for chapter in chapters}
     )
     payloads[_STYLESHEET_FILE] = _STYLESHEET.encode("utf-8")
-    payloads[_NAVIGATION_FILE] = _serialize(_navigation(chapters, document=document))
+    payloads[_NAVIGATION_FILE] = _serialize(
+        nav_root if nav_root is not None else _navigation(chapters, document=document)
+    )
     payloads[_PACKAGE_FILE] = _serialize(
         _package(
             document=document,
             chapters=chapters,
             payloads=payloads,
             media_types=media_types,
+            source_dc=source_dc,
         )
     )
 
@@ -1294,6 +1465,7 @@ def _package(
     chapters: Sequence[_Chapter],
     payloads: Mapping[str, bytes],
     media_types: Mapping[str, str],
+    source_dc: tuple[str | None, str | None] = (None, None),
 ) -> etree._Element:
     """OPF package file: book metadata, manifest, and reading order spine."""
     root = _element(
@@ -1301,7 +1473,7 @@ def _package(
         {"version": "3.0", "unique-identifier": "pub-id"},
         nsmap={None: _OPF_NAMESPACE, "dc": _DC_NAMESPACE},
     )
-    _append_metadata(_sub(root, f"{{{_OPF_NAMESPACE}}}metadata"), document)
+    _append_metadata(_sub(root, f"{{{_OPF_NAMESPACE}}}metadata"), document, source_dc=source_dc)
     manifest = _sub(root, f"{{{_OPF_NAMESPACE}}}manifest")
     identifiers = _manifest_items(
         manifest, chapters=chapters, payloads=payloads, media_types=media_types
@@ -1312,7 +1484,12 @@ def _package(
     return root
 
 
-def _append_metadata(metadata: etree._Element, document: CanonicalDocument) -> None:
+def _append_metadata(
+    metadata: etree._Element,
+    document: CanonicalDocument,
+    *,
+    source_dc: tuple[str | None, str | None] = (None, None),
+) -> None:
     """Book metadata: retains metadata parsed by importer (PRD § 20)."""
     book_metadata = document.metadata
     identifier = _sub(metadata, f"{{{_DC_NAMESPACE}}}identifier", {"id": "pub-id"})
@@ -1323,6 +1500,12 @@ def _append_metadata(metadata: etree._Element, document: CanonicalDocument) -> N
         _sub(metadata, f"{{{_DC_NAMESPACE}}}creator").text = author
     if book_metadata.publisher:
         _sub(metadata, f"{{{_DC_NAMESPACE}}}publisher").text = book_metadata.publisher
+    rights = book_metadata.rights or source_dc[0]
+    if rights:
+        _sub(metadata, f"{{{_DC_NAMESPACE}}}rights").text = rights
+    description = book_metadata.description or source_dc[1]
+    if description:
+        _sub(metadata, f"{{{_DC_NAMESPACE}}}description").text = description
     modified = _sub(
         metadata, f"{{{_OPF_NAMESPACE}}}meta", {"property": "dcterms:modified"}
     )
@@ -1758,14 +1941,15 @@ def _link_failures(
     if not href or _is_external(href):
         return []
     path, fragment = _resolve_target(href, base=name)
-    if path not in names:
+    matched = _match_known_path(path, names)
+    if matched is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.LINK,
                 f"ссылка {href} из документа {name} ведёт на отсутствующий файл {path}",
             )
         ]
-    if fragment and fragment not in anchors.get(path, frozenset()):
+    if fragment and fragment not in anchors.get(matched, frozenset()):
         return [
             ExportCheckFailure(
                 ExportCheckKind.LINK,
@@ -1788,14 +1972,15 @@ def _image_failures(
     if not source or _is_external(source):
         return []
     path, _ = _resolve_target(source, base=name)
-    if path not in names:
+    matched = _match_known_path(path, names)
+    if matched is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.RESOURCE,
                 f"изображение {source} из документа {name} отсутствует в архиве",
             )
         ]
-    if path not in declared:
+    if _match_known_path(path, declared) is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.RESOURCE,

@@ -21,6 +21,12 @@ from linguary.domain.llm_log import Violation
 _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–')
 _DIALOGUE_DASHES = ('—', '–', '-')
 _POST_SPEECH_CLOSE_RE = re.compile(r"""[.!?…]["”’'](?=\s)""")
+_COMMA_REMARK_CLOSE_RE = re.compile(r""",["”’'](?=\s+[^"“‘«\s])""")
+_LOWERCASE_REMARK_CLOSE_RE = re.compile(r"""[!?…]["”’'](?=\s+[a-z])""")
+_ENGLISH_ABBREV_END_RE = re.compile(
+    r"(?:(?<![A-Za-z])(?i:Mr|Mrs|Ms|Dr|St|Prof)\.|(?<![A-Za-z])[A-Z]\.)$"
+)
+_OPENING_QUOTE_CHARS = frozenset({'"', "“", "‘", "«"})
 _INLINE_DIALOGUE_TRANSITION_RE = re.compile(r"([,!?.…])\s+[—–]\s+([А-ЯЁA-Zа-яёa-z])")
 
 
@@ -46,7 +52,12 @@ def _count_embedded_post_speech_narratives(line: str) -> int:
 
 
 def _count_post_speech_narrative_sentences(source_text: str) -> int:
-    """Count closing speech quotes after terminal punctuation followed outside quotes by a capitalized sentence."""
+    """Count closing speech quotes followed outside quotes by a capitalized authorial sentence.
+
+    Supports both direct terminal-punctuation closes (`‘Wait!’ He ran.`) and
+    attribution-remark closes (`‘Hello,’ he said. Then he ran.` / `‘Hello!’ he cried. Then he ran.`),
+    while ignoring abbreviations/titles (`Mr.`, `Dr.`, initials) and subsequent opening quotes.
+    """
     count = 0
     for match in _POST_SPEECH_CLOSE_RE.finditer(source_text):
         after_pos = match.end()
@@ -55,6 +66,31 @@ def _count_post_speech_narrative_sentences(source_text: str) -> int:
         rest = source_text[after_pos:].lstrip()
         if rest and rest[0].isupper():
             count += 1
+    for pattern in (_COMMA_REMARK_CLOSE_RE, _LOWERCASE_REMARK_CLOSE_RE):
+        for match in pattern.finditer(source_text):
+            after_pos = match.end()
+            if _outer_unclosed_open(source_text, after_pos) is not None:
+                continue
+            idx = after_pos
+            length = len(source_text)
+            while idx < length:
+                ch = source_text[idx]
+                if ch == "\n" or ch in _OPENING_QUOTE_CHARS:
+                    break
+                if ch in ".!?…":
+                    if (
+                        ch == "."
+                        and _ENGLISH_ABBREV_END_RE.search(source_text[after_pos : idx + 1]) is not None
+                    ):
+                        idx += 1
+                        continue
+                    if _outer_unclosed_open(source_text, idx + 1) is not None:
+                        break
+                    rest = source_text[idx + 1 :].lstrip()
+                    if rest and rest[0].isupper():
+                        count += 1
+                    break
+                idx += 1
     return count
 
 
