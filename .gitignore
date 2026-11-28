@@ -1,7 +1,4 @@
 .ai
-!/.ai/
-/.ai/*
-!/.ai/tempo.yaml
 .ai-core
 .idea
 .agents
@@ -24,6 +21,4 @@ htmlcov/
 build/
 dist/
 *.egg-info/
-.ai/develop-context.local/
 .worktrees/
-/.ai/tempo.local.yaml
