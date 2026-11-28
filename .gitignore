@@ -4,6 +4,7 @@
 !/.ai/tempo.yaml
 .ai-core
 .idea
+.agents
 .claude
 .codex
 .gemini
