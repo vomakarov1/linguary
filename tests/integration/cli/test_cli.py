@@ -1415,6 +1415,7 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
             )
             tx.runs.add(run)
             payload = {
+                "schema_version": 1,
                 "book_id": "book-corr",
                 "run_id": run.id,
                 "conditions_id": cond_id,
@@ -1424,7 +1425,22 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
                 "input_generation": 1,
                 "group_id": "grp-1",
                 "proposal_attempt_id": "att-1",
-                "proposed_result": {"translated_text": "Исправленный перевод."},
+                "current_result": {
+                    "block_id": block.id,
+                    "treatment": "translate",
+                    "translated_text": "Исходный перевод.",
+                },
+                "result": {
+                    "block_id": block.id,
+                    "treatment": "translate",
+                    "translated_text": "Исправленный перевод.",
+                },
+                "proposal": {
+                    "block_id": block.id,
+                    "status": "proposed",
+                    "translated_text": "Исправленный перевод.",
+                    "issues": [],
+                },
             }
             from linguary.adapters.db.models import CorrectionCandidateRow
             expected_prop_sha = canonical_sha(payload)
@@ -1459,6 +1475,7 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
     assert listed["items"][0]["section_id"] == section.id
     assert listed["items"][0]["proposal_sha256"] == expected_prop_sha
     assert listed["items"][0]["review_reason"] == "Проверьте пунктуацию"
+    assert listed["items"][0]["proposed_text"] == "Исправленный перевод."
 
     out_epub = tmp_path / "strict.epub"
     strict_code = main(
@@ -1532,6 +1549,80 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
     )
     assert blank_reason_code == 1
     assert "error" in capsys.readouterr().err
+
+
+def test_candidate_snippet_extracts_v2_result_segments_glossary_only_and_fallbacks() -> None:
+    from types import SimpleNamespace
+    from linguary.cli.app import _candidate_snippet
+
+    # 1. Real CorrectChapterV2 payload with result.translated_text
+    cand_text = SimpleNamespace(
+        payload={
+            "result": {"treatment": "translate", "translated_text": "Исправленный перевод."},
+            "proposal": {"translated_text": "Другой текст."},
+        },
+        review={"reason": "Уточнить"},
+    )
+    assert _candidate_snippet(cand_text) == ("Уточнить", "Исправленный перевод.")
+
+    # 2. Multi-segment block using result.segment_translations (matching rebuild_translation)
+    cand_segments = SimpleNamespace(
+        payload={
+            "result": {
+                "treatment": "translate",
+                "translated_text": None,
+                "segment_translations": ["Первый фрагмент.", None, "   ", "Третий фрагмент."],
+            },
+        },
+        review={"reason": "Сегменты"},
+    )
+    assert _candidate_snippet(cand_segments) == ("Сегменты", "Первый фрагмент. Третий фрагмент.")
+
+    # 3. GLOSSARY_ONLY and READ_AS_IS return None for proposed_text
+    cand_glossary_only = SimpleNamespace(
+        payload={
+            "result": {
+                "treatment": "glossary_only",
+                "translated_text": None,
+                "segment_translations": [],
+                "glossary_hints": [{"original": "owl", "translation": "сова"}],
+            },
+            "proposal": {"translated_text": None, "segments": []},
+        },
+        review={"reason": "Подсказка"},
+    )
+    assert _candidate_snippet(cand_glossary_only) == ("Подсказка", None)
+
+    cand_read_as_is = SimpleNamespace(
+        payload={
+            "result": {"treatment": "read_as_is", "translated_text": None},
+        },
+        review=None,
+    )
+    assert _candidate_snippet(cand_read_as_is) == (None, None)
+
+    # 4. Legacy proposed_result fallback
+    cand_legacy = SimpleNamespace(
+        payload={"proposed_result": {"translated_text": "Старый формат."}},
+        review=None,
+    )
+    assert _candidate_snippet(cand_legacy) == (None, "Старый формат.")
+
+    # 5. Proposal fallback with segments list
+    cand_proposal_segs = SimpleNamespace(
+        payload={
+            "proposal": {
+                "translated_text": None,
+                "segments": [
+                    {"index": 1, "translated_text": "Сегмент 1."},
+                    {"index": 2, "translated_text": "Сегмент 2."},
+                ],
+            }
+        },
+        review=None,
+    )
+    assert _candidate_snippet(cand_proposal_segs) == (None, "Сегмент 1. Сегмент 2.")
+
 
 
 

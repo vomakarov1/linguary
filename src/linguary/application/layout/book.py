@@ -494,6 +494,8 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     chapter_num=current_chapter_num,
                     history=grammar_history,
                     plan=plan,
+                    hint_history=hint_history,
+                    block_seq=block_seq,
                 )
                 notes = block_notes(
                     block,
@@ -1618,7 +1620,10 @@ def _deduplicate_glossary_hints(
             )
             continue
         window_anchor = state.last_shown_block if hint_glossary_only else state.last_counted_block
-        if (block_seq - window_anchor) <= _HINT_LOCAL_WINDOW_BLOCKS:
+        if (
+            (chapter_num > 0 and chapter_num == state.last_shown_chapter)
+            or (block_seq - window_anchor) <= _HINT_LOCAL_WINDOW_BLOCKS
+        ):
             suppressed.add(index)
             if hint_glossary_only:
                 glossary_only_rescue_by_bucket.setdefault(bucket, []).append(
@@ -1690,6 +1695,8 @@ def _deduplicate_grammar_notes(
     chapter_num: int,
     history: dict[str, _GrammarSeen],
     plan: ContentPlan | None = None,
+    hint_history: Mapping[str, _HintSeen] | None = None,
+    block_seq: int | None = None,
 ) -> frozenset[int]:
     """Suppress repeated grammar, cultural-reference, and unlinked short-term `LanguageNote`s."""
     if not result.language_notes:
@@ -1715,6 +1722,15 @@ def _deduplicate_grammar_notes(
             term_key = vocabulary_dedup_key(note.original_excerpt)
             if not term_key:
                 continue
+            if not is_cultural and chapter_num > 0 and hint_history is not None:
+                hint_state = hint_history.get(term_key)
+                if (
+                    hint_state is not None
+                    and hint_state.last_shown_chapter == chapter_num
+                    and (block_seq is None or hint_state.last_shown_block < block_seq)
+                ):
+                    suppressed.add(index)
+                    continue
             key, cap, min_gap = f"term:{term_key}", _CULTURAL_OR_TERM_CAP, 0
         state = history.get(key)
         if state is None:

@@ -1720,3 +1720,74 @@ def test_vocabulary_dedup_key_strips_leading_articles() -> None:
     assert vocabulary_dedup_key("the same") != vocabulary_dedup_key("same")
 
 
+def test_match_fixed_handles_reflexive_and_object_slots_without_final_wildcard() -> None:
+    """A4.1: `oneself` and internal object slots match cleanly; final `something` is strictly literal."""
+    from linguary.application.layout.notes import _infinitive_end, find_hint_marker_end
+
+    positive_cases = (
+        ("He allowed himself a small smile.", "to allow oneself", "allowed himself"),
+        ("She braced herself for the storm.", "to brace oneself for", "braced herself for"),
+        ("They enjoyed themselves at the feast.", "to enjoy oneself", "enjoyed themselves"),
+        ("He did not want to put Harry off.", "to put someone off", "put Harry off"),
+        ("That put Uncle Vernon off his tea.", "to put someone off", "put Uncle Vernon off"),
+        ("She talked him into going.", "to talk sb into", "talked him into"),
+        ("She talked the old man into it.", "to talk sb into", "talked the old man into"),
+        ("He made the story up on the spot.", "to make sth up", "made the story up"),
+        ("She told him right away.", "to tell someone", "told him"),
+        ("He asked somebody nearby.", "to ask somebody", "asked somebody"),
+        ("They warned us early.", "to warn sb", "warned us"),
+        ("She did it quickly.", "to do sth", "did it"),
+        ("He noticed that immediately.", "to notice sth", "noticed that"),
+        ("Harry was onto something big.", "to be onto something", "was onto something"),
+    )
+    for text, original, matched in positive_cases:
+        expected_end = _end(text, matched)
+        assert _infinitive_end(text, original) == expected_end, (original, text)
+        assert find_hint_marker_end(text, original) == expected_end, (original, text)
+        notes = _hint_notes(text, GlossaryHint(original, "перевод"))
+        assert notes[0].marker_end == expected_end, (original, text)
+
+    negative_cases = (
+        ("He climbed onto the roof.", "to be onto something"),
+        ("He was onto the roof in seconds.", "to be onto something"),
+        ("She was onto it immediately.", "to be onto something"),
+        ("He braced himself.", "to brace oneself for"),
+        ("He allowed the boy to stay.", "to allow oneself"),
+        ("She talked the very tall old man into it.", "to talk sb into"),
+        ("He told the crowd quietly.", "to tell someone"),
+        ("She did the dishes.", "to do sth"),
+        ("He put him on the chair.", "to put someone off"),
+    )
+    for text, original in negative_cases:
+        assert _infinitive_end(text, original) is None, (original, text)
+        notes = _hint_notes(text, GlossaryHint(original, "перевод"))
+        assert notes[0].marker_end is None, (original, text)
+
+
+def test_note_quotes_translation_recognizes_guillemets_straight_and_curly_quotes() -> None:
+    """A4.2: `_note_quotes_translation` deduplicates translation quoted in `«»`, `""`, or `“”`."""
+    from linguary.application.layout.notes import _note_quotes_translation
+
+    assert _note_quotes_translation("Идиома со значением «Уж поверьте».", "уж поверьте") is True
+    assert _note_quotes_translation('Идиома со значением "Уж поверьте".', "уж поверьте") is True
+    assert _note_quotes_translation("Идиома со значением “Уж поверьте”.", "уж поверьте") is True
+    assert _note_quotes_translation("Идиома без повтора.", "уж поверьте") is False
+
+    text = "thank you very much indeed"
+    block = _block(text)
+    for note_text in (
+        'Ироничная присказка со значением "уж поверьте", а не благодарность.',
+        "Ироничная присказка со значением “уж поверьте”, а не благодарность.",
+    ):
+        hint = GlossaryHint("thank you very much", "уж поверьте", note_text)
+        result = _result(
+            block,
+            treatment=BlockTreatment.TRANSLATE,
+            translation="Полный перевод.",
+            hints=(hint,),
+        )
+        notes = block_notes(block, result, None, ())
+        assert notes[0].body == (note_text,)
+
+
+

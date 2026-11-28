@@ -391,3 +391,82 @@ def test_poem_unit_keeps_lines() -> None:
         is_poem=True,
     )
     assert [unit.lines for unit in poem_flagged] == [True, True]
+
+
+def test_normalize_outer_note_quotes_only_in_russian_display_notes() -> None:
+    """A4.2: Russian `note.body` converts outer paired `""`/`“”` to `«»` safely; translations stay untouched."""
+    from linguary.application.layout.units import _normalize_outer_note_quotes
+
+    assert (
+        _normalize_outer_note_quotes('Слово "snigger" означает "хихикать", а “nod” — “кивать”.')
+        == "Слово «snigger» означает «хихикать», а «nod» — «кивать»."
+    )
+    # Quotes inside existing `«…»` stay intact (`depth > 0`).
+    nested = 'Фраза «сказать "привет" и “пока”» остаётся без изменений.'
+    assert _normalize_outer_note_quotes(nested) == nested
+    # Inch mark after digit does NOT open a quote, while quoted number `"6"` normalizes cleanly.
+    assert (
+        _normalize_outer_note_quotes('Рост 6" и слово "tall", а число "6" в кавычках.')
+        == 'Рост 6" и слово «tall», а число «6» в кавычках.'
+    )
+    # Unpaired straight quotes anywhere in the note leave straight quotes untouched (no inverted «…»).
+    assert _normalize_outer_note_quotes('Одна " непарная кавычка.') == 'Одна " непарная кавычка.'
+    unbalanced_single = 'Заметка с " опечаткой и "слово" здесь'
+    assert _normalize_outer_note_quotes(unbalanced_single) == unbalanced_single
+    unbalanced_multiline = 'Первая "непарная\nВторая "пара" и "ок"'
+    assert _normalize_outer_note_quotes(unbalanced_multiline) == unbalanced_multiline
+    assert _normalize_outer_note_quotes("Одна “ непарная кавычка.") == "Одна “ непарная кавычка."
+    assert _normalize_outer_note_quotes('Пустые "" и “” и "   " и "ok".') == 'Пустые "" и “” и "   " и «ok».'
+    assert (
+        _normalize_outer_note_quotes('"первая строка\nвторая строка" и "ок"')
+        == '"первая строка\nвторая строка" и «ок»'
+    )
+    assert (
+        _normalize_outer_note_quotes("“первая строка\nвторая строка” и “ок”")
+        == "“первая строка\nвторая строка” и «ок»"
+    )
+    assert (
+        _normalize_outer_note_quotes('"до «внутри» после" и "ок"')
+        == '"до «внутри» после" и «ок»'
+    )
+    assert (
+        _normalize_outer_note_quotes("“до «внутри» после” и “ок”")
+        == "“до «внутри» после” и «ок»"
+    )
+    # Outer quotes wrapping opposite inner quote type convert outer only and stay idempotent.
+    converted = _normalize_outer_note_quotes('“внешнее "внутреннее"” и "внешнее “внутреннее”"')
+    assert converted == '«внешнее "внутреннее"» и «внешнее “внутреннее”»'
+    assert _normalize_outer_note_quotes(converted) == converted
+
+    # Through `block_units`: only Russian `note.body` normalizes; translation, term, ipa, and non-ru stay untouched.
+    block = _block("Original text.")
+    treatments = (BlockTreatment.TRANSLATE,)
+    raw_translation = 'Он сказал "привет" и “пока”.'
+    result = _result(block, treatments, (raw_translation,))
+    note = LayoutNote(
+        labels=(),
+        term='word "raw"',
+        ipa='/wɜːd "rɔː"/',
+        variant="uk",
+        body=(
+            'Слово "word" значит “слово”; рост 6" не меняется.',
+            'Вложенные «слова "внутри"» сохраняются.',
+        ),
+        marker_end=8,
+        origin="glossary_hint",
+        difficulty_kinds=(),
+    )
+
+    ru_units = block_units(block, result, treatments, (note,), {}, target_language="ru")
+    assert ru_units[0].translation == raw_translation
+    ru_note = ru_units[0].notes[0].note
+    assert ru_note.term == 'word "raw"'
+    assert ru_note.ipa == '/wɜːd "rɔː"/'
+    assert ru_note.body == (
+        'Слово «word» значит «слово»; рост 6" не меняется.',
+        'Вложенные «слова "внутри"» сохраняются.',
+    )
+
+    en_units = block_units(block, result, treatments, (note,), {}, target_language="en")
+    assert en_units[0].notes[0].note == note
+

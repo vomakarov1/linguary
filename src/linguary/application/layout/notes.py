@@ -291,6 +291,26 @@ _LEADING_TRANSLATION_BREAKS = frozenset(".!?—–-:;")
 _APOSTROPHE_CHARS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _SURFACE_WORD = re.compile(r"\w+(?:'\w+)*")
 _ONE_SLOT = "one's"
+_REFLEXIVE_SLOT = "oneself"
+_REFLEXIVE_PRONOUNS = frozenset(
+    {
+        "myself",
+        "yourself",
+        "himself",
+        "herself",
+        "itself",
+        "ourselves",
+        "yourselves",
+        "themselves",
+        "oneself",
+    }
+)
+_OBJECT_SLOTS = frozenset({"someone", "somebody", "something", "sb", "sth"})
+_PERSONAL_OBJECT_WORDS = frozenset(
+    {"me", "you", "him", "her", "it", "us", "them", "someone", "somebody", "sb"}
+)
+_THING_OBJECT_WORDS = frozenset({"it", "them", "this", "that", "something", "sth"})
+_PLACEHOLDER_SLOTS = _OBJECT_SLOTS | frozenset({_ONE_SLOT, _REFLEXIVE_SLOT})
 _DOUBLED_CONSONANTS = frozenset("bdgmnprt")
 _LE_CONSONANTS = frozenset("bcdfgkpstz")
 _SILENT_E_TAILS = (
@@ -1279,20 +1299,67 @@ def _match_fixed(
     index: int,
     pattern: tuple[str, ...],
 ) -> int | None:
-    """End of a contiguous `pattern`. `one's` may be zero to two words."""
-    if not pattern:
-        if index <= 0 or index - 1 >= len(tokens):
+    """End of a contiguous `pattern` with `one's`, `oneself`, and object slots."""
+    memo: dict[tuple[int, int], int | None] = {}
+
+    def _search(pos: int, pat: tuple[str, ...]) -> int | None:
+        if not pat:
+            if pos <= 0 or pos - 1 >= len(tokens):
+                return None
+            return tokens[pos - 1][1]
+        key = (pos, len(pat))
+        if key in memo:
+            return memo[key]
+        head, tail = pat[0], pat[1:]
+        if head == _ONE_SLOT:
+            for skip in range(3):
+                if pos + skip > len(tokens):
+                    break
+                found = _search(pos + skip, tail)
+                if found is not None:
+                    memo[key] = found
+                    return found
+            memo[key] = None
             return None
-        return tokens[index - 1][1]
-    if pattern[0] == _ONE_SLOT:
-        for skip in range(3):
-            found = _match_fixed(tokens, index + skip, pattern[1:])
-            if found is not None:
-                return found
-        return None
-    if index >= len(tokens) or tokens[index][0] != pattern[0]:
-        return None
-    return _match_fixed(tokens, index + 1, pattern[1:])
+        if head == _REFLEXIVE_SLOT:
+            if pos >= len(tokens) or tokens[pos][0] not in _REFLEXIVE_PRONOUNS:
+                memo[key] = None
+                return None
+            found = _search(pos + 1, tail)
+            memo[key] = found
+            return found
+        if head in _OBJECT_SLOTS:
+            if tail:
+                for skip in range(1, 4):
+                    if pos + skip > len(tokens):
+                        break
+                    found = _search(pos + skip, tail)
+                    if found is not None:
+                        memo[key] = found
+                        return found
+                memo[key] = None
+                return None
+            if pos >= len(tokens):
+                memo[key] = None
+                return None
+            word = tokens[pos][0]
+            if head in {"someone", "somebody", "sb"}:
+                matched = word in _PERSONAL_OBJECT_WORDS
+            elif head == "sth":
+                matched = word in _THING_OBJECT_WORDS
+            else:
+                matched = word == "something"
+            found = tokens[pos][1] if matched else None
+            memo[key] = found
+            return found
+        if pos >= len(tokens) or tokens[pos][0] != head:
+            memo[key] = None
+            return None
+        found = _search(pos + 1, tail)
+        memo[key] = found
+        return found
+
+    return _search(index, pattern)
 
 
 def _match_shifted_object(
@@ -1304,6 +1371,8 @@ def _match_shifted_object(
     if len(pattern) < 2 or pattern[-1] not in _PHRASE_PREPOSITIONS:
         return None
     middle = pattern[:-1]
+    if all(token in _PLACEHOLDER_SLOTS for token in middle):
+        return None
     for skip in range(1, 3):
         found = _match_fixed(tokens, index + skip, middle)
         if found is not None:
@@ -1619,11 +1688,16 @@ def _headwords(original: str) -> tuple[str, ...]:
 
 
 def _note_quotes_translation(note: str, translation: str) -> bool:
-    """Whether `note` already contains the translation inside « »."""
+    """Whether `note` already contains the translation inside « », "...", or “...”."""
     quoted = translation.strip()
     if not quoted or not note.strip():
         return False
-    return f"«{quoted}»".casefold() in note.casefold()
+    folded_note = note.casefold()
+    folded_quoted = quoted.casefold()
+    return any(
+        f"{left}{folded_quoted}{right}" in folded_note
+        for left, right in (("«", "»"), ('"', '"'), ("“", "”"))
+    )
 
 
 def _has_russian_infinitive(text: str) -> bool:

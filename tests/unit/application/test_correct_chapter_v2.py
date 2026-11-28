@@ -3407,4 +3407,238 @@ async def test_wp4_batch_expectation_repair_on_10_blocks_3_blocks_and_payload_er
     assert all(b.treatment is BlockTreatment.TRANSLATE for b in fallback_exp.blocks)
 
 
+def test_candidate_changes_compact_diff_newlines_segments_and_review_request():
+    from linguary.application.use_cases.correct_chapter import _candidate_changes
+    from linguary.domain import GlossaryHint, LanguageNote
+
+    # 1. Short translated_text with space -> newline replacement preserves visible \n and before/after.
+    short_changes = _candidate_changes(
+        {"translated_text": "— Привет! Он ушёл."},
+        {"translated_text": "— Привет!\nОн ушёл."},
+    )
+    assert len(short_changes) == 1
+    assert short_changes[0]["field_path"] == "translated_text"
+    assert short_changes[0]["kind"] == "modified"
+    assert "[- -][+\\n+]" in short_changes[0]["diff"]
+    assert short_changes[0]["before"] == "— Привет! Он ушёл."
+    assert short_changes[0]["after"] == "— Привет!\nОн ушёл."
+
+    # 2. Long translated_text (> 120 chars) with two distant edits uses compact hunk diff without before/after.
+    middle = " ".join(f"слово{i}" for i in range(1, 30))
+    long_before = f"Начало два десятка {middle} конец починённый."
+    long_after = f"Начало две дюжины {middle} конец починенный."
+    assert len(long_before) > 120 and len(long_after) > 120
+    long_changes = _candidate_changes(
+        {"translated_text": long_before},
+        {"translated_text": long_after},
+    )
+    assert len(long_changes) == 1
+    assert long_changes[0]["kind"] == "modified"
+    assert "before" not in long_changes[0]
+    assert "after" not in long_changes[0]
+    assert " … " in long_changes[0]["diff"]
+    assert "[-два десятка-][+две дюжины+]" in long_changes[0]["diff"]
+    assert "[-починённый.-][+починенный.+]" in long_changes[0]["diff"]
+
+    # 3. Multi-segment blocks match strictly by 1-based seg['index'] (not list position).
+    seg_changes = _candidate_changes(
+        {
+            "translated_text": None,
+            "segments": [
+                {"index": 1, "translated_text": "Первый сегмент."},
+                {"index": 3, "translated_text": "Третий старый."},
+                {"index": 4, "translated_text": "Удалённый сегмент."},
+            ],
+        },
+        {
+            "translated_text": None,
+            "segments": [
+                {"index": 3, "translated_text": "Третий новый."},
+                {"index": 1, "translated_text": "Первый сегмент."},
+                {"index": 5, "translated_text": "Добавленный сегмент."},
+            ],
+        },
+    )
+    assert [c["field_path"] for c in seg_changes] == [
+        "segments.3.translated_text",
+        "segments.4.translated_text",
+        "segments.5.translated_text",
+    ]
+    assert seg_changes[0]["kind"] == "modified"
+    assert seg_changes[0]["before"] == "Третий старый."
+    assert seg_changes[0]["after"] == "Третий новый."
+    assert seg_changes[1] == {
+        "field_path": "segments.4.translated_text",
+        "kind": "removed",
+        "value": "Удалённый сегмент.",
+    }
+    assert seg_changes[2] == {
+        "field_path": "segments.5.translated_text",
+        "kind": "added",
+        "value": "Добавленный сегмент.",
+    }
+
+    # 4. glossary_hints and language_notes track field edits, optional add/remove, and list growth/shrink.
+    list_changes = _candidate_changes(
+        {
+            "translated_text": "Текст.",
+            "glossary_hints": [
+                {"original": "two dozen", "translation": "два десятка", "note": None},
+            ],
+            "language_notes": [
+                {
+                    "source_block_id": "b1",
+                    "original_excerpt": "First",
+                    "translated_excerpt": "Первый",
+                    "note": "Старая заметка.",
+                },
+                {
+                    "source_block_id": "b1",
+                    "original_excerpt": "Extra",
+                    "translated_excerpt": None,
+                    "note": "Лишняя заметка.",
+                },
+            ],
+        },
+        {
+            "translated_text": "Текст.",
+            "glossary_hints": [
+                {"original": "two dozen", "translation": "две дюжины", "note": "Устойчивое число."},
+                {"original": "owl", "translation": "сова", "note": None},
+            ],
+            "language_notes": [
+                {
+                    "source_block_id": "b1",
+                    "original_excerpt": "First",
+                    "translated_excerpt": None,
+                    "note": "Новая заметка.",
+                },
+            ],
+        },
+    )
+    by_path = {c["field_path"]: c for c in list_changes}
+    assert by_path["glossary_hints.0.translation"]["kind"] == "modified"
+    assert by_path["glossary_hints.0.translation"]["before"] == "два десятка"
+    assert by_path["glossary_hints.0.translation"]["after"] == "две дюжины"
+    assert by_path["glossary_hints.0.note"] == {
+        "field_path": "glossary_hints.0.note",
+        "kind": "added",
+        "value": "Устойчивое число.",
+    }
+    assert by_path["glossary_hints.1"]["kind"] == "added"
+    assert by_path["glossary_hints.1"]["value"]["original"] == "owl"
+    assert by_path["language_notes.0.translated_excerpt"] == {
+        "field_path": "language_notes.0.translated_excerpt",
+        "kind": "removed",
+        "value": "Первый",
+    }
+    assert by_path["language_notes.0.note"]["kind"] == "modified"
+    assert by_path["language_notes.1"]["kind"] == "removed"
+    assert by_path["language_notes.1"]["value"]["original_excerpt"] == "Extra"
+
+    # 5. _review_request attaches `changes` to each candidate without leaking raw block UUIDs.
+    section = make_analysis_section(texts=("Two dozen owls.",))
+    doc = make_analysis_document((section,))
+    b1, = section.blocks
+    plan = TreatmentPlan.of_treatments(section.id, ((b1.id, BlockTreatment.TRANSLATE),))
+    analysis = ChapterAnalysis.create(
+        id="analysis-diff",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id,),
+    )
+    cur_res = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Два десятка сов.",
+        glossary_hints=(GlossaryHint(original="two dozen", translation="два десятка"),),
+        language_notes=(
+            LanguageNote(id="ln-ch01-001", block_id=b1.id, original_excerpt="two dozen", note="Старое."),
+        ),
+    )
+    prop_res = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Две дюжины сов.",
+        glossary_hints=(GlossaryHint(original="two dozen", translation="две дюжины"),),
+        language_notes=(
+            LanguageNote(id="ln-ch01-001", block_id=b1.id, original_excerpt="two dozen", note="Новое."),
+        ),
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results={b1.id: cur_res},
+        bindings={b1.id: None},
+    )
+    cand_payload = json.loads(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "book_id": doc.id,
+                "run_id": "run",
+                "conditions_id": "cond-1",
+                "section_id": section.id,
+                "block_id": b1.id,
+                "input_sha256": inputs.checksums[b1.id],
+                "input_generation": 1,
+                "group_id": "g-1",
+                "proposal_attempt_id": "a-1",
+                "original": {"text": b1.text},
+                "current_result": asdict(cur_res),
+                "result": asdict(prop_res),
+                "proposal": {"issues": []},
+            }
+        )
+    )
+    candidate = CorrectionCandidate(
+        candidate_id="cand-diff-1",
+        book_id=doc.id,
+        run_id="run",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(cand_payload),
+        payload=cand_payload,
+        group_id="g-1",
+        proposal_attempt_id="a-1",
+    )
+    snapshot = SimpleNamespace(
+        prompt="Propose.",
+        review_prompt="Review.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    req = CorrectChapterV2(
+        unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None
+    )._review_request(inputs, SimpleNamespace(book_id=doc.id, id="t-1", scope_id=section.id), (candidate,))
+    body = json.loads(req.input_text)
+    cand_entry, = body["candidates"]
+    assert [c["field_path"] for c in cand_entry["changes"]] == [
+        "translated_text",
+        "glossary_hints.0.translation",
+        "language_notes.0.note",
+    ]
+    assert b1.id not in req.input_text
+
+    # Non-breaking spaces (`\u00a0`) are preserved losslessly in `_compact_text_diff`.
+    from linguary.application.use_cases.correct_chapter import _compact_text_diff
+
+    nbsp_diff = _compact_text_diff("Он купил два\u00a0десятка сов.", "Он купил две\u00a0дюжины сов.")
+    assert "два\u00a0десятка" in nbsp_diff
+    assert "две\u00a0дюжины" in nbsp_diff
+    assert "двадесятка" not in nbsp_diff
+    nbsp_to_space = _compact_text_diff("два\u00a0десятка", "два десятка")
+    assert "[-\u00a0-][+ +]" in nbsp_to_space
+
+
+
 

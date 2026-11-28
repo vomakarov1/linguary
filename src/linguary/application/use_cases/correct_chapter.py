@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import asdict, dataclass, replace
+import difflib
 from hashlib import sha256
 import json
 import re
@@ -657,6 +658,182 @@ def _llm_block_result(
     return out
 
 
+_SHORT_DIFF_MAX_LEN = 120
+_DIFF_CONTEXT_TOKENS = 5
+_DIFF_TOKEN_RE = re.compile(r"\n|[^\S\n]+|[^\s]+")
+_LIST_DIFF_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('glossary_hints', ('original', 'translation', 'note')),
+    ('language_notes', ('original_excerpt', 'translated_excerpt', 'note')),
+)
+
+
+def _render_diff_tokens(tokens: Sequence[str]) -> str:
+    return ''.join(token.replace('\n', '\\n') for token in tokens)
+
+
+def _coalesce_group_opcodes(
+    group: Sequence[tuple[str, int, int, int, int]],
+    before_tokens: Sequence[str],
+) -> list[tuple[str, int, int, int, int]]:
+    merged: list[tuple[str, int, int, int, int]] = []
+    idx = 0
+    while idx < len(group):
+        tag, i1, i2, j1, j2 = group[idx]
+        if tag != 'equal':
+            while (
+                idx + 2 < len(group)
+                and group[idx + 1][0] == 'equal'
+                and group[idx + 2][0] != 'equal'
+                and all(
+                    tok and '\n' not in tok and tok.isspace()
+                    for tok in before_tokens[group[idx + 1][1] : group[idx + 1][2]]
+                )
+            ):
+                i2 = group[idx + 2][2]
+                j2 = group[idx + 2][4]
+                tag = 'replace' if (i2 > i1 and j2 > j1) else ('delete' if i2 > i1 else 'insert')
+                idx += 2
+        merged.append((tag, i1, i2, j1, j2))
+        idx += 1
+    return merged
+
+
+def _compact_text_diff(
+    before: str,
+    after: str,
+    *,
+    context_tokens: int = _DIFF_CONTEXT_TOKENS,
+) -> str:
+    before_tokens = _DIFF_TOKEN_RE.findall(before)
+    after_tokens = _DIFF_TOKEN_RE.findall(after)
+    matcher = difflib.SequenceMatcher(None, before_tokens, after_tokens, autojunk=False)
+    groups = list(matcher.get_grouped_opcodes(n=context_tokens))
+    if not groups:
+        if before == after:
+            return ''
+        return f"[-{before.replace('\n', '\\n')}-][+{after.replace('\n', '\\n')}+]"
+    rendered_groups: list[str] = []
+    for group in groups:
+        parts: list[str] = []
+        for tag, i1, i2, j1, j2 in _coalesce_group_opcodes(group, before_tokens):
+            if tag == 'equal':
+                parts.append(_render_diff_tokens(before_tokens[i1:i2]))
+            elif tag == 'delete':
+                parts.append(f'[-{_render_diff_tokens(before_tokens[i1:i2])}-]')
+            elif tag == 'insert':
+                parts.append(f'[+{_render_diff_tokens(after_tokens[j1:j2])}+]')
+            elif tag == 'replace':
+                parts.append(
+                    f'[-{_render_diff_tokens(before_tokens[i1:i2])}-]'
+                    f'[+{_render_diff_tokens(after_tokens[j1:j2])}+]'
+                )
+        rendered_groups.append(''.join(parts).strip(' '))
+    prefix = '… ' if groups[0][0][1] > 0 or groups[0][0][3] > 0 else ''
+    suffix = (
+        ' …'
+        if groups[-1][-1][2] < len(before_tokens) or groups[-1][-1][4] < len(after_tokens)
+        else ''
+    )
+    return f"{prefix}{' … '.join(rendered_groups)}{suffix}"
+
+
+def _field_change_entry(field_path: str, before: Any, after: Any) -> dict[str, Any] | None:
+    if before == after:
+        return None
+    if before is None and after is not None:
+        return {'field_path': field_path, 'kind': 'added', 'value': after}
+    if before is not None and after is None:
+        return {'field_path': field_path, 'kind': 'removed', 'value': before}
+    if isinstance(before, str) and isinstance(after, str):
+        entry: dict[str, Any] = {
+            'field_path': field_path,
+            'kind': 'modified',
+            'diff': _compact_text_diff(before, after),
+        }
+        if len(before) <= _SHORT_DIFF_MAX_LEN and len(after) <= _SHORT_DIFF_MAX_LEN:
+            entry['before'] = before
+            entry['after'] = after
+        return entry
+    return {'field_path': field_path, 'kind': 'modified', 'before': before, 'after': after}
+
+
+def _segment_map(llm_result: Mapping[str, Any]) -> dict[int, Any]:
+    raw_segments = llm_result.get('segments')
+    if not isinstance(raw_segments, Sequence) or isinstance(raw_segments, (str, bytes)):
+        return {}
+    mapped: dict[int, Any] = {}
+    for seg in raw_segments:
+        if isinstance(seg, Mapping):
+            seg_index = seg.get('index')
+            if isinstance(seg_index, int) and not isinstance(seg_index, bool):
+                mapped[seg_index] = seg.get('translated_text')
+    return mapped
+
+
+def _candidate_changes(
+    current_llm: Mapping[str, Any],
+    proposed_llm: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    text_change = _field_change_entry(
+        'translated_text',
+        current_llm.get('translated_text'),
+        proposed_llm.get('translated_text'),
+    )
+    if text_change is not None:
+        changes.append(text_change)
+
+    current_segs = _segment_map(current_llm)
+    proposed_segs = _segment_map(proposed_llm)
+    for seg_index in sorted(set(current_segs) | set(proposed_segs)):
+        path = f'segments.{seg_index}.translated_text'
+        if seg_index not in current_segs:
+            changes.append({'field_path': path, 'kind': 'added', 'value': proposed_segs[seg_index]})
+        elif seg_index not in proposed_segs:
+            changes.append({'field_path': path, 'kind': 'removed', 'value': current_segs[seg_index]})
+        else:
+            seg_change = _field_change_entry(path, current_segs[seg_index], proposed_segs[seg_index])
+            if seg_change is not None:
+                changes.append(seg_change)
+
+    for list_key, editable_fields in _LIST_DIFF_FIELDS:
+        raw_cur = current_llm.get(list_key)
+        raw_prop = proposed_llm.get(list_key)
+        cur_list = (
+            list(raw_cur)
+            if isinstance(raw_cur, Sequence) and not isinstance(raw_cur, (str, bytes))
+            else []
+        )
+        prop_list = (
+            list(raw_prop)
+            if isinstance(raw_prop, Sequence) and not isinstance(raw_prop, (str, bytes))
+            else []
+        )
+        common = min(len(cur_list), len(prop_list))
+        for idx in range(common):
+            cur_item = cur_list[idx]
+            prop_item = prop_list[idx]
+            if isinstance(cur_item, Mapping) and isinstance(prop_item, Mapping):
+                for field_name in editable_fields:
+                    entry = _field_change_entry(
+                        f'{list_key}.{idx}.{field_name}',
+                        cur_item.get(field_name),
+                        prop_item.get(field_name),
+                    )
+                    if entry is not None:
+                        changes.append(entry)
+            elif cur_item != prop_item:
+                entry = _field_change_entry(f'{list_key}.{idx}', cur_item, prop_item)
+                if entry is not None:
+                    changes.append(entry)
+        for idx in range(common, len(prop_list)):
+            changes.append({'field_path': f'{list_key}.{idx}', 'kind': 'added', 'value': prop_list[idx]})
+        for idx in range(common, len(cur_list)):
+            changes.append({'field_path': f'{list_key}.{idx}', 'kind': 'removed', 'value': cur_list[idx]})
+
+    return changes
+
+
 def _batch_expectation(inputs: Any, block_ids: Sequence[str]) -> ResultExpectation:
     """Build a retry expectation covering every block in the correction batch in order."""
     originals = {b.id: b for b in inputs.blocks}
@@ -737,29 +914,47 @@ class CorrectChapter:
         return inputs, task, payload
 
     def _request(self, inputs, task, block_ids):
-        raw_analysis = (
-            getattr(inputs, 'analysis', None)
-            or (inputs.context.get('chapter_analysis') if isinstance(getattr(inputs, 'context', None), Mapping) else None)
-        )
-        difficulty_aliases = _difficulty_aliases(raw_analysis)
+        difficulty_aliases = _inputs_difficulty_aliases(inputs)
+        fact_aliases = _inputs_fact_aliases(inputs)
         context = _filtered_chapter_context(inputs, block_ids)
         aliases = getattr(inputs, 'block_aliases', {})
+        is_v2 = isinstance(self.snapshot, CorrectionSnapshotV2)
         blocks_payload = []
         for block_id in block_ids:
             alias = aliases.get(block_id, block_id)
+            result = inputs.results.get(block_id)
             current_result = (
                 _llm_block_result(
-                    asdict(inputs.results[block_id]),
+                    asdict(result),
                     aliases,
                     difficulty_aliases=difficulty_aliases,
                 )
-                if block_id in inputs.results
+                if result is not None
                 else {}
             )
-            blocks_payload.append(dict(
+            block_entry: dict[str, Any] = dict(
                 block_id=alias,
                 current_result=current_result,
-            ))
+            )
+            warnings = getattr(result, 'warnings', None) if result is not None else None
+            if is_v2 and warnings:
+                aliased_warnings: list[str] = []
+                for w in warnings:
+                    raw_msg = w.get('message') if isinstance(w, Mapping) else getattr(w, 'message', None)
+                    if not isinstance(raw_msg, str) or not raw_msg.strip():
+                        continue
+                    aliased_warnings.append(
+                        _alias_error_for_retry(
+                            raw_msg.strip(),
+                            aliases,
+                            difficulty_aliases,
+                            fact_aliases,
+                        )
+                    )
+                deduped_warnings = list(dict.fromkeys(aliased_warnings))
+                if deduped_warnings:
+                    block_entry['validator_warnings'] = deduped_warnings
+            blocks_payload.append(block_entry)
         block_aliases = tuple((aliases[b], b) for b in block_ids if b in aliases)
         request = LLMRequest.for_chapter_correction(
             instructions=self.snapshot.prompt,
@@ -1510,35 +1705,35 @@ class CorrectChapterV2(CorrectChapter):
         raise ResultValidationError('исчерпаны попытки предложения исправления')
 
     def _review_request(self, inputs, task, candidates):
-        raw_analysis = (
-            getattr(inputs, 'analysis', None)
-            or (inputs.context.get('chapter_analysis') if isinstance(getattr(inputs, 'context', None), Mapping) else None)
-        )
-        difficulty_aliases = _difficulty_aliases(raw_analysis)
+        difficulty_aliases = _inputs_difficulty_aliases(inputs)
         allowed_block_ids = {c.block_id for c in candidates}
         context = _filtered_chapter_context(inputs, allowed_block_ids)
         for key in ('run_glossary', 'chapter_analysis', 'chapter_blocks'):
             context.setdefault(key, None)
         aliases = getattr(inputs, 'block_aliases', {})
-        candidates_payload = [
-            dict(
-                candidate_id=f'c{idx}',
-                block_id=aliases.get(c.block_id, c.block_id),
-                original=thaw(c.payload['original']),
-                current_result=_llm_block_result(
-                    thaw(c.payload['current_result']),
-                    aliases,
-                    difficulty_aliases=difficulty_aliases,
-                ),
-                proposed_result=_llm_block_result(
-                    thaw(c.payload['result']),
-                    aliases,
-                    difficulty_aliases=difficulty_aliases,
-                ),
-                issues=thaw(c.payload['proposal']['issues']),
+        candidates_payload = []
+        for idx, c in enumerate(candidates, start=1):
+            current_llm = _llm_block_result(
+                thaw(c.payload['current_result']),
+                aliases,
+                difficulty_aliases=difficulty_aliases,
             )
-            for idx, c in enumerate(candidates, start=1)
-        ]
+            proposed_llm = _llm_block_result(
+                thaw(c.payload['result']),
+                aliases,
+                difficulty_aliases=difficulty_aliases,
+            )
+            candidates_payload.append(
+                dict(
+                    candidate_id=f'c{idx}',
+                    block_id=aliases.get(c.block_id, c.block_id),
+                    original=thaw(c.payload['original']),
+                    current_result=current_llm,
+                    proposed_result=proposed_llm,
+                    changes=_candidate_changes(current_llm, proposed_llm),
+                    issues=thaw(c.payload['proposal']['issues']),
+                )
+            )
         return LLMRequest.for_chapter_correction_review(
             instructions=self.snapshot.review_prompt,
             input_text=_request_input_json(context, payload_key='candidates', payload_value=candidates_payload),
