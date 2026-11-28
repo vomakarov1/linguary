@@ -47,6 +47,10 @@ markers = [
 
 [tool.ruff]
 src = ["src"]
+# Antigravity run_workflow provides injected globals and top-level await.
+extend-exclude = [
+    ".agents/skills/linguary-subagent-run/scripts/subagent_bridge_workflow.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "B", "ASYNC", "S", "RUF"]
