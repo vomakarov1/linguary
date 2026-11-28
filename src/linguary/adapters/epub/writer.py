@@ -461,7 +461,9 @@ def _pronunciation_notices_chapter(
         paragraph = _sub(section, 'p')
         link = _sub(paragraph, 'a', {'href': link_href})
         link.text = IPA_KEY_LINK_LABEL
-    _sub(section, 'a', {'href': _relative_href(href, provenance_href)}).text = 'Использованные транскрипции (JSON)'
+    provenance_para = _sub(section, 'p')
+    provenance_para.text = 'Использованные транскрипции (JSON): '
+    _sub(provenance_para, 'code').text = _relative_href(href, provenance_href)
     _sub(section, 'pre').text = notices.text
     return _Chapter('linguary-pronunciation-sources', href, title, root)
 

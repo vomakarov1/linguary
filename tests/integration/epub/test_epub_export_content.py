@@ -1139,6 +1139,10 @@ async def test_ipa_dict_epub_contains_used_source_licenses_and_provenance(tmp_pa
     run, _, results = await ipa_dict_export(tmp_path)
     pages = pronunciation_nodes(run.path, 'section', 'linguary-pronunciation-sources')
     assert len(pages) == 1
+    assert not any(
+        (link.get('href') or '').endswith('.json')
+        for link in elements(pages[0][1], 'a')
+    )
     text = ''.join(pages[0][1].itertext())
     assert all(value in text for value in (SOURCE_VERSION, 'GNU GENERAL PUBLIC LICENSE', 'MIT License'))
     with zipfile.ZipFile(run.path) as archive:
