@@ -10,7 +10,6 @@ Linguary CLI itself is invoked via `uv run python -m linguary.cli`).
 
 import asyncio
 import json
-import os
 import re
 import shutil
 import time
@@ -550,6 +549,10 @@ with urllib.request.urlopen(req, timeout=120) as resp:
         book_id = str(args.get("book_id") or re.sub(r"[^a-z0-9-]+", "-", epub_path.stem.lower()).strip("-"))
         output_epub = Path(str(args.get("output_epub") or (work_dir / f"{book_id}-{reader_level}-adapted.epub"))).expanduser()
 
+        if resume_from not in ("", "analyze", "process", "worker", "retry_failed", "export"):
+            raise ValueError(
+                f"Unsupported resume_from={resume_from!r}; expected one of '', 'analyze', 'process', 'worker', 'retry_failed', 'export'"
+            )
         if not resume_from:
             if data_root.exists():
                 shutil.rmtree(data_root)
@@ -588,25 +591,10 @@ with urllib.request.urlopen(req, timeout=120) as resp:
 
         if auto_accept_glossary and resume_from in ("", "analyze", "process"):
             phase("Approve Flagged Glossary Items")
-            approve_code = f"""
-import asyncio
-from linguary.adapters.config import load_settings
-from linguary.composition import build_application
-
-settings = load_settings(config_path={str(config_path)!r})
-app = build_application(settings=settings)
-try:
-    review = app.approve_glossary.review({book_id!r})
-    pending = [i.source_text for i in review.items if i.requires_review and i.decision is None]
-    if pending:
-        app.approve_glossary.accept_all_awaiting({book_id!r})
-        print(f"Auto-accepted {{len(pending)}} flagged glossary item(s): {{pending}}")
-    else:
-        print("No pending glossary items.")
-finally:
-    asyncio.run(app.aclose())
-"""
-            await run_cmd(["uv", "run", "python", "-c", approve_code], "approve-glossary")
+            await run_cmd(
+                base_cmd + ["glossary", "accept-all", book_id, "--json"],
+                "approve-glossary",
+            )
 
         if resume_from in ("", "analyze", "process", "worker", "retry_failed"):
             phase("Process, Translate & Correct")

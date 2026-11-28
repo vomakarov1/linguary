@@ -667,10 +667,13 @@ def _collect_referenced_resource_paths(
     css_resources = {
         _contained_name(resource.source_path): resource
         for resource in request.document.resources
-        if resource.support_status in _EXPORTED_STATUSES and resource.media_type == "text/css"
+        if resource.support_status in _EXPORTED_STATUSES
+        and resource.media_type.split(";", 1)[0].strip().lower() == "text/css"
     }
     visited_css: set[str] = set()
-    pending_css = [href for href in css_resources if href in referenced]
+    pending_css = [
+        href for href in css_resources if href in referenced or unquote(href) in referenced
+    ]
     while pending_css:
         css_href = pending_css.pop()
         if css_href in visited_css:
@@ -691,7 +694,10 @@ def _collect_referenced_resource_paths(
             _add_resolved_ref(referenced, match.group(1), base=css_href)
         if len(referenced) > before:
             for href in css_resources:
-                if href in referenced and href not in visited_css:
+                if (
+                    (href in referenced or unquote(href) in referenced)
+                    and href not in visited_css
+                ):
                     pending_css.append(href)
     return referenced
 
@@ -704,7 +710,9 @@ def _read_source_dc_metadata(source_epub_path: str | None) -> tuple[str | None, 
     if not path.is_file():
         return None, None
     try:
-        parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
+        parser = etree.XMLParser(
+            resolve_entities=False, load_dtd=False, no_network=True, recover=False
+        )
         with zipfile.ZipFile(path) as archive:
             opf_path = package_path(archive)
             opf_root = etree.fromstring(archive.read(opf_path), parser=parser)
@@ -1337,6 +1345,15 @@ def _deduplicate_ids(chapter: _Chapter, warnings: _ExportWarnings) -> set[str]:
     return seen
 
 
+def _match_known_path(path: str, known: set[str] | frozenset[str]) -> str | None:
+    if path in known:
+        return path
+    unquoted = unquote(path)
+    if unquoted in known:
+        return unquoted
+    return None
+
+
 def _resolve_link(
     element: etree._Element,
     *,
@@ -1350,8 +1367,9 @@ def _resolve_link(
     if not href or _is_external(href):
         return
     path, fragment = _resolve_target(href, base=chapter.href)
-    resolved = path in known_files and (
-        not fragment or fragment in anchors.get(path, frozenset())
+    matched = _match_known_path(path, known_files)
+    resolved = matched is not None and (
+        not fragment or fragment in anchors.get(matched, frozenset())
     )
     if resolved:
         return
@@ -1379,7 +1397,7 @@ def _resolve_image(
         return
     if source:
         path, _ = _resolve_target(source, base=chapter.href)
-        if path in known_files:
+        if _match_known_path(path, known_files) is not None:
             return
     _unwrap(element)
     warnings.record(
@@ -1923,14 +1941,15 @@ def _link_failures(
     if not href or _is_external(href):
         return []
     path, fragment = _resolve_target(href, base=name)
-    if path not in names:
+    matched = _match_known_path(path, names)
+    if matched is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.LINK,
                 f"ссылка {href} из документа {name} ведёт на отсутствующий файл {path}",
             )
         ]
-    if fragment and fragment not in anchors.get(path, frozenset()):
+    if fragment and fragment not in anchors.get(matched, frozenset()):
         return [
             ExportCheckFailure(
                 ExportCheckKind.LINK,
@@ -1953,14 +1972,15 @@ def _image_failures(
     if not source or _is_external(source):
         return []
     path, _ = _resolve_target(source, base=name)
-    if path not in names:
+    matched = _match_known_path(path, names)
+    if matched is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.RESOURCE,
                 f"изображение {source} из документа {name} отсутствует в архиве",
             )
         ]
-    if path not in declared:
+    if _match_known_path(path, declared) is None:
         return [
             ExportCheckFailure(
                 ExportCheckKind.RESOURCE,

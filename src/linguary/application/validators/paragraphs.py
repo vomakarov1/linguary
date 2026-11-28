@@ -21,7 +21,8 @@ from linguary.domain.llm_log import Violation
 _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–')
 _DIALOGUE_DASHES = ('—', '–', '-')
 _POST_SPEECH_CLOSE_RE = re.compile(r"""[.!?…]["”’'](?=\s)""")
-_LOWERCASE_REMARK_CLOSE_RE = re.compile(r"""[,!?…]["”’'](?=\s+[a-z])""")
+_COMMA_REMARK_CLOSE_RE = re.compile(r""",["”’'](?=\s+[^"“‘«\s])""")
+_LOWERCASE_REMARK_CLOSE_RE = re.compile(r"""[!?…]["”’'](?=\s+[a-z])""")
 _ENGLISH_ABBREV_END_RE = re.compile(
     r"(?:(?<![A-Za-z])(?i:Mr|Mrs|Ms|Dr|St|Prof)\.|(?<![A-Za-z])[A-Z]\.)$"
 )
@@ -65,30 +66,31 @@ def _count_post_speech_narrative_sentences(source_text: str) -> int:
         rest = source_text[after_pos:].lstrip()
         if rest and rest[0].isupper():
             count += 1
-    for match in _LOWERCASE_REMARK_CLOSE_RE.finditer(source_text):
-        after_pos = match.end()
-        if _outer_unclosed_open(source_text, after_pos) is not None:
-            continue
-        idx = after_pos
-        length = len(source_text)
-        while idx < length:
-            ch = source_text[idx]
-            if ch == "\n" or ch in _OPENING_QUOTE_CHARS:
-                break
-            if ch in ".!?…":
-                if (
-                    ch == "."
-                    and _ENGLISH_ABBREV_END_RE.search(source_text[after_pos : idx + 1]) is not None
-                ):
-                    idx += 1
-                    continue
-                if _outer_unclosed_open(source_text, idx + 1) is not None:
+    for pattern in (_COMMA_REMARK_CLOSE_RE, _LOWERCASE_REMARK_CLOSE_RE):
+        for match in pattern.finditer(source_text):
+            after_pos = match.end()
+            if _outer_unclosed_open(source_text, after_pos) is not None:
+                continue
+            idx = after_pos
+            length = len(source_text)
+            while idx < length:
+                ch = source_text[idx]
+                if ch == "\n" or ch in _OPENING_QUOTE_CHARS:
                     break
-                rest = source_text[idx + 1 :].lstrip()
-                if rest and rest[0].isupper():
-                    count += 1
-                break
-            idx += 1
+                if ch in ".!?…":
+                    if (
+                        ch == "."
+                        and _ENGLISH_ABBREV_END_RE.search(source_text[after_pos : idx + 1]) is not None
+                    ):
+                        idx += 1
+                        continue
+                    if _outer_unclosed_open(source_text, idx + 1) is not None:
+                        break
+                    rest = source_text[idx + 1 :].lstrip()
+                    if rest and rest[0].isupper():
+                        count += 1
+                    break
+                idx += 1
     return count
 
 

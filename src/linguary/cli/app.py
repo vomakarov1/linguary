@@ -815,7 +815,21 @@ def _candidate_snippet(candidate: Any) -> tuple[str | None, str | None]:
         if isinstance(candidate.payload, Mapping)
         else None
     )
-    prop_text = proposed.get("translated_text") if isinstance(proposed, Mapping) else None
+    prop_text: str | None = None
+    if isinstance(proposed, Mapping):
+        raw_text = proposed.get("translated_text")
+        if isinstance(raw_text, str):
+            prop_text = raw_text
+        elif isinstance(proposed.get("segments"), Sequence) and not isinstance(
+            proposed.get("segments"), (str, bytes)
+        ):
+            parts = [
+                seg.get("translated_text")
+                for seg in proposed["segments"]
+                if isinstance(seg, Mapping) and isinstance(seg.get("translated_text"), str)
+            ]
+            if parts:
+                prop_text = " ".join(parts)
     review = candidate.review if isinstance(candidate.review, Mapping) else None
     reason = review.get("reason") if isinstance(review, Mapping) else None
     return reason, prop_text
@@ -892,8 +906,10 @@ def _corrections_resolve(args: argparse.Namespace) -> int:
                 candidate = tx.work.get_correction_candidate(args.candidate_id)
                 if candidate is None or candidate.book_id != args.book_id:
                     raise CorrectionCandidateNotFound("предложение исправления не найдено")
-                proposal_sha256 = proposal_sha256 or candidate.proposal_sha256
-                input_sha256 = input_sha256 or candidate.input_sha256
+                if proposal_sha256 is None:
+                    proposal_sha256 = candidate.proposal_sha256
+                if input_sha256 is None:
+                    input_sha256 = candidate.input_sha256
         block_id = resolver(
             ResolveCorrectionCommand(
                 book_id=args.book_id,

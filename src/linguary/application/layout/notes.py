@@ -607,6 +607,9 @@ def block_notes(
 
 
 _LEADING_ARTICLES = frozenset({"a", "an", "the"})
+_PROTECTED_ARTICLE_PHRASES = frozenset(
+    {"a bit", "a few", "a little", "a lot", "a while", "a dozen", "the same", "the other", "the rest"}
+)
 
 
 def vocabulary_dedup_key(original: str) -> str:
@@ -616,7 +619,12 @@ def vocabulary_dedup_key(original: str) -> str:
         return original.strip().casefold()
     if len(words) >= 2 and words[0] == "to" and words[1] not in _NOT_A_VERB_AFTER_TO:
         words = words[1:]
-    elif len(words) >= 2 and words[0] in _LEADING_ARTICLES:
+    elif (
+        len(words) >= 2
+        and words[0] in _LEADING_ARTICLES
+        and " ".join(words) not in _PROTECTED_ARTICLE_PHRASES
+        and words[1] not in _IRREGULAR_TO_BASE
+    ):
         words = words[1:]
     head = _canonical_vocab_word(words[0])
     if len(words) == 1:

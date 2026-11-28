@@ -659,4 +659,18 @@ def test_is_trivial_a1_hint_strips_leading_articles() -> None:
     assert is_trivial_a1_hint("the glasses") is True
     assert is_trivial_a1_hint("a wand") is False
     assert is_trivial_a1_hint("a went") is False
+    for homograph in (
+        "a can",
+        "a will",
+        "the will",
+        "a spell",
+        "a watch",
+        "a fall",
+        "the rest",
+        "a study",
+        "a well",
+        "a fly",
+        "a kind",
+    ):
+        assert is_trivial_a1_hint(homograph) is False, f"false A1 homograph: {homograph}"
 

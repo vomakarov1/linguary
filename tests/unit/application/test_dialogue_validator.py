@@ -704,6 +704,14 @@ def test_wp6_post_quote_narrative_dash_rejected_and_newline_allowed() -> None:
             "‘Hello!’ he cried. Then he ran.",
             "— Привет! — крикнул он. — Потом он убежал.",
         ),
+        (
+            "‘Hello,’ he said. He didn’t move.",
+            "— Привет, — сказал он. — Он не двинулся.",
+        ),
+        (
+            "‘Hello,’ Harry said. He ruffled Dudley’s hair.",
+            "— Привет, — сказал Гарри. — Он взъерошил Дадли волосы.",
+        ),
     )
     for src, bad_tr in bad_cases:
         assert _check(bad_tr, source_text=src, strict_v3=True) is not None, f"missed: {bad_tr}"
@@ -716,6 +724,10 @@ def test_wp6_post_quote_narrative_dash_rejected_and_newline_allowed() -> None:
         (
             "‘Hello,’ he said. Then he ran.",
             "— Привет, — сказал он.\nПотом он убежал.",
+        ),
+        (
+            "‘Hello,’ Harry said. He didn’t move.",
+            "— Привет, — сказал Гарри.\nОн не двинулся.",
         ),
         (
             "‘Look at that!’ he yelled. ‘Look!’ Aunt Petunia gasped.",

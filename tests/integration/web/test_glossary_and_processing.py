@@ -443,6 +443,12 @@ def test_processing_start_rejects_incompatible_route_atomically(
 
     assert response.status_code == 409
     assert response.json()["detail"] == {"reason_code": "route_unavailable"}
+    html_response = configured_client.post(
+        f"/books/{scenario.book_id}/process",
+        headers={"Accept": "text/html"},
+    )
+    assert html_response.status_code == 409
+    assert "text/html" in html_response.headers["content-type"]
     with configured_application.unit_of_work.transaction() as uow:
         assert uow.runs.active_for_book(scenario.book_id) is None
         assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS

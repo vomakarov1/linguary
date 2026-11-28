@@ -1715,5 +1715,8 @@ def test_vocabulary_dedup_key_strips_leading_articles() -> None:
     assert vocabulary_dedup_key("a wand") == vocabulary_dedup_key("wand")
     assert vocabulary_dedup_key("an owl") == vocabulary_dedup_key("owl")
     assert vocabulary_dedup_key("to the door") != vocabulary_dedup_key("door")
+    assert vocabulary_dedup_key("a bit") != vocabulary_dedup_key("to bite")
+    assert vocabulary_dedup_key("a few") != vocabulary_dedup_key("few")
+    assert vocabulary_dedup_key("the same") != vocabulary_dedup_key("same")
 
 

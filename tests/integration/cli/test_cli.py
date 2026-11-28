@@ -1392,7 +1392,6 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
         ProcessingRunStatus,
     )
     from linguary.domain.content_plan import canonical_sha
-    from linguary.domain.correction import CorrectionCandidate
 
     config = _config(tmp_path, llm_model="gpt-test", api_key="test-key")
     assert main(["--config", str(config), "import", str(SYNTHETIC_EPUB), "--book-id", "book-corr"]) == 0
@@ -1515,6 +1514,24 @@ def test_cli_corrections_list_resolve_and_export_strict_corrections(
     assert captured_commands[0].proposal_sha256 == expected_prop_sha
     assert captured_commands[0].input_sha256 == "in-sha-1"
     assert captured_commands[0].reason == "Оригинал точнее"
+
+    blank_reason_code = main(
+        [
+            "--config",
+            str(config),
+            "corrections",
+            "resolve",
+            "book-corr",
+            "cand-corr-1",
+            "--action",
+            "keep",
+            "--reason",
+            "   ",
+            "--json",
+        ]
+    )
+    assert blank_reason_code == 1
+    assert "error" in capsys.readouterr().err
 
 
 

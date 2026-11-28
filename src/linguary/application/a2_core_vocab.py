@@ -947,6 +947,17 @@ _A1_S_ROOTS: frozenset[str] = (
     - _NON_CORE_OVERRIDE
 )
 _A1_VERB_ROOTS: frozenset[str] = _A1_VERBS - _NON_CORE_OVERRIDE
+_ARTICLE_HOMOGRAPH_EXCLUSIONS: frozenset[str] = frozenset(
+    {"can", "will", "spell", "watch", "fall", "rest", "study", "well", "fly", "kind"}
+)
+_A1_ARTICLE_NOUN_ROOTS: frozenset[str] = (
+    (_A1_NOUNS | _A1_INTERNATIONALISMS)
+    - _NON_CORE_OVERRIDE
+    - _A1_VERBS
+    - _A1_FUNCTION_AND_TIME
+    - _A1_ADJECTIVES_AND_ADVERBS
+    - _ARTICLE_HOMOGRAPH_EXCLUSIONS
+)
 
 
 def _normalize_token(word: str) -> str:
@@ -1146,7 +1157,9 @@ def is_trivial_a1_hint(original: str) -> bool:
     if has_to_prefix:
         return cleaned in _A1_VERB_ROOTS
     if has_article_prefix:
-        return cleaned in A1_TRIVIAL_HINT_WORDS or _matches_plural_or_3sg(cleaned, _A1_S_ROOTS)
+        return cleaned in _A1_ARTICLE_NOUN_ROOTS or _matches_plural_or_3sg(
+            cleaned, _A1_ARTICLE_NOUN_ROOTS
+        )
     if cleaned in A1_TRIVIAL_HINT_WORDS or cleaned in _A1_IRREGULAR_TO_BASE:
         return True
     return (

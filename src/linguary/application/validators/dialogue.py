@@ -414,15 +414,30 @@ def _has_block_post_quote_narrative_dash(
     """Under strict v3: checks per segment when `block.segments` is non-empty."""
     if block is not None and block.segments and item is not None:
         spans = item.block.segment_spans
-        for segment in sorted(block.segments, key=lambda seg: seg.index):
+        ordered = sorted(block.segments, key=lambda seg: seg.index)
+        for segment in ordered:
             if not (1 <= segment.index <= len(spans)):
                 continue
             span = spans[segment.index - 1]
+            seg_source = item.block.text[span.start : span.end]
             if _has_dash_before_post_quote_narration(
                 segment.translated_text,
-                source_text=item.block.text[span.start : span.end],
+                source_text=seg_source,
             ):
                 return True
+            if (
+                segment.index > 1
+                and not has_direct_speech_quotes(seg_source)
+                and seg_source.lstrip()[:1].isupper()
+                and segment.translated_text.lstrip().startswith(("—", "–"))
+            ):
+                prev_span = spans[segment.index - 2]
+                prev_source = item.block.text[prev_span.start : prev_span.end]
+                if (
+                    has_direct_speech_quotes(prev_source)
+                    and _outer_unclosed_open(item.block.text, span.start) is None
+                ):
+                    return True
         return False
     return _has_dash_before_post_quote_narration(text, source_text=source_text)
 
@@ -476,8 +491,8 @@ def _has_dash_before_post_quote_narration(
             _count_post_speech_narrative_sentences,
         )
 
-        if _count_post_speech_narrative_sentences(source_text) > 0 and not any(
-            ch in _QUOTE_CHARS for ch in tail
+        if _count_post_speech_narrative_sentences(source_text) > 0 and not _top_level_quote_spans(
+            tail
         ):
             return True
     return False

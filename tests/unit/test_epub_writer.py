@@ -1030,8 +1030,8 @@ def test_meaningful_part_divider_renders_layout_help_without_chapter_front_or_re
 def test_epub_writer_prunes_unreferenced_resources_and_preserves_dc_rights_description(tmp_path) -> None:
     """WP2: layout export drops unreferenced CSS/xpgt/images, keeps referenced ones, and transfers dc:rights/description."""
     import zipfile
+    from dataclasses import replace
     from linguary.adapters.epub.writer import EpubExportWriter
-    from linguary.application.layout.book import BookLayout
     from linguary.domain import DocumentResource, SupportStatus
 
     img_used = tmp_path / "used.png"
@@ -1121,13 +1121,36 @@ def test_epub_writer_prunes_unreferenced_resources_and_preserves_dc_rights_descr
         )
     )
 
-    assert not any("gone.png" in w.message for w in exported.warnings)
+    assert exported.warnings == ()
     with zipfile.ZipFile(target) as zf:
         names = set(zf.namelist())
         opf = zf.read("OEBPS/content.opf").decode("utf-8")
+        ch1_xhtml = zf.read("OEBPS/Text/ch1.xhtml").decode("utf-8")
     assert "OEBPS/Images/fig 1.png" in names
+    assert "../Images/fig%201.png" in ch1_xhtml
+    assert "<img" in ch1_xhtml
     assert "OEBPS/Images/logo.png" not in names
     assert "OEBPS/Styles/hp_style.css" not in names
     assert "OEBPS/page-template.xpgt" not in names
     assert "Copyright 2026 Author" in opf
     assert "A classic story." in opf
+
+    # Partial BookMetadata (rights set, description None) keeps own rights and falls back to source description.
+    doc_partial = replace(
+        doc,
+        metadata=BookMetadata(title="Book", rights="Custom Rights", description=None),
+    )
+    target_partial = tmp_path / "out_partial.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=doc_partial,
+            target_path=str(target_partial),
+            source_epub_path=str(source_epub),
+            stored_resource_paths={"Images/fig 1.png": str(img_used)},
+            layout=layout,
+        )
+    )
+    with zipfile.ZipFile(target_partial) as zf:
+        opf_partial = zf.read("OEBPS/content.opf").decode("utf-8")
+    assert "Custom Rights" in opf_partial
+    assert "A classic story." in opf_partial

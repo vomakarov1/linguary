@@ -3803,6 +3803,8 @@ def test_post_speech_narrative_paragraph_allows_1_line_and_3_line_and_rejects_ab
     assert _count_post_speech_narrative_sentences("‘Hello,’ said Mr. Ollivander. ‘Wait.’") == 0
     assert _count_post_speech_narrative_sentences("‘Hello,’ he said. Then he ran.") == 1
     assert _count_post_speech_narrative_sentences("‘Hello!’ he cried. Then he ran.") == 1
+    assert _count_post_speech_narrative_sentences("‘Hello,’ Harry said.") == 0
+    assert _count_post_speech_narrative_sentences("‘Hello,’ Harry said. Then he ran.") == 1
 
     one_line = (
         "— Что ж, мистер Поттер. Посмотрим. "

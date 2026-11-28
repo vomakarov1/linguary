@@ -103,10 +103,10 @@ Key argument notes:
 - **`port` (default `18787`):** ALWAYS keep a fixed deterministic port across retries/resumes!
   Linguary pins `base_url` (including port) inside `book_conditions` and `work_bindings`;
   changing the port mid-run triggers `route_unavailable`.
-- **`auto_accept_glossary` (default `true`):** After `worker-analyze`, if any model-flagged
-  terms keep the book in `GLOSSARY_REVIEW`, the script calls Linguary's own
-  `approve_glossary.accept_all_awaiting(book_id)` before `process` so the pipeline completes
-  hands-free. Set `false` if you want to inspect and decide glossary items manually.
+- **`auto_accept_glossary` (default `true`):** After `worker-analyze`, the script invokes
+  `uv run python -m linguary.cli glossary accept-all <book_id> --json` before `process` so
+  any model-flagged terms are approved hands-free. Set `false` if you want to inspect items
+  manually via `linguary glossary list <book_id> --pending-only`.
 - **`resume_from`:** Optional (`""` = fresh run wiping `work_dir/linguary_data`, `"analyze"`,
   `"process"`, `"worker"`, `"retry_failed"`, `"export"`). Preserves existing `linguary.db`
   and appends to `bridge_metrics.json`.
@@ -131,5 +131,6 @@ When the workflow completes, check:
 - **Long pedagogical calls timing out:** Increase `timeout_seconds` (default `600`) or switch
   `pedagogical_tier` to `"flash"`.
 - **Unresolved `awaiting_human` correction candidates:** `linguary export` prints a warning
-  to stderr and still writes the EPUB. Inspect `correction_candidates` in SQLite if strict
-  manual review is required.
+  to stderr and still writes the EPUB (pass `--strict-corrections` to fail instead). Inspect
+  and resolve candidates via `linguary corrections list <book_id> --awaiting-only` and
+  `linguary corrections resolve <book_id> <candidate_id> --action {accept|keep}`.
